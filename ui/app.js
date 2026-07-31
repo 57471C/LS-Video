@@ -42,9 +42,38 @@ const Command =
 const writeTextFile = window.__TAURI__?.fs?.writeTextFile || null;
 const remove = window.__TAURI__?.fs?.remove || null;
 const exists = window.__TAURI__?.fs?.exists || null;
-const tempdir = window.__TAURI__?.os?.tempdir || null;
-const join = window.__TAURI__?.path?.join || null;
+// Tauri 2 path API (withGlobalTauri). Older code looked at os.tempdir — that is gone.
+const tempDirFn =
+	window.__TAURI__?.path?.tempDir ||
+	window.__TAURI__?.path?.tempdir ||
+	window.__TAURI__?.os?.tempdir ||
+	null;
+const joinPathFn = window.__TAURI__?.path?.join || null;
 const openDialog = window.__TAURI__?.dialog?.open || null;
+
+/** Write ffmpeg concat lists under $TEMP so fs scope always allows them. */
+async function resolveFfmpegConcatListPath(fileName, fallbackBesideOutputPath) {
+	if (tempDirFn) {
+		try {
+			const tempDir = await tempDirFn();
+			if (joinPathFn) {
+				return await joinPathFn(tempDir, fileName);
+			}
+			const sep = tempDir.endsWith("\\") || tempDir.endsWith("/") ? "" : "\\";
+			return `${tempDir}${sep}${fileName}`;
+		} catch (e) {
+			console.warn("tempDir unavailable for concat list; using fallback path", e);
+		}
+	}
+	if (fallbackBesideOutputPath) {
+		const base = fallbackBesideOutputPath.substring(
+			0,
+			fallbackBesideOutputPath.lastIndexOf("."),
+		);
+		return `${base}_concat_list.txt`;
+	}
+	return fileName;
+}
 let player;
 let loadVideoButton;
 let addMarkerBtn;
@@ -647,6 +676,28 @@ window.initializeLaunchArgumentHandler = async () => {
 if (window.__TAURI__ !== undefined) {
 	document.addEventListener("DOMContentLoaded", () => {
 		window.initializeLaunchArgumentHandler();
+	});
+
+	// WebView2 DevTools: Ctrl+Shift+I / F12 (enabled via tauri feature + window.devtools)
+	document.addEventListener("keydown", (event) => {
+		const isToggle =
+			(event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "i") ||
+			event.key === "F12";
+		if (!isToggle) return;
+		try {
+			const webview =
+				window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow?.() ||
+				window.__TAURI__?.webview?.getCurrentWebview?.() ||
+				window.__TAURI__?.window?.getCurrentWindow?.();
+			if (webview && typeof webview.openDevtools === "function") {
+				event.preventDefault();
+				webview.openDevtools();
+			}
+			// If openDevtools is unavailable, WebView2 still handles the shortcut natively
+			// when the `devtools` feature and window.devtools config are enabled.
+		} catch (e) {
+			console.warn("DevTools toggle failed:", e);
+		}
 	});
 
 	try {
@@ -3425,10 +3476,10 @@ async function processBatchQueue(presetType) {
 				const exportName = `${baseName}_export.mp4`;
 
 				let actualOutputPath = exportName;
-				if (join) {
-					actualOutputPath = await join(actualOutputDir, exportName);
+				if (joinPathFn) {
+					actualOutputPath = await joinPathFn(actualOutputDir, exportName);
 				} else {
-					actualOutputPath = `${actualOutputDir}/${exportName}`;
+					actualOutputPath = `${actualOutputDir}\\${exportName}`;
 				}
 
 				let tempFilePath = null;
@@ -3464,15 +3515,10 @@ async function processBatchQueue(presetType) {
 						}
 					}
 
-					if (tempdir && join) {
-						const tempDir = await tempdir();
-						tempFilePath = await join(
-							tempDir,
-							`ffmpeg_concat_batch_${video.videoId || index}.txt`,
-						);
-					} else {
-						tempFilePath = `${actualOutputPath.substring(0, actualOutputPath.lastIndexOf("."))}_concat_list.txt`;
-					}
+					tempFilePath = await resolveFfmpegConcatListPath(
+						`ffmpeg_concat_batch_${video.videoId || index}.txt`,
+						actualOutputPath,
+					);
 					await writeTextFile(tempFilePath, listContent);
 				} catch (e) {
 					prepError = e;
@@ -3802,13 +3848,11 @@ async function executeExport(presetType) {
 			}
 		}
 
-		// Write the list file to tempdir (or fallback to output dir if os/path plugins are not loaded)
-		if (tempdir && join) {
-			const tempDir = await tempdir();
-			tempFilePath = await join(tempDir, "ffmpeg_concat_list.txt");
-		} else {
-			tempFilePath = `${actualOutputPath.substring(0, actualOutputPath.lastIndexOf("."))}_concat_list.txt`;
-		}
+		// Write the list file under $TEMP (fs scope always allows it)
+		tempFilePath = await resolveFfmpegConcatListPath(
+			"ffmpeg_concat_list.txt",
+			actualOutputPath,
+		);
 		await writeTextFile(tempFilePath, listContent);
 
 		// Build FFmpeg args
