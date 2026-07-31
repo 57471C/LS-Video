@@ -207,7 +207,11 @@ const loadLocalState = () => {
 
 			projectFilePath = localStorage.getItem("projectFilePath") || "";
 			restored = true;
-			toConsole("Project state restored from localStorage", "Success", debuggin);
+			toConsole(
+				"Project state restored from localStorage",
+				"Success",
+				debuggin,
+			);
 		} catch (e) {
 			toConsole("Error parsing local state", e, debuggin);
 		}
@@ -483,8 +487,7 @@ const exportToCSV = async () => {
 
 	// 1. Metadata Block
 	// Row 1: Titles
-	csvContent +=
-		"Project Name,Video Name,Clip In,Clip Out,Video File Name\n";
+	csvContent += "Project Name,Video Name,Clip In,Clip Out,Video File Name\n";
 	// Row 2: Values
 	csvContent += `${escapeCSV(projectName)},${escapeCSV(videoNameVal)},${formatTimeToHHMMSSMS(clipInTime)},${formatTimeToHHMMSSMS(clipOutTime)},${escapeCSV(videoFileName)}\n`;
 	// Row 3: Blank

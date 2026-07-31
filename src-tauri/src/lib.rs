@@ -7,6 +7,22 @@ use tauri_plugin_shell::ShellExt;
 #[derive(Default)]
 pub struct FfmpegState(pub Mutex<Option<tauri_plugin_shell::process::CommandChild>>);
 
+/// Format an FFmpeg failure message, falling back to stdout when stderr is empty.
+fn format_ffmpeg_output_error(prefix: &str, output: &tauri_plugin_shell::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        return format!("{}: {}", prefix, stderr);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        return format!("{}: {}", prefix, stdout);
+    }
+    format!(
+        "{}: FFmpeg exited with non-zero code but empty logs",
+        prefix
+    )
+}
+
 #[tauri::command]
 fn get_startup_file() -> Option<String> {
     std::env::args()
@@ -63,6 +79,8 @@ async fn run_ffmpeg(
     let app_clone = app_handle.clone();
     let stderr_logs = std::sync::Arc::new(Mutex::new(Vec::new()));
     let stderr_logs_clone = stderr_logs.clone();
+    let stdout_logs = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let stdout_logs_clone = stdout_logs.clone();
 
     let join_handle = tauri::async_runtime::spawn(async move {
         let mut exit_code = None;
@@ -71,6 +89,13 @@ async fn run_ffmpeg(
             match event {
                 CommandEvent::Stdout(line_bytes) => {
                     let line = String::from_utf8_lossy(&line_bytes).to_string();
+                    {
+                        let mut logs = stdout_logs_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        logs.push(line.clone());
+                        if logs.len() > 100 {
+                            logs.remove(0);
+                        }
+                    }
                     let _ = app_clone.emit("ffmpeg-stdout", line);
                 }
                 CommandEvent::Stderr(line_bytes) => {
@@ -112,13 +137,29 @@ async fn run_ffmpeg(
     match exit_code {
         Some(0) => Ok("Success".to_string()),
         Some(code) => {
-            let logs = stderr_logs
+            let stderr = stderr_logs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .join("\n");
+            if !stderr.trim().is_empty() {
+                return Err(format!(
+                    "FFmpeg failed with exit status code {}.\n\nLogs:\n{}",
+                    code, stderr
+                ));
+            }
+            let stdout = stdout_logs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .join("\n");
+            if !stdout.trim().is_empty() {
+                return Err(format!(
+                    "FFmpeg failed with exit status code {}.\n\nLogs (stdout):\n{}",
+                    code, stdout
+                ));
+            }
             Err(format!(
-                "FFmpeg failed with exit status code {}.\n\nLogs:\n{}",
-                code, logs
+                "FFmpeg failed with exit status code {}.\n\nFFmpeg exited with non-zero code but empty logs",
+                code
             ))
         }
         None => Err("FFmpeg process ended unexpectedly or was terminated by signal.".to_string()),
@@ -571,7 +612,6 @@ async fn join_and_compress_videos(
                     .map_err(|e| e.to_string())?;
 
                 if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
                     // Cleanup temp files
                     tokio::spawn(async move {
                         for clip in temp_clips {
@@ -579,7 +619,10 @@ async fn join_and_compress_videos(
                         }
                     });
 
-                    return Err(format!("Failed to trim segment {}: {}", i, stderr));
+                    return Err(format_ffmpeg_output_error(
+                        &format!("Failed to trim segment {}", i),
+                        &output,
+                    ));
                 }
 
                 temp_clips.push(temp_output_path.clone());
@@ -614,19 +657,26 @@ async fn join_and_compress_videos(
             }
         }
 
-        let mut list_file = std::fs::File::create(&list_path).map_err(|e| e.to_string())?;
-        let mut out_string = String::with_capacity(final_paths_to_concat.len() * 250);
-        for path in &final_paths_to_concat {
-            let safe_path = path.replace("\\", "/");
-            out_string.push_str("file '");
-            out_string.push_str(&safe_path);
-            out_string.push_str("'\n");
+        // Write concat demuxer list, then drop the handle so Windows releases the file lock
+        // before the FFmpeg sidecar opens the same path.
+        {
+            use std::io::Write;
+            let mut list_file = std::fs::File::create(&list_path).map_err(|e| e.to_string())?;
+            let mut out_string = String::with_capacity(final_paths_to_concat.len() * 250);
+            for path in &final_paths_to_concat {
+                // FFmpeg concat demuxer expects forward slashes and single-quoted paths
+                let formatted_path = path.replace("\\", "/");
+                let line = format!("file '{}'\n", formatted_path);
+                out_string.push_str(&line);
+            }
+            list_file
+                .write_all(out_string.as_bytes())
+                .map_err(|e| e.to_string())?;
+            list_file.flush().map_err(|e| e.to_string())?;
+            list_file.sync_all().map_err(|e| e.to_string())?;
+            // Explicit drop releases the exclusive write lock on Windows
+            drop(list_file);
         }
-        use std::io::Write;
-        list_file
-            .write_all(out_string.as_bytes())
-            .map_err(|e| e.to_string())?;
-        list_file.sync_all().map_err(|e| e.to_string())?;
 
         let mut lossless_success = false;
 
@@ -685,7 +735,6 @@ async fn join_and_compress_videos(
                 .map_err(|e| e.to_string())?;
 
             if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 let list_path_clone = list_path.clone();
                 let intermediate_path_clone = intermediate_path.clone();
                 tokio::spawn(async move {
@@ -696,7 +745,10 @@ async fn join_and_compress_videos(
                     }
                 });
 
-                return Err(format!("Filtergraph fallback failed: {}", stderr));
+                return Err(format_ffmpeg_output_error(
+                    "Filtergraph fallback failed",
+                    &output,
+                ));
             }
         }
 
@@ -730,7 +782,6 @@ async fn join_and_compress_videos(
             tauri::async_runtime::block_on(ffmpeg_sidecar.output()).map_err(|e| e.to_string())?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             let list_path_clone = list_path.clone();
             let intermediate_path_clone = intermediate_path.clone();
             let temp_final_path_clone = temp_final_path.clone();
@@ -743,7 +794,10 @@ async fn join_and_compress_videos(
                 }
             });
 
-            return Err(format!("Final compression failed: {}", stderr));
+            return Err(format_ffmpeg_output_error(
+                "Final compression failed",
+                &output,
+            ));
         }
 
         // Step 5: Cleanup and Return (with Cross-Drive LINK Support)
@@ -944,8 +998,7 @@ async fn generate_timeline_thumbnails(
             .map_err(|e| format!("Failed to run sidecar: {}", e))?;
 
         if !output.status.success() {
-            let stderr_str = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("FFmpeg failed: {}", stderr_str));
+            return Err(format_ffmpeg_output_error("FFmpeg failed", &output));
         }
 
         // Scan the output directory sequentially
