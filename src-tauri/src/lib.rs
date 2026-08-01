@@ -1147,7 +1147,32 @@ async fn verify_and_prepare_video(
         }
     };
 
-    let needs_proxy = is_h265 || is_unsafe_container;
+    // WebView-safe video codecs: only trust Video: stream lines (same gate as HEVC).
+    // If probe stderr is tiny/garbled and no safe codec is confirmed, force proxy so
+    // WebView never gets DEMUXER_ERROR_NO_SUPPORTED_STREAMS on unknown HEVC-like files.
+    let is_web_safe_video = {
+        let mut safe = false;
+        for line in stderr_lowercase.lines() {
+            let line = line.trim();
+            let is_video_line = line.contains("video:") || line.contains("video :");
+            if !is_video_line {
+                continue;
+            }
+            if line.contains("h264")
+                || line.contains("avc1")
+                || line.contains(" avc ")
+                || line.contains("vp8")
+                || line.contains("vp9")
+                || line.contains("av1")
+            {
+                safe = true;
+                break;
+            }
+        }
+        safe
+    };
+
+    let needs_proxy = is_h265 || is_unsafe_container || !is_web_safe_video;
 
     // Direct playback compatible formats (e.g. H.264 MP4/WebM): return original path
     if !needs_proxy {
@@ -1158,9 +1183,24 @@ async fn verify_and_prepare_video(
         return Ok(video_path);
     }
 
+    // Log which proxy branch(es) fired (hevc / unsafe container / not web-safe)
+    if is_h265 {
+        println!("[Proxy Backend] Proxy branch: hevc");
+    }
+    if is_unsafe_container {
+        println!(
+            "[Proxy Backend] Proxy branch: unsafe container (.{})",
+            ext
+        );
+    }
+    if !is_web_safe_video {
+        println!(
+            "[Proxy Backend] Proxy branch: not web-safe (no h264/avc1/avc/vp8/vp9/av1 Video: line)"
+        );
+    }
     println!(
-        "[Proxy Backend] Media file requires proxy (container: '.{}', is_h265: {}). Initiating proxy sequence...",
-        ext, is_h265
+        "[Proxy Backend] Media file requires proxy (container: '.{}', is_h265: {}, is_web_safe_video: {}). Initiating proxy sequence...",
+        ext, is_h265, is_web_safe_video
     );
 
     // Generate a collision-free unique proxy filename
