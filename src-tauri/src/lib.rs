@@ -1059,10 +1059,10 @@ async fn verify_and_prepare_video(
     }
 
     // 2. Extension Validation: Whitelist valid media containers to drop script text-manifest entries (.vtt, .m3u8)
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+    let ext = if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         let normalized_ext = ext.to_lowercase();
         let valid_extensions = vec![
-            "mp4", "mkv", "avi", "mov", "webm", // Videos
+            "mp4", "mkv", "avi", "wmv", "flv", "mov", "webm", // Videos
             "mp3", "wav", "m4a", "ogg", "aac", // Audio
         ];
         if !valid_extensions.contains(&normalized_ext.as_str()) {
@@ -1071,13 +1071,16 @@ async fn verify_and_prepare_video(
                 normalized_ext
             ));
         }
+        normalized_ext
     } else {
         return Err(
             "Rejected media tracking target with missing file format parameters.".to_string(),
         );
-    }
+    };
 
-    // 1. Probe the video metadata using the bundled static ffmpeg sidecar binary
+    let is_unsafe_container = matches!(ext.as_str(), "avi" | "mkv" | "wmv" | "flv");
+
+    // 3. Probe the video metadata using the bundled static ffmpeg sidecar binary
     // Running input query without destination targets sends stream information directly to stderr
     let output = app_handle
         .shell()
@@ -1144,16 +1147,20 @@ async fn verify_and_prepare_video(
         }
     };
 
-    // Non-HEVC: always return the original path — never a proxy
-    if !is_h265 {
+    let needs_proxy = is_h265 || is_unsafe_container;
+
+    // Direct playback compatible formats (e.g. H.264 MP4/WebM): return original path
+    if !needs_proxy {
         println!(
-            "[Proxy Backend] Target identified as non-HEVC (e.g. H.264). Returning original path; no proxy."
+            "[Proxy Backend] Target container '.{}' and video codec are compatible for direct playback. Returning original path; no proxy.",
+            ext
         );
         return Ok(video_path);
     }
 
     println!(
-        "[Proxy Backend] High-efficiency H.265/HEVC stream verified! Initiating proxy sequence..."
+        "[Proxy Backend] Media file requires proxy (container: '.{}', is_h265: {}). Initiating proxy sequence...",
+        ext, is_h265
     );
 
     // Generate a collision-free unique proxy filename

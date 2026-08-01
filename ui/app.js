@@ -339,10 +339,10 @@ window.loadVideo = async (incomingVideoPath) => {
 						const titleEl = optimizationOverlayNode.querySelector("h3");
 						const descEl = optimizationOverlayNode.querySelector("p");
 						if (titleEl)
-							titleEl.textContent = "Optimizing High-Efficiency Media";
+							titleEl.textContent = "Optimizing Media for Playback";
 						if (descEl)
 							descEl.textContent =
-								"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
+								"Generating a high-compatibility proxy track for smooth timeline playback. This occurs once per video asset. Please keep this window active...";
 					}
 				},
 			);
@@ -379,10 +379,10 @@ window.loadVideo = async (incomingVideoPath) => {
 				// Restore original elements for future runs
 				const titleEl = optimizationOverlayNode.querySelector("h3");
 				const descEl = optimizationOverlayNode.querySelector("p");
-				if (titleEl) titleEl.textContent = "Optimizing High-Efficiency Media";
+				if (titleEl) titleEl.textContent = "Optimizing Media for Playback";
 				if (descEl)
 					descEl.textContent =
-						"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
+						"Generating a high-compatibility proxy track for smooth timeline playback. This occurs once per video asset. Please keep this window active...";
 			}, 300);
 		}
 	}
@@ -397,7 +397,7 @@ window.loadVideo = async (incomingVideoPath) => {
 	}
 
 	// 4. Transform native drive references into authenticated network stream URLs
-	// Playback uses the proxy path when HEVC; project globals keep the source path.
+	// Playback uses the proxy path when HEVC/AVI; project globals keep the source path.
 	let validatedStreamUrl = resolvedFilePath;
 	if (window.__TAURI__) {
 		const convertFn =
@@ -425,21 +425,6 @@ window.loadVideo = async (incomingVideoPath) => {
 		videoQueue[activeQueueIndex].videoFileName = videoFileName;
 	}
 
-	const toAssetUrl = (diskPath) => {
-		if (!window.__TAURI__) return diskPath;
-		const convertFn =
-			window.__TAURI__.core?.convertFileSrc ||
-			window.__TAURI__.tauri?.convertFileSrc;
-		if (convertFn) return convertFn(diskPath);
-		return `https://asset.localhost/${encodeURIComponent(diskPath)}`;
-	};
-
-	// Track one-shot fallback from bad proxy → original source
-	let proxyFallbackAttempted = false;
-	const resolvedIsProxy =
-		resolvedFilePath !== incomingVideoPath ||
-		/proxy_/i.test(resolvedFilePath || "");
-
 	// Attach error tracking only after we have a real stream URL.
 	// Suppress code 4 ONLY for empty/origin-only src — never solely for _videoLoadInProgress.
 	videoElement.onerror = () => {
@@ -464,30 +449,7 @@ window.loadVideo = async (incomingVideoPath) => {
 			return;
 		}
 
-		// Real proxy failure → fall back once to original disk path (no re-verify)
-		const srcLooksLikeProxy =
-			/proxy_/i.test(srcNow) ||
-			/proxy_/i.test(resolvedFilePath || "") ||
-			resolvedIsProxy;
-		if (
-			srcLooksLikeProxy &&
-			!proxyFallbackAttempted &&
-			incomingVideoPath &&
-			resolvedFilePath !== incomingVideoPath
-		) {
-			proxyFallbackAttempted = true;
-			console.warn(
-				"[Loader Core] Proxy stream rejected; falling back to original path once:",
-				incomingVideoPath,
-			);
-			const originalUrl = toAssetUrl(incomingVideoPath);
-			videoElement.src = originalUrl;
-			videoElement.preload = "auto";
-			videoElement.load();
-			return;
-		}
-
-		// Real failure after fallback (or non-proxy path)
+		// Real failure
 		if (typeof showToast === "function") {
 			showToast(
 				"Media engine failed to parse safe stream address URL",
