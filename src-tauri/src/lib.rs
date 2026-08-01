@@ -924,6 +924,9 @@ async fn generate_timeline_thumbnails(
     video_path: String,
     tile_count: usize,
 ) -> Result<Vec<String>, String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     let app_handle_clone = app_handle.clone();
     tokio::task::spawn_blocking(move || {
         // Helper function to extract native duration using ffmpeg -i
@@ -953,25 +956,28 @@ async fn generate_timeline_thumbnails(
         let interval_step = total_duration_seconds / (tile_count as f64);
         let dynamic_fps_filter = format!("fps=1/{},scale=120:-1", interval_step);
 
-        // Resolve temporary workspace directory pathway using app_handle.path().app_cache_dir()
+        // Per-video cache subdir so concurrent A/B loads never overwrite each other's JPGs
+        let mut hasher = DefaultHasher::new();
+        video_path.hash(&mut hasher);
+        let path_hash = format!("{:x}", hasher.finish());
+
         let cache_path = app_handle_clone
             .path()
             .app_cache_dir()
             .map_err(|e| format!("Failed to get app cache dir: {}", e))?
-            .join("tmvideo_thumbnails");
+            .join("tmvideo_thumbnails")
+            .join(&path_hash);
 
-        // Ensure the directory is created if missing
+        // Ensure the per-video directory is created if missing
         std::fs::create_dir_all(&cache_path)
             .map_err(|e| format!("Failed to create thumbnail directory: {}", e))?;
 
-        // Clear out stale .jpg fragments in that folder
+        // Clear only JPGs in this video's subdir (never wipe sibling video caches)
         if let Ok(entries) = std::fs::read_dir(&cache_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() && path.extension().is_some_and(|ext| ext == "jpg") {
-                    tokio::spawn(async move {
-                        let _ = tokio::fs::remove_file(path).await;
-                    });
+                    let _ = std::fs::remove_file(&path);
                 }
             }
         }
@@ -1001,7 +1007,7 @@ async fn generate_timeline_thumbnails(
             return Err(format_ffmpeg_output_error("FFmpeg failed", &output));
         }
 
-        // Scan the output directory sequentially
+        // Scan only this video's subdir sequentially
         let mut thumbnails = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&cache_path) {
             let mut entry_paths = Vec::new();

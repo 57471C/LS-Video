@@ -886,6 +886,13 @@ window.loadWaveformTimeline = async () => {
 	const isTauri = window.__TAURI__ !== undefined;
 	if (!isTauri || !videoFilePath) return;
 
+	// Capture request identity so stale async jobs (switch A→B mid-flight) never mutate UI
+	const requestPath = videoFilePath;
+	window._timelineGenId = (window._timelineGenId || 0) + 1;
+	const genId = window._timelineGenId;
+	const isStaleRequest = () =>
+		genId !== window._timelineGenId || videoFilePath !== requestPath;
+
 	// Custom timeline panel (Rust waveform + filmstrip) — not Peaks.js
 	const wrapper = document.getElementById("detailed-timeline-panel");
 	const seekBarContainer = document.getElementById("seekBarContainer");
@@ -905,18 +912,20 @@ window.loadWaveformTimeline = async () => {
 		const videoEl = document.querySelector("video") || player;
 		const duration = videoEl.duration || player.duration || 0;
 		const peakArray = await window.__TAURI__.core.invoke("get_waveform_data", {
-			videoPath: videoFilePath,
+			videoPath: requestPath,
 			durationSeconds: duration,
 		});
+		if (isStaleRequest()) return;
+
 		if (!peakArray || peakArray.length === 0) {
 			console.warn("Waveform data empty, bypassing timeline initialization.");
 			window.currentWaveformData = [];
 			return;
 		}
 
-		// Save the raw peak data sequence directly to the global window memory state
+		// Save peaks only for the still-current request path
 		window.currentWaveformData = peakArray;
-		window.currentWaveformDataPath = videoFilePath;
+		window.currentWaveformDataPath = requestPath;
 
 		// Trigger ruler, video, and audio track rendering
 		window.paintTimelineRuler(duration);
@@ -943,10 +952,11 @@ window.loadWaveformTimeline = async () => {
 
 		window.__TAURI__.core
 			.invoke("generate_timeline_thumbnails", {
-				videoPath: videoFilePath,
+				videoPath: requestPath,
 				tileCount: requiredTileCount,
 			})
 			.then((thumbnailPaths) => {
+				if (isStaleRequest()) return;
 				if (!videoTrack || !thumbnailPaths || thumbnailPaths.length === 0) {
 					return;
 				}
@@ -971,6 +981,7 @@ window.loadWaveformTimeline = async () => {
 				window.setupVideoTrack();
 			})
 			.catch((err) => {
+				if (isStaleRequest()) return;
 				console.error("Error generating filmstrip thumbnails:", err);
 				if (videoTrack) {
 					videoTrack.textContent = "Failed to load filmstrip.";
@@ -978,6 +989,7 @@ window.loadWaveformTimeline = async () => {
 				}
 			});
 	} catch (err) {
+		if (isStaleRequest()) return;
 		console.error("Error generating waveform data:", err);
 		window.currentWaveformData = [];
 	}
