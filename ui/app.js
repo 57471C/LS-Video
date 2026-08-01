@@ -318,19 +318,9 @@ window.loadVideo = async (incomingVideoPath) => {
 	}
 
 	try {
-		// 1. Reveal fullscreen progress indicator spinner with neutral text on launch
-		if (optimizationOverlayNode) {
-			const titleEl = optimizationOverlayNode.querySelector("h3");
-			const descEl = optimizationOverlayNode.querySelector("p");
-			if (titleEl) titleEl.textContent = "Loading Video Asset...";
-			if (descEl)
-				descEl.textContent =
-					"Verifying video file compatibility, please wait...";
-			optimizationOverlayNode.classList.remove("hidden");
-			optimizationOverlayNode.classList.add("opacity-100", "flex");
-		}
-
-		// Listen for transcode-needed event to only display the HEVC warning if optimization is actively occurring
+		// Do not show the heavy optimizing overlay on load start (probe-only /
+		// H.264 / cache-hit paths must not flash a spinner). Only reveal it when
+		// the backend emits "transcode-needed" (AVI/HEVC first-time proxy).
 		if (window.__TAURI__?.event?.listen) {
 			unlistenTranscode = await window.__TAURI__.event.listen(
 				"transcode-needed",
@@ -339,16 +329,18 @@ window.loadVideo = async (incomingVideoPath) => {
 						const titleEl = optimizationOverlayNode.querySelector("h3");
 						const descEl = optimizationOverlayNode.querySelector("p");
 						if (titleEl)
-							titleEl.textContent = "Optimizing Media for Playback";
+							titleEl.textContent = "Optimizing High-Efficiency Media";
 						if (descEl)
 							descEl.textContent =
-								"Generating a high-compatibility proxy track for smooth timeline playback. This occurs once per video asset. Please keep this window active...";
+								"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
+						optimizationOverlayNode.classList.remove("hidden");
+						optimizationOverlayNode.classList.add("opacity-100", "flex");
 					}
 				},
 			);
 		}
 
-		// 2. Pass track path metrics down to our backend Rust transcoding checker command
+		// Pass track path metrics down to our backend Rust transcoding checker command
 		const invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
 		if (invokeFn) {
 			resolvedFilePath = await invokeFn("verify_and_prepare_video", {
@@ -376,13 +368,14 @@ window.loadVideo = async (incomingVideoPath) => {
 			optimizationOverlayNode.classList.remove("opacity-100");
 			setTimeout(() => {
 				optimizationOverlayNode.classList.add("hidden");
-				// Restore original elements for future runs
+				// Restore original copy for future runs
 				const titleEl = optimizationOverlayNode.querySelector("h3");
 				const descEl = optimizationOverlayNode.querySelector("p");
-				if (titleEl) titleEl.textContent = "Optimizing Media for Playback";
+				if (titleEl)
+					titleEl.textContent = "Optimizing High-Efficiency Media";
 				if (descEl)
 					descEl.textContent =
-						"Generating a high-compatibility proxy track for smooth timeline playback. This occurs once per video asset. Please keep this window active...";
+						"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
 			}, 300);
 		}
 	}
