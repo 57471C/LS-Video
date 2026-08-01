@@ -939,16 +939,16 @@ window.loadWaveformTimeline = async () => {
 		const videoTrack = document.getElementById("timeline-video-track");
 		if (videoTrack) {
 			videoTrack.textContent = "Developing Video Filmstrip Tracks...";
+			// Track is always full width; density follows measured width (~120px tiles)
+			videoTrack.style.width = "100%";
+			videoTrack.style.display = "flex";
+			videoTrack.style.boxSizing = "border-box";
 			window.setupVideoTrack();
 		}
 
-		// Prefer expanded track width; floor so collapsed/zero measurements still request enough tiles
-		const totalTrackWidth = Math.max(
-			videoTrack?.offsetWidth || 0,
-			videoTrack?.parentElement?.offsetWidth || 0,
-			800,
-		);
-		const requiredTileCount = Math.max(1, Math.ceil(totalTrackWidth / 100));
+		// Density matches track width; tiles still stretch to fill 100% after append
+		const trackWidth = videoTrack?.offsetWidth || 0;
+		const requiredTileCount = Math.max(Math.floor(trackWidth / 120), 1);
 
 		window.__TAURI__.core
 			.invoke("generate_timeline_thumbnails", {
@@ -960,22 +960,27 @@ window.loadWaveformTimeline = async () => {
 				if (!videoTrack || !thumbnailPaths || thumbnailPaths.length === 0) {
 					return;
 				}
-				// Stretch thumbs across 100% of the track (no fixed 120px gap on the right)
+				// Stretch thumbs flush left→right under the ruler (no fixed px tile width)
 				videoTrack.innerHTML = "";
 				videoTrack.style.display = "flex";
 				videoTrack.style.width = "100%";
+				videoTrack.style.boxSizing = "border-box";
 				videoTrack.style.overflow = "hidden";
 				videoTrack.style.justifyContent = "flex-start";
+				videoTrack.style.alignItems = "stretch";
 				const n = thumbnailPaths.length;
 				const tileWidthPct = 100 / n;
 				for (const pathString of thumbnailPaths) {
 					const imgElement = document.createElement("img");
 					imgElement.src = window.__TAURI__.core.convertFileSrc(pathString);
+					// No w-[120px] / fixed pixel widths — equal flex tiles fill the track
 					imgElement.className =
-						"h-full object-cover flex-shrink-0 border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
-					imgElement.style.width = `${tileWidthPct}%`;
+						"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
+					imgElement.style.flex = "1 1 0";
 					imgElement.style.minWidth = "0";
-					imgElement.style.flex = `0 0 ${tileWidthPct}%`;
+					imgElement.style.width = `${tileWidthPct}%`;
+					imgElement.style.boxSizing = "border-box";
+					imgElement.style.height = "100%";
 					videoTrack.appendChild(imgElement);
 				}
 				window.setupVideoTrack();

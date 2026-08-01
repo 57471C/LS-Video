@@ -144,7 +144,29 @@ const setupVideoTrack = () => {
 	while (oldPlayheads.length > 0) {
 		oldPlayheads[0].remove();
 	}
+	// Keep filmstrip track full-width flex so thumbs stay edge-to-edge under the ruler
 	videoTrack.style.position = "relative";
+	videoTrack.style.width = "100%";
+	videoTrack.style.boxSizing = "border-box";
+	videoTrack.style.display = "flex";
+	videoTrack.style.overflow = "hidden";
+	videoTrack.style.justifyContent = "flex-start";
+	videoTrack.style.alignItems = "stretch";
+
+	// Re-apply equal flex on existing filmstrip tiles (no fixed pixel widths)
+	const filmstripImgs = videoTrack.querySelectorAll("img");
+	const n = filmstripImgs.length;
+	if (n > 0) {
+		const tileWidthPct = 100 / n;
+		for (const img of filmstripImgs) {
+			img.style.flex = "1 1 0";
+			img.style.minWidth = "0";
+			img.style.width = `${tileWidthPct}%`;
+			img.style.boxSizing = "border-box";
+			img.style.height = "100%";
+			img.classList.remove("w-[120px]", "flex-shrink-0");
+		}
+	}
 
 	const playhead = document.createElement("div");
 	playhead.className =
