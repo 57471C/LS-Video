@@ -1466,6 +1466,9 @@ const initializePlayer = () => {
 	if (DOM.editVideoQueueBtn) {
 		DOM.editVideoQueueBtn.addEventListener("click", editVideoInQueue);
 	}
+	document.getElementById("removeVideoQueueBtn")?.addEventListener("click", () => {
+		if (typeof window.removeCurrentVideo === "function") window.removeCurrentVideo();
+	});
 	const reorderBtn = document.getElementById("reorder-videos-btn");
 	if (reorderBtn) {
 		reorderBtn.addEventListener("click", () => {
