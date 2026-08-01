@@ -274,205 +274,237 @@ window.loadVideo = async (incomingVideoPath) => {
 		return;
 	}
 
-	window._videoLoadInProgress = true;
+	const normalizedPath = incomingVideoPath.trim();
 
-	// Hard visual reset of timeline graphics panels
-	const videoTrack = document.getElementById("timeline-video-track");
-	if (videoTrack) {
-		videoTrack.innerHTML = "";
-	}
-	const audioTrack = document.getElementById("timeline-audio-track");
-	if (audioTrack) {
-		audioTrack.innerHTML = "";
-	}
-	const rulerTrack = document.getElementById("timeline-ruler-track");
-	if (rulerTrack) {
-		rulerTrack.innerHTML = "";
-	}
-	const overlayTrack = document.getElementById("timeline-marker-overlay");
-	if (overlayTrack) {
-		overlayTrack.innerHTML = "";
-	}
-
-	window.currentWaveformData = [];
-	window.currentWaveformDataPath = null;
-
-	console.log(
-		"[Loader Core] Processing absolute ingestion path parameter:",
-		incomingVideoPath,
-	);
-	const optimizationOverlayNode = document.getElementById("optimizingOverlay");
-	let resolvedFilePath = incomingVideoPath;
-	let unlistenTranscode = null;
-
-	// Resolve video element early so we can suppress errors during verify/swap
-	const videoElement =
-		document.querySelector("video") ||
-		document.getElementById("video-player") ||
-		document.getElementById("my_video") ||
-		(typeof player !== "undefined" ? player : null);
-
-	// Suppress transition noise while verify/proxy runs (before real URL is set)
-	if (videoElement) {
-		videoElement.onerror = null;
-	}
-
-	try {
-		// Do not show the heavy optimizing overlay on load start (probe-only /
-		// H.264 / cache-hit paths must not flash a spinner). Only reveal it when
-		// the backend emits "transcode-needed" (AVI/HEVC first-time proxy).
-		if (window.__TAURI__?.event?.listen) {
-			unlistenTranscode = await window.__TAURI__.event.listen(
-				"transcode-needed",
-				() => {
-					if (optimizationOverlayNode) {
-						const titleEl = optimizationOverlayNode.querySelector("h3");
-						const descEl = optimizationOverlayNode.querySelector("p");
-						if (titleEl)
-							titleEl.textContent = "Optimizing High-Efficiency Media";
-						if (descEl)
-							descEl.textContent =
-								"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
-						optimizationOverlayNode.classList.remove("hidden");
-						optimizationOverlayNode.classList.add("opacity-100", "flex");
-					}
-				},
-			);
-		}
-
-		// Pass track path metrics down to our backend Rust transcoding checker command
-		const invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-		if (invokeFn) {
-			resolvedFilePath = await invokeFn("verify_and_prepare_video", {
-				videoPath: incomingVideoPath,
-			});
-		}
-
-		// Surgical clearance of native Windows extended UNC safety qualifiers
-		resolvedFilePath = resolvedFilePath.replace(/^\\\\?\\/, "");
-		console.log(
-			"[Loader Core] Video path mapping successfully resolved to:",
-			resolvedFilePath,
-		);
-	} catch (err) {
-		console.error(
-			"[Loader Core] Backend verification checker failed. Falling back to source:",
-			err,
-		);
-		resolvedFilePath = incomingVideoPath;
-	} finally {
-		if (unlistenTranscode) {
-			unlistenTranscode();
-		}
-		if (optimizationOverlayNode) {
-			optimizationOverlayNode.classList.remove("opacity-100");
-			setTimeout(() => {
-				optimizationOverlayNode.classList.add("hidden");
-				// Restore original copy for future runs
-				const titleEl = optimizationOverlayNode.querySelector("h3");
-				const descEl = optimizationOverlayNode.querySelector("p");
-				if (titleEl)
-					titleEl.textContent = "Optimizing High-Efficiency Media";
-				if (descEl)
-					descEl.textContent =
-						"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
-			}, 300);
-		}
-	}
-
-	// 3. Pin down the core HTML5 video rendering element tag
-	if (!videoElement) {
-		console.error(
-			"[Loader Core] CRITICAL EXCEPTION: HTML5 <video> element missing from DOM grid structure.",
-		);
-		window._videoLoadInProgress = false;
+	// Same path already loading — drop duplicate concurrent call (restore+open, etc.)
+	if (
+		window._videoLoadInProgress &&
+		window._loadVideoPath === normalizedPath
+	) {
 		return;
 	}
 
-	// 4. Transform native drive references into authenticated network stream URLs
-	// Playback uses the proxy path when HEVC/AVI; project globals keep the source path.
-	let validatedStreamUrl = resolvedFilePath;
-	if (window.__TAURI__) {
-		const convertFn =
-			window.__TAURI__.core?.convertFileSrc ||
-			window.__TAURI__.tauri?.convertFileSrc;
-		if (convertFn) {
-			validatedStreamUrl = convertFn(resolvedFilePath);
-		} else {
-			validatedStreamUrl = `https://asset.localhost/${encodeURIComponent(resolvedFilePath)}`;
+	window._videoLoadInProgress = true;
+	window._loadVideoPath = normalizedPath;
+
+	const clearLoadGuard = () => {
+		// Only clear if this call still owns the slot (a different path may have taken over)
+		if (window._loadVideoPath === normalizedPath) {
+			window._videoLoadInProgress = false;
+			window._loadVideoPath = null;
 		}
-	}
+	};
 
-	console.warn(
-		`%c[Loader Core] Pushing URL to hardware video track src: "${validatedStreamUrl}"`,
-		"color: #00ffcc; font-weight: bold;",
-	);
+	// When true, clearLoadGuard is scheduled via setTimeout (success path)
+	let settleViaTimeout = false;
 
-	// Sync globals: keep original source path for project save / subtitles / re-verify
-	videoFilePath = incomingVideoPath;
-	if (!videoFileName) {
-		videoFileName = incomingVideoPath.split(/[/\\]/).pop() || "";
-	}
-	if (videoQueue[activeQueueIndex]) {
-		videoQueue[activeQueueIndex].videoFilePath = videoFilePath;
-		videoQueue[activeQueueIndex].videoFileName = videoFileName;
-	}
+	try {
+		// Hard visual reset of timeline graphics panels
+		const videoTrack = document.getElementById("timeline-video-track");
+		if (videoTrack) {
+			videoTrack.innerHTML = "";
+		}
+		const audioTrack = document.getElementById("timeline-audio-track");
+		if (audioTrack) {
+			audioTrack.innerHTML = "";
+		}
+		const rulerTrack = document.getElementById("timeline-ruler-track");
+		if (rulerTrack) {
+			rulerTrack.innerHTML = "";
+		}
+		const overlayTrack = document.getElementById("timeline-marker-overlay");
+		if (overlayTrack) {
+			overlayTrack.innerHTML = "";
+		}
 
-	// Attach error tracking only after we have a real stream URL.
-	// Suppress code 4 ONLY for empty/origin-only src — never solely for _videoLoadInProgress.
-	videoElement.onerror = () => {
-		const err = videoElement.error;
-		const srcNow = videoElement.getAttribute("src") || videoElement.src || "";
-		const code = err?.code;
+		window.currentWaveformData = [];
+		window.currentWaveformDataPath = null;
 
-		console.error(
-			"[Loader Core] Browser multimedia layer rejected stream target!",
-			err,
+		console.log(
+			"[Loader Core] Processing absolute ingestion path parameter:",
+			normalizedPath,
 		);
-		console.error(
-			"[Loader Core] Attempted source URL string was:",
-			videoElement.src,
-		);
+		const optimizationOverlayNode = document.getElementById("optimizingOverlay");
+		let resolvedFilePath = normalizedPath;
+		let unlistenTranscode = null;
 
-		// Benign: empty or origin-only URL during src swap (no media path yet)
-		if (code === 4 && isEmptyOrOriginOnlyMediaSrc(srcNow)) {
-			console.warn(
-				"[Loader Core] Suppressing empty-src MediaError toast during load transition.",
+		// Resolve video element early so we can suppress errors during verify/swap
+		const videoElement =
+			document.querySelector("video") ||
+			document.getElementById("video-player") ||
+			document.getElementById("my_video") ||
+			(typeof player !== "undefined" ? player : null);
+
+		// Suppress transition noise while verify/proxy runs (before real URL is set)
+		if (videoElement) {
+			videoElement.onerror = null;
+		}
+
+		try {
+			// Do not show the heavy optimizing overlay on load start (probe-only /
+			// H.264 / cache-hit paths must not flash a spinner). Only reveal it when
+			// the backend emits "transcode-needed" (AVI/HEVC first-time proxy).
+			if (window.__TAURI__?.event?.listen) {
+				unlistenTranscode = await window.__TAURI__.event.listen(
+					"transcode-needed",
+					() => {
+						if (optimizationOverlayNode) {
+							const titleEl = optimizationOverlayNode.querySelector("h3");
+							const descEl = optimizationOverlayNode.querySelector("p");
+							if (titleEl)
+								titleEl.textContent = "Optimizing High-Efficiency Media";
+							if (descEl)
+								descEl.textContent =
+									"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
+							optimizationOverlayNode.classList.remove("hidden");
+							optimizationOverlayNode.classList.add("opacity-100", "flex");
+						}
+					},
+				);
+			}
+
+			// Pass track path metrics down to our backend Rust transcoding checker command
+			const invokeFn =
+				window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+			if (invokeFn) {
+				resolvedFilePath = await invokeFn("verify_and_prepare_video", {
+					videoPath: normalizedPath,
+				});
+			}
+
+			// Surgical clearance of native Windows extended UNC safety qualifiers
+			resolvedFilePath = resolvedFilePath.replace(/^\\\\?\\/, "");
+			console.log(
+				"[Loader Core] Video path mapping successfully resolved to:",
+				resolvedFilePath,
+			);
+		} catch (err) {
+			console.error(
+				"[Loader Core] Backend verification checker failed. Falling back to source:",
+				err,
+			);
+			resolvedFilePath = normalizedPath;
+		} finally {
+			if (unlistenTranscode) {
+				unlistenTranscode();
+			}
+			if (optimizationOverlayNode) {
+				optimizationOverlayNode.classList.remove("opacity-100");
+				setTimeout(() => {
+					optimizationOverlayNode.classList.add("hidden");
+					// Restore original copy for future runs
+					const titleEl = optimizationOverlayNode.querySelector("h3");
+					const descEl = optimizationOverlayNode.querySelector("p");
+					if (titleEl)
+						titleEl.textContent = "Optimizing High-Efficiency Media";
+					if (descEl)
+						descEl.textContent =
+							"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
+				}, 300);
+			}
+		}
+
+		// 3. Pin down the core HTML5 video rendering element tag
+		if (!videoElement) {
+			console.error(
+				"[Loader Core] CRITICAL EXCEPTION: HTML5 <video> element missing from DOM grid structure.",
 			);
 			return;
 		}
 
-		// Real failure
-		if (typeof showToast === "function") {
-			showToast(
-				"Media engine failed to parse safe stream address URL",
-				"error",
-			);
+		// 4. Transform native drive references into authenticated network stream URLs
+		// Playback uses the proxy path when HEVC/AVI; project globals keep the source path.
+		let validatedStreamUrl = resolvedFilePath;
+		if (window.__TAURI__) {
+			const convertFn =
+				window.__TAURI__.core?.convertFileSrc ||
+				window.__TAURI__.tauri?.convertFileSrc;
+			if (convertFn) {
+				validatedStreamUrl = convertFn(resolvedFilePath);
+			} else {
+				validatedStreamUrl = `https://asset.localhost/${encodeURIComponent(resolvedFilePath)}`;
+			}
 		}
-	};
 
-	// 5. Fire core media track rehydration paint triggers
-	videoElement.src = validatedStreamUrl;
-	videoElement.preload = "auto";
-	videoElement.load();
+		console.warn(
+			`%c[Loader Core] Pushing URL to hardware video track src: "${validatedStreamUrl}"`,
+			"color: #00ffcc; font-weight: bold;",
+		);
 
-	// Fire default post-load interface configurations
-	if (typeof toggleVideoPlaceholder === "function") {
-		toggleVideoPlaceholder(false);
-	}
-	if (typeof updateLoadButtonColor === "function") {
-		updateLoadButtonColor();
-	}
-	if (typeof window.loadSubtitleTrack === "function") {
-		window.loadSubtitleTrack(incomingVideoPath);
-	}
-	if (typeof window.repositionControls === "function") {
-		setTimeout(window.repositionControls, 100);
-	}
+		// Sync globals: keep original source path for project save / subtitles / re-verify
+		videoFilePath = normalizedPath;
+		if (!videoFileName) {
+			videoFileName = normalizedPath.split(/[/\\]/).pop() || "";
+		}
+		if (videoQueue[activeQueueIndex]) {
+			videoQueue[activeQueueIndex].videoFilePath = videoFilePath;
+			videoQueue[activeQueueIndex].videoFileName = videoFileName;
+		}
 
-	setTimeout(() => {
-		window._videoLoadInProgress = false;
-	}, 500);
+		// Attach error tracking only after we have a real stream URL.
+		// Suppress code 4 ONLY for empty/origin-only src — never solely for _videoLoadInProgress.
+		videoElement.onerror = () => {
+			const err = videoElement.error;
+			const srcNow = videoElement.getAttribute("src") || videoElement.src || "";
+			const code = err?.code;
+
+			console.error(
+				"[Loader Core] Browser multimedia layer rejected stream target!",
+				err,
+			);
+			console.error(
+				"[Loader Core] Attempted source URL string was:",
+				videoElement.src,
+			);
+
+			// Benign: empty or origin-only URL during src swap (no media path yet)
+			if (code === 4 && isEmptyOrOriginOnlyMediaSrc(srcNow)) {
+				console.warn(
+					"[Loader Core] Suppressing empty-src MediaError toast during load transition.",
+				);
+				return;
+			}
+
+			// Real failure
+			if (typeof showToast === "function") {
+				showToast(
+					"Media engine failed to parse safe stream address URL",
+					"error",
+				);
+			}
+		};
+
+		// 5. Fire core media track rehydration paint triggers
+		videoElement.src = validatedStreamUrl;
+		videoElement.preload = "auto";
+		videoElement.load();
+
+		// Fire default post-load interface configurations
+		if (typeof toggleVideoPlaceholder === "function") {
+			toggleVideoPlaceholder(false);
+		}
+		if (typeof updateLoadButtonColor === "function") {
+			updateLoadButtonColor();
+		}
+		if (typeof window.loadSubtitleTrack === "function") {
+			window.loadSubtitleTrack(normalizedPath);
+		}
+		if (typeof window.repositionControls === "function") {
+			setTimeout(window.repositionControls, 100);
+		}
+
+		// Delay clear slightly so media transition still sees in-progress guard
+		settleViaTimeout = true;
+		setTimeout(clearLoadGuard, 500);
+	} catch (err) {
+		console.error("[Loader Core] loadVideo failed:", err);
+		throw err;
+	} finally {
+		// Immediate clear on early return / failure; success path uses delayed clear
+		if (!settleViaTimeout) {
+			clearLoadGuard();
+		}
+	}
 };
 
 window.initializeLaunchArgumentHandler = async () => {
