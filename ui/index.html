@@ -17,7 +17,7 @@
         color: #f4f4f5;
       }
     </style>
-    <title>TMVideo v0.5.0</title>
+    <title>LS.Video v0.5.0</title>
     <!-- Favicons -->
     <link rel="icon" type="image/x-icon" href="icons/favicon.ico" />
     <link rel="icon" type="image/png" href="icons/favicon.png" />
@@ -45,7 +45,7 @@
     <!-- Header -->
     <header class="bg-white dark:bg-zinc-800 border-b border-zinc-200 dark:border-zinc-700 shadow-sm py-1.5 px-4 flex justify-between items-center z-10 min-h-8">
       <div class="flex items-center gap-2 sm:gap-3">
-        <h1 id="appHeaderTitle" class="text-xl font-bold tracking-tight text-zinc-900 dark:text-white whitespace-nowrap hidden lg:block">TMVideo v0.5.0</h1>
+        <h1 id="appHeaderTitle" class="text-xl font-bold tracking-tight text-zinc-900 dark:text-white whitespace-nowrap hidden lg:block">LS.Video v0.5.0</h1>
         <span class="text-zinc-300 dark:text-zinc-600 hidden lg:inline font-light text-xl">/</span>
         <input type="text" id="projectNameInput" placeholder="Untitled Project" class="project-name-input" />
         <span class="text-zinc-300 dark:text-zinc-600 hidden sm:inline font-light text-xl">/</span>
@@ -84,11 +84,11 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.5l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>
             <span class="hidden md:inline">Save As</span>
           </button>
-          <button type="button" id="packageBtn" class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2" title="Package Project (.tmvz)">
+          <button type="button" id="packageBtn" class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2" title="Package Project (.lsvz)">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
             <span class="hidden md:inline">Package</span>
           </button>
-        <input type="file" id="projectFileInput" accept=".tmv" style="display: none" />
+        <input type="file" id="projectFileInput" accept=".lsv,.lsvz,.tmv,.tmvz" style="display: none" />
         </div>
 
         <button type="button" id="darkModeToggle" class="text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 transition-colors" title="Toggle Dark Mode">

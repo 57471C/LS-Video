@@ -28,7 +28,10 @@ fn get_startup_file() -> Option<String> {
     std::env::args()
         .skip(1)
         .map(|arg| arg.trim_matches('"').to_string())
-        .find(|arg| arg.to_lowercase().ends_with(".tmv"))
+        .find(|arg| {
+            let l = arg.to_lowercase();
+            l.ends_with(".lsv") || l.ends_with(".lsvz") || l.ends_with(".tmv") || l.ends_with(".tmvz")
+        })
 }
 
 #[tauri::command]
@@ -316,8 +319,8 @@ async fn save_tspz_bundle(
 
         // --- project JSON ---
         emit_b("project", 5, "Writing project data…", 0, total);
-        zip.start_file("project.tmv", opts)
-            .map_err(|e| format!("Cannot start project.tmv: {e}"))?;
+        zip.start_file("project.lsv", opts)
+            .map_err(|e| format!("Cannot start project.lsv: {e}"))?;
         zip.write_all(project_json.as_bytes())
             .map_err(|e| format!("Cannot write project JSON: {e}"))?;
 
@@ -409,7 +412,7 @@ async fn load_tspz_bundle(
 
         // Unique extraction directory
         let extract_dir = std::env::temp_dir().join(format!(
-            "tmvideo_bundle_{}",
+            "lsvideo_bundle_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis())
@@ -461,9 +464,9 @@ async fn load_tspz_bundle(
             std::fs::write(&out_path, &buf).map_err(|e| format!("Cannot write '{name}': {e}"))?;
 
             let lower = name.to_lowercase();
-            if lower == "project.tmv" {
+            if lower == "project.lsv" || lower == "project.tmv" {
                 project_json = String::from_utf8(buf)
-                    .map_err(|e| format!("project.tmv is not valid UTF-8: {e}"))?;
+                    .map_err(|e| format!("project file is not valid UTF-8: {e}"))?;
             } else {
                 let ext = std::path::Path::new(&lower)
                     .extension()
@@ -481,7 +484,7 @@ async fn load_tspz_bundle(
         }
 
         if project_json.is_empty() {
-            return Err("Archive does not contain a project.tmv file.".to_string());
+            return Err("Archive does not contain a project file.".to_string());
         }
 
         emit("done", 100, "Extraction complete!", total, total);
@@ -965,7 +968,7 @@ async fn generate_timeline_thumbnails(
             .path()
             .app_cache_dir()
             .map_err(|e| format!("Failed to get app cache dir: {}", e))?
-            .join("tmvideo_thumbnails")
+            .join("lsvideo_thumbnails")
             .join(&path_hash);
 
         // Ensure the per-video directory is created if missing

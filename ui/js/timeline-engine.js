@@ -1,5 +1,5 @@
 /*
- * Timeline Engine Module for TMVideo
+ * Timeline Engine Module for LS.Video
  * Manages playhead tracking, ticks rendering, audio canvas painting, and marker/trim shading.
  */
 
