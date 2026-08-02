@@ -265,9 +265,9 @@ const exportToJSON = async (isSaveAs = false) => {
 		toConsole("Error formatting JSON data for export", e, debuggin);
 	}
 
-	let filename = "project.tmv";
+	let filename = "project.lsv";
 	if (projectName) {
-		filename = `${sanitizeFilename(projectName)}.tmv`;
+		filename = `${sanitizeFilename(projectName)}.lsv`;
 	}
 
 	const isTauri = window.__TAURI__ !== undefined;
@@ -278,7 +278,7 @@ const exportToJSON = async (isSaveAs = false) => {
 					? projectFilePath.split(/[/\\]/).pop()
 					: filename;
 				const filePath = await window.__TAURI__.dialog.save({
-					filters: [{ name: "TMVideo Project", extensions: ["tmv"] }],
+					filters: [{ name: "LS.Video Project", extensions: ["lsv", "tmv"] }],
 					defaultPath: defaultName,
 				});
 				if (filePath) {
@@ -310,8 +310,8 @@ const exportToJSON = async (isSaveAs = false) => {
 						suggestedName: filename,
 						types: [
 							{
-								description: "TMVideo Project",
-								accept: { "application/json": [".tmv"] },
+								description: "LS.Video Project",
+								accept: { "application/json": [".lsv", ".tmv"] },
 							},
 						],
 					});

@@ -1,5 +1,5 @@
 /*
- * Viewport Scaling and Panning Engine Module for TMVideo
+ * Viewport Scaling and Panning Engine Module for LS.Video
  * Manages cursor-anchored scroll zooming and right-click panning.
  */
 

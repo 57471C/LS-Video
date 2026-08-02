@@ -642,7 +642,7 @@
 				},
 			},
 			{
-				text: "Quit to TMVideo",
+				text: "Quit to LS.Video",
 				action: () => {
 					saveHighScore();
 					// Clean up keyboard events

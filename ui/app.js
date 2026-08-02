@@ -530,12 +530,17 @@ window.initializeLaunchArgumentHandler = async () => {
 				window.currentWaveformData = [];
 				window.currentWaveformDataPath = null;
 
-				if (lower.endsWith(".tmv") || lower.endsWith(".tmvz")) {
+				if (
+					lower.endsWith(".lsv") ||
+					lower.endsWith(".lsvz") ||
+					lower.endsWith(".tmv") ||
+					lower.endsWith(".tmvz")
+				) {
 					try {
 						projectFilePath = launchPath;
 						localStorage.setItem("projectFilePath", projectFilePath);
 
-						if (lower.endsWith(".tmvz")) {
+						if (lower.endsWith(".lsvz") || lower.endsWith(".tmvz")) {
 							const optimizationOverlayNode =
 								document.getElementById("optimizingOverlay");
 							if (optimizationOverlayNode) {
@@ -1828,10 +1833,10 @@ const initializePlayer = () => {
 				.filter((p) => p.length > 0);
 
 			const defaultName = projectName
-				? `${sanitizeFilename(projectName)}.tmvz`
-				: "project.tmvz";
+				? `${sanitizeFilename(projectName)}.lsvz`
+				: "project.lsvz";
 			const filePath = await window.__TAURI__.dialog.save({
-				filters: [{ name: "TMVideo Package", extensions: ["tmvz"] }],
+				filters: [{ name: "LS.Video Package", extensions: ["lsvz", "tmvz"] }],
 				defaultPath: defaultName,
 			});
 			if (!filePath) return;
@@ -1912,7 +1917,7 @@ const initializePlayer = () => {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
 					filters: [
-						{ name: "TMVideo Project / Package", extensions: ["tmv", "tmvz"] },
+						{ name: "LS.Video Project / Package", extensions: ["lsv", "lsvz", "tmv", "tmvz"] },
 					],
 				});
 				if (!selected) return;
@@ -1921,9 +1926,9 @@ const initializePlayer = () => {
 					typeof selected === "object" ? selected.path : selected;
 				const lower = selectedPath.toLowerCase();
 
-				if (lower.endsWith(".tmvz")) {
+				if (lower.endsWith(".lsvz") || lower.endsWith(".tmvz")) {
 					// --- Bundle load path ---
-					toConsole("Loading .tmvz bundle", selectedPath, debuggin);
+					toConsole("Loading package bundle", selectedPath, debuggin);
 					showToast("Extracting bundle…", "info");
 
 					const optimizationOverlayNode =
@@ -1973,7 +1978,7 @@ const initializePlayer = () => {
 
 						showToast("Bundle loaded successfully.", "success");
 					} catch (bundleErr) {
-						toConsole("Error loading .tmvz bundle", bundleErr, debuggin);
+						toConsole("Error loading package bundle", bundleErr, debuggin);
 						showToast(
 							`Error loading bundle: ${bundleErr?.message || bundleErr}`,
 							"error",

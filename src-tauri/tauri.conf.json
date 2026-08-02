@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "TMVideo",
+  "productName": "LS.Video",
   "version": "0.5.0",
-  "identifier": "com.tmvideo.desktop",
+  "identifier": "com.leanstudio.lsvideo",
   "build": {
     "devUrl": null,
     "frontendDist": "../ui",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "TMVideo - v0.5.0",
+        "title": "LS.Video - v0.5.0",
         "width": 1028,
         "height": 786,
         "resizable": true,
@@ -37,9 +37,9 @@
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "fileAssociations": [
       {
-        "name": "TMVideo Project",
-        "ext": ["tmv", "tmvz"],
-        "description": "TMVideo Project File",
+        "name": "LS.Video Project",
+        "ext": ["lsv", "lsvz", "tmv", "tmvz"],
+        "description": "LS.Video Project File",
         "role": "Editor"
       },
       {
