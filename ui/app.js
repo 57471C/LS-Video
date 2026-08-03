@@ -1594,6 +1594,43 @@ const initializePlayer = () => {
 		});
 	}
 
+	// Product chrome: open allow-listed https URLs once via shell (no target=_blank double-open)
+	const productChrome = document.getElementById("productChrome");
+	if (productChrome) {
+		productChrome.addEventListener(
+			"click",
+			(e) => {
+				const anchor = e.target.closest("a.product-chrome-link");
+				if (!anchor) return;
+				const url = anchor.getAttribute("href") || "";
+				if (!url.startsWith("https://")) return;
+				// Stop default navigation / WebView2 new-window before any async work
+				e.preventDefault();
+				e.stopPropagation();
+				e.stopImmediatePropagation();
+
+				const openOnce = async () => {
+					try {
+						const shellOpen = window.__TAURI__?.shell?.open;
+						if (typeof shellOpen === "function") {
+							await shellOpen(url);
+						} else if (window.__TAURI__?.core?.invoke) {
+							await window.__TAURI__.core.invoke("plugin:shell|open", {
+								path: url,
+							});
+						} else {
+							window.open(url, "_blank", "noopener,noreferrer");
+						}
+					} catch (err) {
+						console.warn("[ProductChrome] Failed to open URL:", url, err);
+					}
+				};
+				void openOnce();
+			},
+			true,
+		);
+	}
+
 	function configureTimelineTicks(duration) {
 		if (duration > 0) {
 			let tickSeconds = 60;

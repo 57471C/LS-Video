@@ -63,6 +63,21 @@
         }
       ]
     },
-    "shell:allow-kill"
+    "shell:allow-kill",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "https://lean.studio" },
+        { "url": "https://lean.studio/*" },
+        { "url": "https://www.lean.studio" },
+        { "url": "https://www.lean.studio/*" },
+        { "url": "https://speeddf.com" },
+        { "url": "https://speeddf.com/*" },
+        { "url": "https://www.speeddf.com" },
+        { "url": "https://www.speeddf.com/*" },
+        { "url": "https://buymeacoffee.com/*" },
+        { "url": "https://www.buymeacoffee.com/*" }
+      ]
+    }
   ]
 }
