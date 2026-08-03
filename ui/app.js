@@ -1594,6 +1594,32 @@ const initializePlayer = () => {
 		});
 	}
 
+	// Product chrome: open allow-listed https URLs in the system browser
+	const productChrome = document.getElementById("productChrome");
+	if (productChrome) {
+		productChrome.addEventListener("click", async (e) => {
+			const anchor = e.target.closest("a.product-chrome-link");
+			if (!anchor) return;
+			const url = anchor.href;
+			if (!url || !url.startsWith("https://")) return;
+			e.preventDefault();
+			try {
+				const shellOpen = window.__TAURI__?.shell?.open;
+				if (typeof shellOpen === "function") {
+					await shellOpen(url);
+				} else if (window.__TAURI__?.core?.invoke) {
+					await window.__TAURI__.core.invoke("plugin:shell|open", {
+						path: url,
+					});
+				} else {
+					window.open(url, "_blank", "noopener,noreferrer");
+				}
+			} catch (err) {
+				console.warn("[ProductChrome] Failed to open URL:", url, err);
+			}
+		});
+	}
+
 	function configureTimelineTicks(duration) {
 		if (duration > 0) {
 			let tickSeconds = 60;
