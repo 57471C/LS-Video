@@ -24,11 +24,7 @@ import {
 
 // --- CENTRAL APPLICATION RUNTIME STATE SAFETIES ---
 window.cinemaIdleTimer = window.cinemaIdleTimer || null;
-const _savedViewMode = localStorage.getItem("currentViewMode");
-window.currentViewMode =
-	_savedViewMode && ["normal", "cinema", "miniplayer"].includes(_savedViewMode)
-		? _savedViewMode
-		: "normal"; // Valid options: 'normal', 'cinema', 'miniplayer'
+window.currentViewMode = window.currentViewMode || "normal"; // Valid options: 'normal', 'cinema', 'miniplayer'
 
 // --- MARQUEE ZOOM COORDINATE POINTER SAFETIES ---
 window.marqueeSelectionStartRef = null;
@@ -643,13 +639,8 @@ window.initializeLaunchArgumentHandler = async () => {
 					await window.cycleViewMode("miniplayer");
 				}
 			} else {
-				// Cold boot without parameters: restore saved view mode preference
-				const savedMode = localStorage.getItem("currentViewMode");
-				const targetBootMode =
-					savedMode && ["normal", "cinema", "miniplayer"].includes(savedMode)
-						? savedMode
-						: "normal";
-				await window.cycleViewMode(targetBootMode);
+				// RULE 1: Cold start without parameters MUST boot into Normal workspace mode
+				await window.cycleViewMode("normal");
 			}
 		}
 	} catch (error) {
