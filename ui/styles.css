@@ -549,7 +549,11 @@ body.miniplayer-mode #playlist-queue-sidebar,
 body.miniplayer-mode #mainLayoutGrid #rightPanel,
 body.miniplayer-mode #marker-table-container,
 body.miniplayer-mode #sidebar,
-body.miniplayer-mode #detailed-timeline-panel {
+body.miniplayer-mode #detailed-timeline-panel,
+body.miniplayer-mode #trimVideoBtn,
+body.cinema-mode #trimVideoBtn,
+body.miniplayer-mode #takeSnapshotBtn,
+body.cinema-mode #takeSnapshotBtn {
 	display: none !important;
 }
 

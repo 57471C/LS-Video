@@ -56,9 +56,17 @@ const updateVisualizerControlsVisibility = () => {
 	const isAudio = isAudioOnlyMedia(videoFilePath || videoFileName);
 
 	if (isAudio) {
-		vizToggleBtn?.classList.remove("hidden");
+		if (vizToggleBtn) {
+			vizToggleBtn.classList.remove("hidden");
+			vizToggleBtn.disabled = false;
+		}
 	} else {
-		vizToggleBtn?.classList.add("hidden");
+		if (vizToggleBtn) {
+			vizToggleBtn.classList.add("hidden");
+			vizToggleBtn.disabled = true;
+			vizToggleBtn.classList.remove("btn-icon-highlight");
+			vizToggleBtn.classList.add("btn-icon");
+		}
 		if (vizCanvas) {
 			stopVisualizer(vizCanvas);
 		}
@@ -1612,6 +1620,12 @@ const initializePlayer = () => {
 	const vizToggleBtn = document.getElementById("vizToggleBtn");
 
 	vizToggleBtn?.addEventListener("click", () => {
+		if (
+			vizToggleBtn.disabled ||
+			!isAudioOnlyMedia(videoFilePath || videoFileName)
+		) {
+			return;
+		}
 		const canvas = document.getElementById("vizCanvas");
 		if (!canvas) return;
 		if (isVisualizerActive()) {
