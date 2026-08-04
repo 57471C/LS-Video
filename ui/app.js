@@ -50,6 +50,21 @@ if (localStorage.getItem("darkMode") === "true") {
 	document.documentElement.classList.remove("dark");
 }
 
+const updateVisualizerControlsVisibility = () => {
+	const vizToggleBtn = document.getElementById("vizToggleBtn");
+	if (!vizToggleBtn) return;
+	const isAudio = isAudioOnlyMedia(videoFilePath || videoFileName);
+	const inMiniOrCinema =
+		window.currentViewMode === "miniplayer" ||
+		window.currentViewMode === "cinema";
+
+	if (isAudio || inMiniOrCinema) {
+		vizToggleBtn.classList.remove("hidden");
+	} else {
+		vizToggleBtn.classList.add("hidden");
+	}
+};
+
 // --- CENTRAL APPLICATION RUNTIME STATE SAFETIES ---
 window.cinemaIdleTimer = window.cinemaIdleTimer || null;
 window.currentViewMode = window.currentViewMode || "normal"; // Valid options: 'normal', 'cinema', 'miniplayer'
@@ -1422,6 +1437,7 @@ window.cycleViewMode = async (targetMode) => {
 		}
 
 		const vizCanvas = document.getElementById("vizCanvas");
+		updateVisualizerControlsVisibility();
 		if (vizCanvas) {
 			resizeVisualizer(vizCanvas);
 			if (
@@ -1556,6 +1572,8 @@ const initializePlayer = () => {
 
 		updateMarkersList();
 	});
+
+	updateVisualizerControlsVisibility();
 
 	const vizToggleBtn = document.getElementById("vizToggleBtn");
 

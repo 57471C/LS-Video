@@ -11,6 +11,7 @@ let currentPresetKeys = [];
 let currentPresetIndex = 0;
 let isEnabled = false;
 let autoPresetInterval = null;
+let evalErrorLogged = false;
 
 export function initVisualizerAudio(videoElement) {
 	if (!videoElement) return;
@@ -95,8 +96,13 @@ export function initVisualizerCanvas(canvasElement, videoElement) {
 	}
 
 	try {
-		const width = canvasElement.clientWidth || 580;
-		const height = canvasElement.clientHeight || 440;
+		const parent = canvasElement.parentElement;
+		const width = parent
+			? parent.clientWidth
+			: canvasElement.clientWidth || 580;
+		const height = parent
+			? parent.clientHeight
+			: canvasElement.clientHeight || 440;
 
 		visualizer = createVisualizerFn(audioContext, canvasElement, {
 			width,
@@ -118,10 +124,38 @@ export function initVisualizerCanvas(canvasElement, videoElement) {
 		if (currentPresetKeys.length > 0) {
 			const randomIdx = Math.floor(Math.random() * currentPresetKeys.length);
 			currentPresetIndex = randomIdx;
-			visualizer.loadPreset(presets[currentPresetKeys[randomIdx]], 0.0);
+			safeLoadPreset(currentPresetKeys[randomIdx], 0.0);
 		}
 	} catch (err) {
 		console.error("[Viz Engine] Butterchurn creation failed:", err);
+		visualizer = null;
+	}
+}
+
+function safeLoadPreset(presetName, transitionDuration = 2.7) {
+	if (!visualizer || !presets[presetName]) return;
+	try {
+		visualizer.loadPreset(presets[presetName], transitionDuration);
+	} catch (err) {
+		if (
+			err.name === "EvalError" ||
+			err instanceof EvalError ||
+			err.message?.includes("eval")
+		) {
+			if (!evalErrorLogged) {
+				evalErrorLogged = true;
+				console.error(
+					"[Viz Engine] Butterchurn preset compilation failed. Ensure CSP script-src includes 'unsafe-eval'.",
+					err,
+				);
+			}
+			if (autoPresetInterval) {
+				clearInterval(autoPresetInterval);
+				autoPresetInterval = null;
+			}
+		} else {
+			console.warn("[Viz Engine] Error loading preset:", err);
+		}
 	}
 }
 
@@ -160,7 +194,7 @@ export function startVisualizer(canvasElement, videoElement) {
 		animFrameId = requestAnimationFrame(renderLoop);
 	}
 
-	if (!autoPresetInterval && currentPresetKeys.length > 1) {
+	if (!autoPresetInterval && visualizer && currentPresetKeys.length > 1) {
 		autoPresetInterval = setInterval(() => {
 			if (isEnabled && visualizer) {
 				nextPreset();
@@ -185,24 +219,42 @@ export function stopVisualizer(canvasElement) {
 }
 
 export function resizeVisualizer(canvasElement) {
-	if (!visualizer || !canvasElement) return;
+	if (!canvasElement) return;
 	const parent = canvasElement.parentElement;
 	const width = parent ? parent.clientWidth : canvasElement.clientWidth || 580;
 	const height = parent
 		? parent.clientHeight
 		: canvasElement.clientHeight || 440;
+	const dpr = window.devicePixelRatio || 1;
+
 	if (width > 0 && height > 0) {
-		visualizer.setRendererSize(width, height);
+		canvasElement.width = Math.floor(width * dpr);
+		canvasElement.height = Math.floor(height * dpr);
+		if (visualizer) {
+			try {
+				visualizer.setRendererSize(width, height);
+			} catch (e) {
+				console.warn("[Viz Engine] Resize error:", e);
+			}
+		}
 	}
 }
 
 export function nextPreset() {
 	if (!visualizer || currentPresetKeys.length === 0) return;
 	currentPresetIndex = (currentPresetIndex + 1) % currentPresetKeys.length;
-	const presetName = currentPresetKeys[currentPresetIndex];
-	visualizer.loadPreset(presets[presetName], 2.7);
+	safeLoadPreset(currentPresetKeys[currentPresetIndex], 2.7);
 }
 
 export function isVisualizerActive() {
 	return isEnabled;
+}
+
+if (typeof window !== "undefined") {
+	window.addEventListener("resize", () => {
+		const canvas = document.getElementById("vizCanvas");
+		if (canvas && isEnabled) {
+			resizeVisualizer(canvas);
+		}
+	});
 }
