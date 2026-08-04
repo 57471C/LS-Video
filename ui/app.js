@@ -323,6 +323,35 @@ const isEmptyOrOriginOnlyMediaSrc = (src) => {
 	return false;
 };
 
+/**
+ * Normalizes Windows extended prefixes (\\?\UNC\ and \\?\ prefixes) without stripping UNC network share paths (\\server\share\...).
+ * @param {string} rawPath
+ * @returns {string}
+ */
+export function normalizePath(rawPath) {
+	if (typeof rawPath !== "string" || !rawPath) return rawPath;
+	const trimmed = rawPath.trim();
+	let normalized = trimmed;
+	const upper = trimmed.toUpperCase();
+
+	if (upper.startsWith("\\\\?\\UNC\\")) {
+		normalized = "\\\\" + trimmed.slice("\\\\?\\UNC\\".length);
+	} else if (upper.startsWith("//?/UNC/")) {
+		normalized = "//" + trimmed.slice("//?/UNC/".length);
+	} else if (upper.startsWith("\\\\?\\")) {
+		normalized = trimmed.slice("\\\\?\\".length);
+	} else if (upper.startsWith("//?/")) {
+		normalized = trimmed.slice("//?/".length);
+	}
+
+	console.log(`[Loader Core] Path normalize: "${rawPath}" -> "${normalized}"`);
+	return normalized;
+}
+
+if (typeof window !== "undefined") {
+	window.normalizePath = normalizePath;
+}
+
 window.loadVideo = async (incomingVideoPath) => {
 	if (!incomingVideoPath || incomingVideoPath.trim() === "") {
 		console.error(
@@ -331,7 +360,7 @@ window.loadVideo = async (incomingVideoPath) => {
 		return;
 	}
 
-	const normalizedPath = incomingVideoPath.trim();
+	const normalizedPath = normalizePath(incomingVideoPath);
 
 	// Same path already loading — drop duplicate concurrent call (restore+open, etc.)
 	if (window._videoLoadInProgress && window._loadVideoPath === normalizedPath) {
@@ -428,7 +457,7 @@ window.loadVideo = async (incomingVideoPath) => {
 			}
 
 			// Surgical clearance of native Windows extended UNC safety qualifiers
-			resolvedFilePath = resolvedFilePath.replace(/^\\\\?\\/, "");
+			resolvedFilePath = normalizePath(resolvedFilePath);
 			console.log(
 				"[Loader Core] Video path mapping successfully resolved to:",
 				resolvedFilePath,
@@ -3338,7 +3367,7 @@ window.updateSliderTicks = updateSliderTicks;
 window.toggleSettings = toggleSettings;
 
 /** Parses the FFmpeg log output to extract timestamp and update progress. */
-function parseFFmpegTime(line, totalSeconds, progressBar) {
+export function parseFFmpegTime(line, totalSeconds, progressBar) {
 	if (!line) return;
 	const match = line.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
 	if (match) {
