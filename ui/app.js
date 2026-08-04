@@ -52,16 +52,19 @@ if (localStorage.getItem("darkMode") === "true") {
 
 const updateVisualizerControlsVisibility = () => {
 	const vizToggleBtn = document.getElementById("vizToggleBtn");
-	if (!vizToggleBtn) return;
+	const vizCanvas = document.getElementById("vizCanvas");
 	const isAudio = isAudioOnlyMedia(videoFilePath || videoFileName);
-	const inMiniOrCinema =
-		window.currentViewMode === "miniplayer" ||
-		window.currentViewMode === "cinema";
 
-	if (isAudio || inMiniOrCinema) {
-		vizToggleBtn.classList.remove("hidden");
+	if (isAudio) {
+		vizToggleBtn?.classList.remove("hidden");
 	} else {
-		vizToggleBtn.classList.add("hidden");
+		vizToggleBtn?.classList.add("hidden");
+		if (vizCanvas) {
+			stopVisualizer(vizCanvas);
+		}
+		if (player) {
+			player.classList.remove("opacity-0");
+		}
 	}
 };
 
@@ -518,14 +521,19 @@ window.loadVideo = async (incomingVideoPath) => {
 		};
 
 		// 5. Fire core media track rehydration paint triggers
+		const vizCanvas = document.getElementById("vizCanvas");
 		if (isAudioOnlyMedia(normalizedPath)) {
 			videoElement.classList.add("opacity-0");
 		} else {
 			videoElement.classList.remove("opacity-0");
+			if (vizCanvas) {
+				stopVisualizer(vizCanvas);
+			}
 		}
 		videoElement.src = validatedStreamUrl;
 		videoElement.preload = "auto";
 		videoElement.load();
+		updateVisualizerControlsVisibility();
 
 		// Fire default post-load interface configurations
 		if (typeof toggleVideoPlaceholder === "function") {
