@@ -21,6 +21,27 @@ import {
 	resetVideoViewport,
 	updateViewportTransform,
 } from "./js/viewport-engine.js";
+import {
+	initVisualizerAudio,
+	isVisualizerActive,
+	resizeVisualizer,
+	startVisualizer,
+	stopVisualizer,
+} from "./js/visualizer-engine.js";
+
+const isAudioOnlyMedia = (pathOrName) => {
+	if (!pathOrName) return false;
+	const lower = pathOrName.toLowerCase();
+	return (
+		lower.endsWith(".mp3") ||
+		lower.endsWith(".wav") ||
+		lower.endsWith(".flac") ||
+		lower.endsWith(".aac") ||
+		lower.endsWith(".m4a") ||
+		lower.endsWith(".ogg") ||
+		lower.endsWith(".wma")
+	);
+};
 
 // --- CENTRAL APPLICATION RUNTIME STATE SAFETIES ---
 window.cinemaIdleTimer = window.cinemaIdleTimer || null;
@@ -1393,6 +1414,21 @@ window.cycleViewMode = async (targetMode) => {
 			window.setupVideoTrack();
 		}
 
+		const vizCanvas = document.getElementById("vizCanvas");
+		if (vizCanvas) {
+			resizeVisualizer(vizCanvas);
+			if (
+				mode === "normal" &&
+				!isAudioOnlyMedia(videoFilePath || videoFileName)
+			) {
+				stopVisualizer(vizCanvas);
+			} else if (mode === "miniplayer" || mode === "cinema") {
+				if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
+					startVisualizer(vizCanvas, player);
+				}
+			}
+		}
+
 		// Rehydrate video session if entering Normal mode and no video currently loaded
 		if (
 			mode === "normal" &&
@@ -1512,6 +1548,37 @@ const initializePlayer = () => {
 		toConsole("Dark mode toggled", isDark ? "On" : "Off", debuggin);
 
 		updateMarkersList();
+	});
+
+	const vizToggleBtn = document.getElementById("vizToggleBtn");
+
+	vizToggleBtn?.addEventListener("click", () => {
+		const canvas = document.getElementById("vizCanvas");
+		if (!canvas) return;
+		if (isVisualizerActive()) {
+			stopVisualizer(canvas);
+			vizToggleBtn.classList.remove("btn-icon-highlight");
+			vizToggleBtn.classList.add("btn-icon");
+			showToast("Visualizer Off", "info");
+		} else {
+			startVisualizer(canvas, player);
+			vizToggleBtn.classList.add("btn-icon-highlight");
+			vizToggleBtn.classList.remove("btn-icon");
+			showToast("Visualizer On", "success");
+		}
+	});
+
+	player.addEventListener("play", () => {
+		initVisualizerAudio(player);
+		const canvas = document.getElementById("vizCanvas");
+		if (
+			canvas &&
+			(isVisualizerActive() ||
+				(window.currentViewMode !== "normal" &&
+					isAudioOnlyMedia(videoFilePath || videoFileName)))
+		) {
+			startVisualizer(canvas, player);
+		}
 	});
 
 	if (DOM.videoQueueSelect) {
@@ -2086,7 +2153,22 @@ const initializePlayer = () => {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
 					filters: [
-						{ name: "Video", extensions: ["mp4", "webm", "ogg", "mov", "avi"] },
+						{
+							name: "Media Files",
+							extensions: [
+								"mp4",
+								"webm",
+								"ogg",
+								"mov",
+								"avi",
+								"mkv",
+								"mp3",
+								"wav",
+								"flac",
+								"aac",
+								"m4a",
+							],
+						},
 					],
 				});
 				if (selected) {
@@ -2108,7 +2190,22 @@ const initializePlayer = () => {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
 					filters: [
-						{ name: "Video", extensions: ["mp4", "webm", "ogg", "mov", "avi"] },
+						{
+							name: "Media Files",
+							extensions: [
+								"mp4",
+								"webm",
+								"ogg",
+								"mov",
+								"avi",
+								"mkv",
+								"mp3",
+								"wav",
+								"flac",
+								"aac",
+								"m4a",
+							],
+						},
 					],
 				});
 				if (selected) {
