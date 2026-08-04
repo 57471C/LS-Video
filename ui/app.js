@@ -43,6 +43,13 @@ const isAudioOnlyMedia = (pathOrName) => {
 	);
 };
 
+// --- INITIAL THEME BOOTSTRAP (CSP-SAFE) ---
+if (localStorage.getItem("darkMode") === "true") {
+	document.documentElement.classList.add("dark");
+} else {
+	document.documentElement.classList.remove("dark");
+}
+
 // --- CENTRAL APPLICATION RUNTIME STATE SAFETIES ---
 window.cinemaIdleTimer = window.cinemaIdleTimer || null;
 window.currentViewMode = window.currentViewMode || "normal"; // Valid options: 'normal', 'cinema', 'miniplayer'

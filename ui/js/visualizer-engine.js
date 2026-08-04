@@ -53,11 +53,44 @@ export function initVisualizerCanvas(canvasElement, videoElement) {
 
 	if (!audioContext || !mediaSourceNode) return;
 
-	const butterchurn = window.butterchurn;
-	const butterchurnPresets = window.butterchurnPresets;
+	const butterchurnGlobal = window.butterchurn || window.Butterchurn;
+	const presetsGlobal =
+		window.butterchurnPresets ||
+		window.butterchurnPresetsMinimal ||
+		window.ButterchurnPresets;
 
-	if (!butterchurn || !butterchurnPresets) {
+	console.log(
+		"[Viz Engine] Butterchurn global detected:",
+		typeof butterchurnGlobal,
+		butterchurnGlobal,
+	);
+	console.log(
+		"[Viz Engine] ButterchurnPresets global detected:",
+		typeof presetsGlobal,
+		presetsGlobal,
+	);
+
+	if (!butterchurnGlobal || !presetsGlobal) {
 		console.warn("[Viz Engine] Butterchurn scripts not loaded.");
+		return;
+	}
+
+	const createVisualizerFn =
+		butterchurnGlobal.createVisualizer ||
+		butterchurnGlobal.default?.createVisualizer ||
+		(typeof butterchurnGlobal.default === "function"
+			? butterchurnGlobal.default
+			: null);
+
+	const getPresetsFn =
+		presetsGlobal.getPresets ||
+		presetsGlobal.default?.getPresets ||
+		(typeof presetsGlobal.default === "function"
+			? presetsGlobal.default
+			: null);
+
+	if (typeof createVisualizerFn !== "function") {
+		console.warn("[Viz Engine] createVisualizer function resolution failed.");
 		return;
 	}
 
@@ -65,7 +98,7 @@ export function initVisualizerCanvas(canvasElement, videoElement) {
 		const width = canvasElement.clientWidth || 580;
 		const height = canvasElement.clientHeight || 440;
 
-		visualizer = butterchurn.createVisualizer(audioContext, canvasElement, {
+		visualizer = createVisualizerFn(audioContext, canvasElement, {
 			width,
 			height,
 			pixelRatio: window.devicePixelRatio || 1,
@@ -74,7 +107,12 @@ export function initVisualizerCanvas(canvasElement, videoElement) {
 
 		visualizer.connectAudio(mediaSourceNode);
 
-		presets = butterchurnPresets.getPresets();
+		if (typeof getPresetsFn === "function") {
+			presets = getPresetsFn();
+		} else if (presetsGlobal && typeof presetsGlobal === "object") {
+			presets = presetsGlobal;
+		}
+
 		currentPresetKeys = Object.keys(presets);
 
 		if (currentPresetKeys.length > 0) {
