@@ -62,7 +62,10 @@ async function resolveFfmpegConcatListPath(fileName, fallbackBesideOutputPath) {
 			const sep = tempDir.endsWith("\\") || tempDir.endsWith("/") ? "" : "\\";
 			return `${tempDir}${sep}${fileName}`;
 		} catch (e) {
-			console.warn("tempDir unavailable for concat list; using fallback path", e);
+			console.warn(
+				"tempDir unavailable for concat list; using fallback path",
+				e,
+			);
 		}
 	}
 	if (fallbackBesideOutputPath) {
@@ -277,10 +280,7 @@ window.loadVideo = async (incomingVideoPath) => {
 	const normalizedPath = incomingVideoPath.trim();
 
 	// Same path already loading — drop duplicate concurrent call (restore+open, etc.)
-	if (
-		window._videoLoadInProgress &&
-		window._loadVideoPath === normalizedPath
-	) {
+	if (window._videoLoadInProgress && window._loadVideoPath === normalizedPath) {
 		return;
 	}
 
@@ -324,7 +324,8 @@ window.loadVideo = async (incomingVideoPath) => {
 			"[Loader Core] Processing absolute ingestion path parameter:",
 			normalizedPath,
 		);
-		const optimizationOverlayNode = document.getElementById("optimizingOverlay");
+		const optimizationOverlayNode =
+			document.getElementById("optimizingOverlay");
 		let resolvedFilePath = normalizedPath;
 		let unlistenTranscode = null;
 
@@ -395,8 +396,7 @@ window.loadVideo = async (incomingVideoPath) => {
 					// Restore original copy for future runs
 					const titleEl = optimizationOverlayNode.querySelector("h3");
 					const descEl = optimizationOverlayNode.querySelector("p");
-					if (titleEl)
-						titleEl.textContent = "Optimizing High-Efficiency Media";
+					if (titleEl) titleEl.textContent = "Optimizing High-Efficiency Media";
 					if (descEl)
 						descEl.textContent =
 							"Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...";
@@ -639,21 +639,7 @@ window.initializeLaunchArgumentHandler = async () => {
 					await window.cycleViewMode("miniplayer");
 				}
 			} else {
-				if (
-					(videoQueue &&
-						videoQueue.length > 0 &&
-						videoQueue[0].videoFilePath) ||
-					player.src
-				) {
-					// Retain active session stability bounds on standard launch check
-					await window.cycleViewMode("normal");
-					return;
-				}
-				if (typeof window.clearAllPreviousProjectData === "function") {
-					window.clearAllPreviousProjectData();
-				}
-
-				// RULE 3: Cold boots without parameters maximize into standard workspace mode
+				// RULE 1: Cold start without parameters MUST boot into Normal workspace mode
 				await window.cycleViewMode("normal");
 			}
 		}
@@ -1311,6 +1297,7 @@ window.cycleViewMode = async (targetMode) => {
 		}
 
 		const mode = window.currentViewMode;
+		localStorage.setItem("currentViewMode", mode);
 		console.log(
 			`[View System] Shifting layout mode configuration to: ${mode.toUpperCase()}`,
 		);
@@ -1404,6 +1391,24 @@ window.cycleViewMode = async (targetMode) => {
 		}
 		if (typeof window.setupVideoTrack === "function") {
 			window.setupVideoTrack();
+		}
+
+		// Rehydrate video session if entering Normal mode and no video currently loaded
+		if (
+			mode === "normal" &&
+			(!player?.src ||
+				player.src === "" ||
+				player.src === window.location.href) &&
+			typeof videoFilePath !== "undefined" &&
+			videoFilePath &&
+			typeof window.loadVideo === "function"
+		) {
+			window.loadVideo(videoFilePath).catch((err) => {
+				console.error(
+					"[View System] Error rehydrating video on switching to normal mode:",
+					err,
+				);
+			});
 		}
 	} catch (err) {
 		console.error("[View System] View mode transition failed:", err);
@@ -1520,9 +1525,12 @@ const initializePlayer = () => {
 	if (DOM.editVideoQueueBtn) {
 		DOM.editVideoQueueBtn.addEventListener("click", editVideoInQueue);
 	}
-	document.getElementById("removeVideoQueueBtn")?.addEventListener("click", () => {
-		if (typeof window.removeCurrentVideo === "function") window.removeCurrentVideo();
-	});
+	document
+		.getElementById("removeVideoQueueBtn")
+		?.addEventListener("click", () => {
+			if (typeof window.removeCurrentVideo === "function")
+				window.removeCurrentVideo();
+		});
 	const reorderBtn = document.getElementById("reorder-videos-btn");
 	if (reorderBtn) {
 		reorderBtn.addEventListener("click", () => {
@@ -1792,19 +1800,21 @@ const initializePlayer = () => {
 
 	loadLocalState();
 
-	// Rehydrate active media through the proxy path (H.265-safe).
+	// Rehydrate active media through the proxy path (H.265-safe) ONLY if intended mode is Normal.
 	// loadLocalState only restores memory; it no longer sets player.src.
-	if (videoFilePath && window.__TAURI__) {
-		window.loadVideo(videoFilePath).catch((err) => {
-			toConsole("Error rehydrating video on startup", err, debuggin);
-		});
-	} else if (videoFileName && videoBlobCache[videoFileName]) {
-		// Browser blob cache — intentional exception (no filesystem path)
-		player.src = videoBlobCache[videoFileName];
-		player.preload = "metadata";
-		player.load();
-		toggleVideoPlaceholder(false);
-		updateLoadButtonColor();
+	if (window.currentViewMode === "normal") {
+		if (videoFilePath && window.__TAURI__) {
+			window.loadVideo(videoFilePath).catch((err) => {
+				toConsole("Error rehydrating video on startup", err, debuggin);
+			});
+		} else if (videoFileName && videoBlobCache[videoFileName]) {
+			// Browser blob cache — intentional exception (no filesystem path)
+			player.src = videoBlobCache[videoFileName];
+			player.preload = "metadata";
+			player.load();
+			toggleVideoPlaceholder(false);
+			updateLoadButtonColor();
+		}
 	}
 
 	updateMarkersList();
@@ -1954,7 +1964,10 @@ const initializePlayer = () => {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
 					filters: [
-						{ name: "LS.Video Project / Package", extensions: ["lsv", "lsvz", "tmv", "tmvz"] },
+						{
+							name: "LS.Video Project / Package",
+							extensions: ["lsv", "lsvz", "tmv", "tmvz"],
+						},
 					],
 				});
 				if (!selected) return;
@@ -2370,7 +2383,7 @@ const initializePlayer = () => {
 		player.pause();
 	};
 
-	document.addEventListener("keydown", (e) => {
+	document.addEventListener("keydown", async (e) => {
 		// Disable shortcuts while Tetris is active to prevent key conflicts (e.g. arrows/spacebar seeking video)
 		const tetrisCont = document.getElementById("tetrisContainer");
 		if (
@@ -2395,6 +2408,16 @@ const initializePlayer = () => {
 		}
 
 		if (["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
+
+		// Esc in Cinema mode → Miniplayer (NOT Normal)
+		if (
+			window.currentViewMode === "cinema" &&
+			(e.key === "Escape" || e.key === "Esc")
+		) {
+			e.preventDefault();
+			await window.cycleViewMode("miniplayer");
+			return;
+		}
 
 		switch (e.key) {
 			case ",":
