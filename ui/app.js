@@ -518,6 +518,11 @@ window.loadVideo = async (incomingVideoPath) => {
 		};
 
 		// 5. Fire core media track rehydration paint triggers
+		if (isAudioOnlyMedia(normalizedPath)) {
+			videoElement.classList.add("opacity-0");
+		} else {
+			videoElement.classList.remove("opacity-0");
+		}
 		videoElement.src = validatedStreamUrl;
 		videoElement.preload = "auto";
 		videoElement.load();
@@ -967,6 +972,20 @@ window.loadWaveformTimeline = async () => {
 		window.renderAudioWaveformCanvas();
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
+		}
+
+		// Skip filmstrip thumbnail extraction for audio-only media
+		if (isAudioOnlyMedia(requestPath)) {
+			const videoTrack = document.getElementById("timeline-video-track");
+			if (videoTrack) {
+				videoTrack.textContent = "Audio File Track";
+				videoTrack.style.display = "flex";
+				videoTrack.style.alignItems = "center";
+				videoTrack.style.justifyContent = "center";
+				videoTrack.style.width = "100%";
+				window.setupVideoTrack();
+			}
+			return;
 		}
 
 		// Trigger filmstrip thumbnail extraction
@@ -1452,6 +1471,13 @@ window.cycleViewMode = async (targetMode) => {
 			}
 		}
 
+		requestAnimationFrame(() => {
+			if (vizCanvas) resizeVisualizer(vizCanvas);
+			setTimeout(() => {
+				if (vizCanvas) resizeVisualizer(vizCanvas);
+			}, 100);
+		});
+
 		// Rehydrate video session if entering Normal mode and no video currently loaded
 		if (
 			mode === "normal" &&
@@ -1800,12 +1826,21 @@ const initializePlayer = () => {
 		toConsole("Playback speed restored", playbackSpeed, debuggin);
 
 		player.volume = volumeLevel;
-		player.muted = true;
-		DOM.volumeOnIcon.classList.add("hidden");
-		DOM.volumeOffIcon.classList.remove("hidden");
-		volumeSlider.value = 0;
-		DOM.volumeValue.textContent = "0";
-		toConsole("Video muted on load", "Success", debuggin);
+		if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
+			player.muted = false;
+			DOM.volumeOnIcon.classList.remove("hidden");
+			DOM.volumeOffIcon.classList.add("hidden");
+			volumeSlider.value = Math.round(volumeLevel * 100);
+			DOM.volumeValue.textContent = Math.round(volumeLevel * 100).toString();
+			toConsole("Audio file unmuted on load", "Success", debuggin);
+		} else {
+			player.muted = true;
+			DOM.volumeOnIcon.classList.add("hidden");
+			DOM.volumeOffIcon.classList.remove("hidden");
+			volumeSlider.value = 0;
+			DOM.volumeValue.textContent = "0";
+			toConsole("Video muted on load", "Success", debuggin);
+		}
 
 		bootTimelineVisualizers();
 		initializeVideoViewportZoomPan(

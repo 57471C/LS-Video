@@ -168,6 +168,10 @@ export function startVisualizer(canvasElement, videoElement) {
 		audioContext.resume().catch(() => {});
 	}
 
+	if (videoElement?.muted) {
+		videoElement.muted = false;
+	}
+
 	if (!visualizer) {
 		initVisualizerCanvas(canvasElement, videoElement);
 	}
@@ -177,6 +181,10 @@ export function startVisualizer(canvasElement, videoElement) {
 	isEnabled = true;
 	canvasElement.classList.remove("hidden");
 	resizeVisualizer(canvasElement);
+
+	requestAnimationFrame(() => {
+		resizeVisualizer(canvasElement);
+	});
 
 	if (!animFrameId) {
 		const renderLoop = () => {
@@ -220,21 +228,33 @@ export function stopVisualizer(canvasElement) {
 
 export function resizeVisualizer(canvasElement) {
 	if (!canvasElement) return;
-	const parent = canvasElement.parentElement;
-	const width = parent ? parent.clientWidth : canvasElement.clientWidth || 580;
-	const height = parent
-		? parent.clientHeight
-		: canvasElement.clientHeight || 440;
-	const dpr = window.devicePixelRatio || 1;
+	const wrapper =
+		document.getElementById("video-wrapper-id") ||
+		document.getElementById("video-viewport") ||
+		canvasElement.parentElement;
+	if (!wrapper) return;
 
-	if (width > 0 && height > 0) {
-		canvasElement.width = Math.floor(width * dpr);
-		canvasElement.height = Math.floor(height * dpr);
-		if (visualizer) {
+	const w = wrapper.clientWidth;
+	const h = wrapper.clientHeight;
+	if (w <= 0 || h <= 0) return;
+
+	const dpr = window.devicePixelRatio || 1;
+	const physW = Math.max(1, Math.floor(w * dpr));
+	const physH = Math.max(1, Math.floor(h * dpr));
+
+	canvasElement.width = physW;
+	canvasElement.height = physH;
+	canvasElement.style.width = `${w}px`;
+	canvasElement.style.height = `${h}px`;
+
+	if (visualizer) {
+		try {
+			visualizer.setRendererSize(physW, physH);
+		} catch (e) {
 			try {
-				visualizer.setRendererSize(width, height);
-			} catch (e) {
-				console.warn("[Viz Engine] Resize error:", e);
+				visualizer.setRendererSize(w, h);
+			} catch (err) {
+				console.warn("[Viz Engine] Resize error:", err);
 			}
 		}
 	}
