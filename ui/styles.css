@@ -352,6 +352,11 @@ body.cinema-mode #toastContainer {
 	grid-template-rows: auto 240px;
 }
 
+/* Multi-clip join run needs taller / scrollable detailed timeline */
+#mainLayoutGrid.timeline-expanded.sequence-multi {
+	grid-template-rows: auto min(420px, 42vh);
+}
+
 #detailed-timeline-panel {
 	grid-column: 1 / -1;
 	grid-row: 2;
@@ -387,10 +392,106 @@ body.cinema-mode #toastContainer {
 	gap: 4px !important;
 }
 
+.timeline-expanded #detailed-timeline-panel.sequence-multi {
+	height: min(420px, 42vh) !important;
+	overflow: hidden !important;
+}
+
 #non-linear-sequencer {
 	display: flex !important;
 	flex-direction: column !important;
 	gap: 4px !important;
+	min-height: 0 !important;
+	flex: 1 1 auto !important;
+}
+
+#timeline-tracks-host {
+	min-height: 0;
+	overflow-y: auto;
+}
+
+.sequence-av-pair {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.sequence-segment-label {
+	font-size: 10px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+	color: #71717a;
+	padding: 0 2px;
+}
+
+.dark .sequence-segment-label {
+	color: #a1a1aa;
+}
+
+.sequence-segment-fill {
+	background: rgba(59, 130, 246, 0.06);
+	border-left: 1px solid rgba(59, 130, 246, 0.35);
+	border-right: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+/* Between-row Join / Unjoin control in Playlist Queue */
+.queue-item-group {
+	display: flex;
+	flex-direction: column;
+	margin-bottom: 2px;
+}
+
+.queue-join-control {
+	align-self: center;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.75rem;
+	height: 1.25rem;
+	margin: 1px 0 3px;
+	padding: 0;
+	border-radius: 9999px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: #a1a1aa;
+	opacity: 0.55;
+	cursor: pointer;
+	transition:
+		opacity 0.15s ease,
+		color 0.15s ease,
+		background 0.15s ease,
+		border-color 0.15s ease,
+		transform 0.15s ease;
+}
+
+.queue-join-control:hover {
+	opacity: 0.9;
+	color: #52525b;
+	background: rgba(161, 161, 170, 0.12);
+}
+
+.dark .queue-join-control:hover {
+	color: #e4e4e7;
+	background: rgba(113, 113, 122, 0.25);
+}
+
+.queue-join-control.is-joined {
+	opacity: 1;
+	color: #2563eb;
+	border-color: rgba(37, 99, 235, 0.35);
+	background: rgba(37, 99, 235, 0.1);
+}
+
+.dark .queue-join-control.is-joined {
+	color: #60a5fa;
+	border-color: rgba(96, 165, 250, 0.4);
+	background: rgba(37, 99, 235, 0.18);
+}
+
+.queue-join-control.is-joined:hover {
+	transform: scale(1.05);
 }
 
 /* Rotational animation for toggle chevron */

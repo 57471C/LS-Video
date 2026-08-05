@@ -43,6 +43,365 @@ const isAudioOnlyMedia = (pathOrName) => {
 	);
 };
 
+// ---------------------------------------------------------------------------
+// Queue join / active-run sequence helpers (Phase 1)
+// joinedToNext on queue item i means item i is joined to item i+1.
+// ---------------------------------------------------------------------------
+window._sequenceHandoffInProgress = false;
+window._joinTimelineRebuildTimer = null;
+window._sequenceMode = {
+	active: false,
+	totalDuration: 0,
+	segments: [],
+};
+
+/** Effective clip out for a queue item (clipOut, mediaDuration, or active player). */
+const getClipOutTime = (video, queueIndex) => {
+	if (!video) return 0;
+	let outT = Number(video.clipOutTime) || 0;
+	if (outT <= 0) outT = Number(video.mediaDuration) || 0;
+	if (
+		outT <= 0 &&
+		queueIndex === activeQueueIndex &&
+		typeof player !== "undefined" &&
+		player?.duration
+	) {
+		outT = player.duration;
+	}
+	return outT;
+};
+
+/** Segment duration on the sequence spine: max(0, clipOut - clipIn). */
+const getClipSegmentDuration = (video, queueIndex) => {
+	if (!video) return 0;
+	const inT = Number(video.clipInTime) || 0;
+	const outT = getClipOutTime(video, queueIndex);
+	return Math.max(0, outT - inT);
+};
+
+/** True if this index is part of a join (its flag or previous item's flag). */
+const isQueueIndexJoined = (index) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		index < 0 ||
+		index >= videoQueue.length
+	) {
+		return false;
+	}
+	if (videoQueue[index]?.joinedToNext) return true;
+	if (index > 0 && videoQueue[index - 1]?.joinedToNext) return true;
+	return false;
+};
+window.isQueueIndexJoined = isQueueIndexJoined;
+
+/**
+ * Contiguous join-run that contains activeQueueIndex.
+ * Solo (no joins touching current) → single-item run.
+ */
+const getActiveJoinRun = () => {
+	const empty = {
+		startIndex: 0,
+		endIndex: 0,
+		segments: [],
+		totalDuration: 0,
+	};
+	if (typeof videoQueue === "undefined" || !videoQueue.length) return empty;
+
+	const n = videoQueue.length;
+	const cur = Math.max(0, Math.min(activeQueueIndex || 0, n - 1));
+
+	let start = cur;
+	while (start > 0 && videoQueue[start - 1]?.joinedToNext) {
+		start -= 1;
+	}
+	let end = cur;
+	while (end < n - 1 && videoQueue[end]?.joinedToNext) {
+		end += 1;
+	}
+
+	const segments = [];
+	let offset = 0;
+	for (let i = start; i <= end; i += 1) {
+		const video = videoQueue[i];
+		const clipIn = Number(video.clipInTime) || 0;
+		const clipOut = getClipOutTime(video, i);
+		const duration = Math.max(0, (clipOut || 0) - clipIn);
+		segments.push({
+			queueIndex: i,
+			video,
+			offset,
+			duration,
+			clipIn,
+			clipOut: clipOut > 0 ? clipOut : clipIn + duration,
+		});
+		offset += duration;
+	}
+	return {
+		startIndex: start,
+		endIndex: end,
+		segments,
+		totalDuration: offset,
+	};
+};
+window.getActiveJoinRun = getActiveJoinRun;
+
+/** Map sequence time → source queue index + local media time. */
+const sequenceTimeToSource = (seqTime, run = null) => {
+	const r = run || getActiveJoinRun();
+	if (!r.segments.length) return null;
+	const t = Math.max(0, Number(seqTime) || 0);
+	for (let i = 0; i < r.segments.length; i += 1) {
+		const seg = r.segments[i];
+		const segEnd = seg.offset + seg.duration;
+		const isLast = i === r.segments.length - 1;
+		if (t < segEnd || isLast) {
+			const localOffset = Math.min(
+				Math.max(0, t - seg.offset),
+				Math.max(0, seg.duration),
+			);
+			return {
+				queueIndex: seg.queueIndex,
+				localTime: seg.clipIn + localOffset,
+				segment: seg,
+			};
+		}
+	}
+	const last = r.segments[r.segments.length - 1];
+	return {
+		queueIndex: last.queueIndex,
+		localTime: last.clipOut,
+		segment: last,
+	};
+};
+window.sequenceTimeToSource = sequenceTimeToSource;
+
+/** Map source-local time → sequence time for a queue index in the active run. */
+const sourceTimeToSequence = (queueIndex, localTime, run = null) => {
+	const r = run || getActiveJoinRun();
+	const seg = r.segments.find((s) => s.queueIndex === queueIndex);
+	if (!seg) return Number(localTime) || 0;
+	return seg.offset + Math.max(0, (Number(localTime) || 0) - seg.clipIn);
+};
+window.sourceTimeToSequence = sourceTimeToSequence;
+
+/** Current playhead as sequence time (local when solo). */
+const getSequencePlayheadTime = () => {
+	const run = getActiveJoinRun();
+	const local =
+		typeof player !== "undefined" && player ? player.currentTime || 0 : 0;
+	if (run.segments.length <= 1) return local;
+	return sourceTimeToSequence(activeQueueIndex, local, run);
+};
+window.getSequencePlayheadTime = getSequencePlayheadTime;
+
+/** Publish sequence mode snapshot for timeline-engine seek/playhead. */
+const syncSequenceModeState = (run = null) => {
+	const r = run || getActiveJoinRun();
+	const multi = r.segments.length > 1;
+	window._sequenceMode = {
+		active: multi,
+		totalDuration: multi
+			? r.totalDuration
+			: (typeof player !== "undefined" && player?.duration) ||
+				r.totalDuration ||
+				0,
+		segments: r.segments,
+	};
+	const panel = document.getElementById("detailed-timeline-panel");
+	const grid = document.getElementById("mainLayoutGrid");
+	if (panel) panel.classList.toggle("sequence-multi", multi);
+	if (grid) grid.classList.toggle("sequence-multi", multi);
+	return window._sequenceMode;
+};
+window.syncSequenceModeState = syncSequenceModeState;
+
+/** Debounced rebuild of detailed timeline after rapid join toggles (~175ms). */
+const scheduleJoinTimelineRebuild = () => {
+	if (window._joinTimelineRebuildTimer) {
+		clearTimeout(window._joinTimelineRebuildTimer);
+	}
+	window._joinTimelineRebuildTimer = setTimeout(() => {
+		window._joinTimelineRebuildTimer = null;
+		syncSequenceModeState();
+		if (typeof window.loadWaveformTimeline === "function") {
+			window.loadWaveformTimeline();
+		}
+		if (typeof window.updateMarkersList === "function") {
+			window.updateMarkersList();
+		}
+		if (typeof window.paintTimelineMarkersAndShading === "function") {
+			window.paintTimelineMarkersAndShading();
+		}
+	}, 175);
+};
+window.scheduleJoinTimelineRebuild = scheduleJoinTimelineRebuild;
+
+const toggleJoinedToNext = (upperIndex) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		upperIndex < 0 ||
+		upperIndex >= videoQueue.length - 1
+	) {
+		return;
+	}
+	const item = videoQueue[upperIndex];
+	if (!item) return;
+	item.joinedToNext = !item.joinedToNext;
+	// Join does not change which clip is current
+	if (typeof saveLocalState === "function") saveLocalState();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
+	scheduleJoinTimelineRebuild();
+};
+window.toggleJoinedToNext = toggleJoinedToNext;
+
+/**
+ * Seek by sequence time: resolve source, switch queue slot if needed, seek local.
+ * @param {number} seqTime
+ * @param {{ play?: boolean, silent?: boolean }} [opts]
+ */
+const seekSequenceTime = async (seqTime, opts = {}) => {
+	const { play = false, silent = true } = opts;
+	const run = getActiveJoinRun();
+	const mapped = sequenceTimeToSource(seqTime, run);
+	if (!mapped) return;
+
+	const wasPlaying =
+		play || (typeof player !== "undefined" && player && !player.paused);
+
+	if (mapped.queueIndex !== activeQueueIndex) {
+		// Silent switch into target source without toast spam
+		preserveClipBounds = true;
+		if (typeof saveLocalState === "function") saveLocalState();
+		activeQueueIndex = mapped.queueIndex;
+		const currentVideo = videoQueue[activeQueueIndex];
+		videoFileName = currentVideo.videoFileName || "";
+		videoFilePath = currentVideo.videoFilePath || "";
+		clipInTime = currentVideo.clipInTime || 0;
+		clipOutTime = currentVideo.clipOutTime || 0;
+		markers = currentVideo.appState?.markers || [];
+		for (const m of markers) {
+			if (!m.type) m.type = "standard";
+		}
+		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
+		if (typeof updateMarkersList === "function") updateMarkersList();
+		if (typeof player !== "undefined" && player) player.pause();
+		if (typeof window.resetClosedCaptions === "function") {
+			window.resetClosedCaptions();
+		}
+		if (videoFilePath && typeof window.loadVideo === "function") {
+			await window.loadVideo(videoFilePath);
+		}
+		if (!silent) {
+			showToast(`Switched to: ${currentVideo.videoName}`, "success");
+		}
+	}
+
+	if (typeof player !== "undefined" && player) {
+		player.currentTime = mapped.localTime;
+		if (wasPlaying) {
+			void player
+				.play()
+				?.catch((err) =>
+					console.warn("[Playback] sequence seek play() blocked:", err),
+				);
+		} else {
+			player.pause();
+		}
+	}
+
+	// Update playheads immediately
+	const mode = syncSequenceModeState();
+	const duration = mode.active ? mode.totalDuration : player?.duration || 1;
+	const pct =
+		duration > 0
+			? ((mode.active ? seqTime : mapped.localTime) / duration) * 100
+			: 0;
+	const heads = document.getElementsByClassName("sequencer-playhead");
+	for (let i = 0; i < heads.length; i += 1) {
+		heads[i].style.left = `${pct}%`;
+	}
+};
+window.seekSequenceTime = seekSequenceTime;
+
+/** Play across join: hand off to next queue item at its clipIn without stopping. */
+const handoffToNextJoinedClip = async () => {
+	if (window._sequenceHandoffInProgress) return;
+	if (
+		typeof videoQueue === "undefined" ||
+		activeQueueIndex >= videoQueue.length - 1
+	) {
+		return;
+	}
+	const current = videoQueue[activeQueueIndex];
+	if (!current?.joinedToNext) return;
+
+	window._sequenceHandoffInProgress = true;
+	try {
+		const nextIndex = activeQueueIndex + 1;
+		const next = videoQueue[nextIndex];
+		if (!next?.videoFilePath) {
+			if (typeof player !== "undefined" && player) {
+				player.pause();
+				if (clipOutTime > 0) player.currentTime = clipOutTime;
+			}
+			return;
+		}
+
+		const wasPlaying =
+			typeof player !== "undefined" && player && !player.paused;
+		preserveClipBounds = true;
+		if (typeof saveLocalState === "function") saveLocalState();
+
+		activeQueueIndex = nextIndex;
+		videoFileName = next.videoFileName || "";
+		videoFilePath = next.videoFilePath || "";
+		clipInTime = next.clipInTime || 0;
+		clipOutTime = next.clipOutTime || 0;
+		markers = next.appState?.markers || [];
+		for (const m of markers) {
+			if (!m.type) m.type = "standard";
+		}
+
+		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
+		if (typeof updateMarkersList === "function") updateMarkersList();
+		if (typeof window.resetClosedCaptions === "function") {
+			window.resetClosedCaptions();
+		}
+
+		if (typeof window.loadVideo === "function") {
+			await window.loadVideo(videoFilePath);
+		}
+
+		if (typeof player !== "undefined" && player) {
+			player.currentTime = clipInTime || 0;
+			if (wasPlaying) {
+				void player
+					.play()
+					?.catch((err) =>
+						console.warn("[Playback] join handoff play() blocked:", err),
+					);
+			}
+		}
+
+		// Keep sequence timeline; refresh markers/playhead without full toast
+		syncSequenceModeState();
+		if (typeof window.paintTimelineMarkersAndShading === "function") {
+			window.paintTimelineMarkersAndShading();
+		}
+	} finally {
+		window._sequenceHandoffInProgress = false;
+	}
+};
+window.handoffToNextJoinedClip = handoffToNextJoinedClip;
+
 // --- INITIAL THEME BOOTSTRAP (CSP-SAFE) ---
 if (localStorage.getItem("darkMode") === "true") {
 	document.documentElement.classList.add("dark");
@@ -252,10 +611,12 @@ window.clearAllPreviousProjectData = () => {
 			videoFilePath: "",
 			clipInTime: 0,
 			clipOutTime: 0,
+			joinedToNext: false,
 			appState: { markers: [] },
 		},
 	];
 	activeQueueIndex = 0;
+	window._sequenceMode = { active: false, totalDuration: 0, segments: [] };
 
 	if (DOM.projectNameInput) DOM.projectNameInput.value = "";
 
@@ -267,6 +628,8 @@ window.clearAllPreviousProjectData = () => {
 	if (typeof updateMarkersList === "function") updateMarkersList();
 
 	// Hard visual reset of timeline graphics panels
+	const tracksHost = document.getElementById("timeline-tracks-host");
+	if (tracksHost) tracksHost.innerHTML = "";
 	const videoTrack = document.getElementById("timeline-video-track");
 	if (videoTrack) videoTrack.innerHTML = "";
 	const audioTrack = document.getElementById("timeline-audio-track");
@@ -278,9 +641,17 @@ window.clearAllPreviousProjectData = () => {
 
 	window.currentWaveformData = [];
 	window.currentWaveformDataPath = null;
+	window._sequenceMode = { active: false, totalDuration: 0, segments: [] };
+	const mainGrid = document.getElementById("mainLayoutGrid");
+	if (mainGrid) mainGrid.classList.remove("sequence-multi");
+	const timelinePanel = document.getElementById("detailed-timeline-panel");
+	if (timelinePanel) timelinePanel.classList.remove("sequence-multi");
 
 	// Single project-reset path: keep queue UI and sliders in sync
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
 	saveLocalState();
 	if (typeof updateSliderTicks === "function") updateSliderTicks();
 };
@@ -383,6 +754,10 @@ window.loadVideo = async (incomingVideoPath) => {
 
 	try {
 		// Hard visual reset of timeline graphics panels
+		const tracksHost = document.getElementById("timeline-tracks-host");
+		if (tracksHost) {
+			tracksHost.innerHTML = "";
+		}
 		const videoTrack = document.getElementById("timeline-video-track");
 		if (videoTrack) {
 			videoTrack.innerHTML = "";
@@ -965,20 +1340,117 @@ window.loadSubtitleTrack = async (filePath) => {
 	}
 };
 
-/** Generates and loads the waveform timeline and thumbnails. */
+/**
+ * Ensure timeline tracks host has N video+audio row pairs for the active run.
+ * Solo (1 segment) keeps classic #timeline-video-track / #timeline-audio-track ids.
+ */
+const ensureSequenceTrackRows = (segmentCount) => {
+	const host = document.getElementById("timeline-tracks-host");
+	if (!host) return [];
+
+	host.innerHTML = "";
+	const rows = [];
+
+	for (let i = 0; i < segmentCount; i += 1) {
+		const pair = document.createElement("div");
+		pair.className = "sequence-av-pair";
+		pair.dataset.segmentIndex = String(i);
+
+		if (segmentCount > 1) {
+			const label = document.createElement("div");
+			label.className = "sequence-segment-label";
+			label.dataset.segmentIndex = String(i);
+			pair.appendChild(label);
+		}
+
+		const videoTrack = document.createElement("div");
+		videoTrack.className =
+			"w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed sequence-video-track";
+		videoTrack.style.cssText =
+			"height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;";
+		if (i === 0) videoTrack.id = "timeline-video-track";
+		videoTrack.dataset.segmentIndex = String(i);
+
+		const audioTrack = document.createElement("div");
+		audioTrack.className =
+			"w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed sequence-audio-track";
+		audioTrack.style.cssText =
+			"height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;";
+		if (i === 0) audioTrack.id = "timeline-audio-track";
+		audioTrack.dataset.segmentIndex = String(i);
+
+		pair.appendChild(videoTrack);
+		pair.appendChild(audioTrack);
+		host.appendChild(pair);
+		rows.push({ videoTrack, audioTrack, pair, segmentIndex: i });
+	}
+	return rows;
+};
+
+/** Fill a video track with filmstrip thumbs (full width of the segment fill). */
+const fillFilmstripTrack = (videoTrack, thumbnailPaths) => {
+	if (!videoTrack || !thumbnailPaths?.length) return;
+	videoTrack.innerHTML = "";
+	videoTrack.style.display = "flex";
+	videoTrack.style.width = "100%";
+	videoTrack.style.boxSizing = "border-box";
+	videoTrack.style.overflow = "hidden";
+	videoTrack.style.justifyContent = "flex-start";
+	videoTrack.style.alignItems = "stretch";
+	const n = thumbnailPaths.length;
+	const tileWidthPct = 100 / n;
+	for (const pathString of thumbnailPaths) {
+		const imgElement = document.createElement("img");
+		imgElement.src = window.__TAURI__.core.convertFileSrc(pathString);
+		imgElement.className =
+			"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
+		imgElement.style.flex = "1 1 0";
+		imgElement.style.minWidth = "0";
+		imgElement.style.width = `${tileWidthPct}%`;
+		imgElement.style.boxSizing = "border-box";
+		imgElement.style.height = "100%";
+		videoTrack.appendChild(imgElement);
+	}
+};
+
+/**
+ * Layout a track body as full-sequence spine with content only in the segment window.
+ * When solo, content fills 100%.
+ */
+const applySegmentWindow = (trackEl, seg, totalDuration) => {
+	if (!trackEl || !seg || totalDuration <= 0) return trackEl;
+	const leftPct = (seg.offset / totalDuration) * 100;
+	const widthPct = Math.max(0.5, (seg.duration / totalDuration) * 100);
+
+	// Outer track is full-width sequence spine
+	trackEl.style.position = "relative";
+	trackEl.style.width = "100%";
+	trackEl.style.display = "block";
+	trackEl.style.overflow = "hidden";
+	trackEl.innerHTML = "";
+
+	const fill = document.createElement("div");
+	fill.className = "sequence-segment-fill";
+	fill.style.cssText = `position:absolute; top:0; bottom:0; left:${leftPct}%; width:${widthPct}%; display:flex; align-items:stretch; overflow:hidden; box-sizing:border-box;`;
+	trackEl.appendChild(fill);
+	return fill;
+};
+
+/** Generates and loads the waveform timeline and thumbnails (solo or active join run). */
 window.loadWaveformTimeline = async () => {
 	const isTauri = window.__TAURI__ !== undefined;
 	if (!isTauri || !videoFilePath) return;
 
 	// Capture request identity so stale async jobs (switch A→B mid-flight) never mutate UI
 	const requestPath = videoFilePath;
+	const requestActiveIndex = activeQueueIndex;
 	window._timelineGenId = (window._timelineGenId || 0) + 1;
 	const genId = window._timelineGenId;
 	const isStaleRequest = () =>
-		genId !== window._timelineGenId || videoFilePath !== requestPath;
+		genId !== window._timelineGenId ||
+		videoFilePath !== requestPath ||
+		activeQueueIndex !== requestActiveIndex;
 
-	// Custom timeline panel (Rust waveform + filmstrip) — not Peaks.js
-	const wrapper = document.getElementById("detailed-timeline-panel");
 	const seekBarContainer = document.getElementById("seekBarContainer");
 
 	if (document.body.classList.contains("miniplayer-mode")) {
@@ -992,105 +1464,219 @@ window.loadWaveformTimeline = async () => {
 	}
 	// Visibility of #detailed-timeline-panel is driven by .timeline-expanded CSS
 
-	try {
-		const videoEl = document.querySelector("video") || player;
-		const duration = videoEl.duration || player.duration || 0;
-		const peakArray = await window.__TAURI__.core.invoke("get_waveform_data", {
-			videoPath: requestPath,
-			durationSeconds: duration,
-		});
-		if (isStaleRequest()) return;
+	const run = getActiveJoinRun();
+	const mode = syncSequenceModeState(run);
+	const multi = mode.active && run.segments.length > 1;
+	const rows = ensureSequenceTrackRows(Math.max(1, run.segments.length || 1));
 
-		if (!peakArray || peakArray.length === 0) {
-			console.warn("Waveform data empty, bypassing timeline initialization.");
-			window.currentWaveformData = [];
+	try {
+		if (!multi) {
+			// -------- Solo path (unchanged behaviour) --------
+			const videoEl = document.querySelector("video") || player;
+			const duration = videoEl.duration || player.duration || 0;
+			const peakArray = await window.__TAURI__.core.invoke(
+				"get_waveform_data",
+				{
+					videoPath: requestPath,
+					durationSeconds: duration,
+				},
+			);
+			if (isStaleRequest()) return;
+
+			if (!peakArray || peakArray.length === 0) {
+				console.warn("Waveform data empty, bypassing timeline initialization.");
+				window.currentWaveformData = [];
+				return;
+			}
+
+			window.currentWaveformData = peakArray;
+			window.currentWaveformDataPath = requestPath;
+
+			window.paintTimelineRuler(duration);
+			window.setupVideoTrack();
+			window.renderAudioWaveformCanvas();
+			if (typeof window.paintTimelineMarkersAndShading === "function") {
+				window.paintTimelineMarkersAndShading();
+			}
+
+			const videoTrack =
+				rows[0]?.videoTrack || document.getElementById("timeline-video-track");
+
+			if (isAudioOnlyMedia(requestPath)) {
+				if (videoTrack) {
+					videoTrack.textContent = "Audio File Track";
+					videoTrack.style.display = "flex";
+					videoTrack.style.alignItems = "center";
+					videoTrack.style.justifyContent = "center";
+					videoTrack.style.width = "100%";
+					window.setupVideoTrack();
+				}
+				return;
+			}
+
+			if (videoTrack) {
+				videoTrack.textContent = "Developing Video Filmstrip Tracks...";
+				videoTrack.style.width = "100%";
+				videoTrack.style.display = "flex";
+				videoTrack.style.boxSizing = "border-box";
+				window.setupVideoTrack();
+			}
+
+			const trackWidth = videoTrack?.offsetWidth || 0;
+			const requiredTileCount = Math.max(Math.floor(trackWidth / 120), 1);
+
+			window.__TAURI__.core
+				.invoke("generate_timeline_thumbnails", {
+					videoPath: requestPath,
+					tileCount: requiredTileCount,
+				})
+				.then((thumbnailPaths) => {
+					if (isStaleRequest()) return;
+					if (!videoTrack || !thumbnailPaths || thumbnailPaths.length === 0) {
+						return;
+					}
+					fillFilmstripTrack(videoTrack, thumbnailPaths);
+					window.setupVideoTrack();
+				})
+				.catch((err) => {
+					if (isStaleRequest()) return;
+					console.error("Error generating filmstrip thumbnails:", err);
+					if (videoTrack) {
+						videoTrack.textContent = "Failed to load filmstrip.";
+						window.setupVideoTrack();
+					}
+				});
 			return;
 		}
 
-		// Save peaks only for the still-current request path
-		window.currentWaveformData = peakArray;
-		window.currentWaveformDataPath = requestPath;
+		// -------- Multi-segment active join run --------
+		const totalDuration = Math.max(run.totalDuration, 0.001);
+		window.currentWaveformData = [];
+		window.currentWaveformDataPath = null;
 
-		// Trigger ruler, video, and audio track rendering
-		window.paintTimelineRuler(duration);
-		window.setupVideoTrack();
-		window.renderAudioWaveformCanvas();
+		window.paintTimelineRuler(totalDuration);
+
+		// Wire seek listeners + playheads on each track (sequence mode)
+		if (typeof window.setupSequenceTracks === "function") {
+			window.setupSequenceTracks(totalDuration);
+		}
+
+		const hostWidth =
+			document.getElementById("timeline-tracks-host")?.offsetWidth || 600;
+
+		// Generate per-segment filmstrip + waveform concurrently
+		await Promise.all(
+			run.segments.map(async (seg, i) => {
+				const row = rows[i];
+				if (!row) return;
+				const path = seg.video?.videoFilePath || "";
+				const labelEl = row.pair.querySelector(".sequence-segment-label");
+				if (labelEl) {
+					const name =
+						seg.video?.videoFileName ||
+						seg.video?.videoName ||
+						`Clip ${seg.queueIndex + 1}`;
+					labelEl.textContent = `${seg.queueIndex + 1}. ${name}`;
+				}
+
+				const videoFill = applySegmentWindow(
+					row.videoTrack,
+					seg,
+					totalDuration,
+				);
+				const audioFill = applySegmentWindow(
+					row.audioTrack,
+					seg,
+					totalDuration,
+				);
+
+				if (!path) {
+					if (videoFill) videoFill.textContent = "No media";
+					return;
+				}
+
+				// Waveform for this source
+				try {
+					const segDur =
+						seg.duration ||
+						Number(seg.video?.mediaDuration) ||
+						seg.clipOut - seg.clipIn ||
+						0;
+					const peaks = await window.__TAURI__.core.invoke(
+						"get_waveform_data",
+						{
+							videoPath: path,
+							durationSeconds: segDur > 0 ? segDur : 1,
+						},
+					);
+					if (isStaleRequest()) return;
+					if (typeof window.renderWaveformInto === "function") {
+						window.renderWaveformInto(audioFill || row.audioTrack, peaks);
+					}
+					// Keep active clip peaks for any legacy readers
+					if (seg.queueIndex === activeQueueIndex) {
+						window.currentWaveformData = peaks || [];
+						window.currentWaveformDataPath = path;
+					}
+				} catch (err) {
+					if (isStaleRequest()) return;
+					console.warn("Segment waveform failed:", path, err);
+				}
+
+				if (isAudioOnlyMedia(path)) {
+					if (videoFill) {
+						videoFill.textContent = "Audio File Track";
+						videoFill.style.alignItems = "center";
+						videoFill.style.justifyContent = "center";
+						videoFill.style.display = "flex";
+					}
+					return;
+				}
+
+				if (videoFill) {
+					videoFill.textContent = "…";
+					videoFill.style.display = "flex";
+					videoFill.style.alignItems = "center";
+					videoFill.style.justifyContent = "center";
+				}
+
+				const segWidthPx = Math.max(
+					40,
+					(seg.duration / totalDuration) * hostWidth,
+				);
+				const tileCount = Math.max(Math.floor(segWidthPx / 120), 1);
+
+				try {
+					const thumbnailPaths = await window.__TAURI__.core.invoke(
+						"generate_timeline_thumbnails",
+						{
+							videoPath: path,
+							tileCount: tileCount,
+						},
+					);
+					if (isStaleRequest()) return;
+					if (videoFill && thumbnailPaths?.length) {
+						fillFilmstripTrack(videoFill, thumbnailPaths);
+					} else if (videoFill) {
+						videoFill.textContent = "No filmstrip";
+					}
+				} catch (err) {
+					if (isStaleRequest()) return;
+					console.error("Segment filmstrip failed:", path, err);
+					if (videoFill) videoFill.textContent = "Failed to load filmstrip.";
+				}
+			}),
+		);
+
+		if (isStaleRequest()) return;
+
+		// Playheads + markers on sequence spine
+		if (typeof window.setupSequenceTracks === "function") {
+			window.setupSequenceTracks(totalDuration);
+		}
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
 		}
-
-		// Skip filmstrip thumbnail extraction for audio-only media
-		if (isAudioOnlyMedia(requestPath)) {
-			const videoTrack = document.getElementById("timeline-video-track");
-			if (videoTrack) {
-				videoTrack.textContent = "Audio File Track";
-				videoTrack.style.display = "flex";
-				videoTrack.style.alignItems = "center";
-				videoTrack.style.justifyContent = "center";
-				videoTrack.style.width = "100%";
-				window.setupVideoTrack();
-			}
-			return;
-		}
-
-		// Trigger filmstrip thumbnail extraction
-		const videoTrack = document.getElementById("timeline-video-track");
-		if (videoTrack) {
-			videoTrack.textContent = "Developing Video Filmstrip Tracks...";
-			// Track is always full width; density follows measured width (~120px tiles)
-			videoTrack.style.width = "100%";
-			videoTrack.style.display = "flex";
-			videoTrack.style.boxSizing = "border-box";
-			window.setupVideoTrack();
-		}
-
-		// Density matches track width; tiles still stretch to fill 100% after append
-		const trackWidth = videoTrack?.offsetWidth || 0;
-		const requiredTileCount = Math.max(Math.floor(trackWidth / 120), 1);
-
-		window.__TAURI__.core
-			.invoke("generate_timeline_thumbnails", {
-				videoPath: requestPath,
-				tileCount: requiredTileCount,
-			})
-			.then((thumbnailPaths) => {
-				if (isStaleRequest()) return;
-				if (!videoTrack || !thumbnailPaths || thumbnailPaths.length === 0) {
-					return;
-				}
-				// Stretch thumbs flush left→right under the ruler (no fixed px tile width)
-				videoTrack.innerHTML = "";
-				videoTrack.style.display = "flex";
-				videoTrack.style.width = "100%";
-				videoTrack.style.boxSizing = "border-box";
-				videoTrack.style.overflow = "hidden";
-				videoTrack.style.justifyContent = "flex-start";
-				videoTrack.style.alignItems = "stretch";
-				const n = thumbnailPaths.length;
-				const tileWidthPct = 100 / n;
-				for (const pathString of thumbnailPaths) {
-					const imgElement = document.createElement("img");
-					imgElement.src = window.__TAURI__.core.convertFileSrc(pathString);
-					// No w-[120px] / fixed pixel widths — equal flex tiles fill the track
-					imgElement.className =
-						"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
-					imgElement.style.flex = "1 1 0";
-					imgElement.style.minWidth = "0";
-					imgElement.style.width = `${tileWidthPct}%`;
-					imgElement.style.boxSizing = "border-box";
-					imgElement.style.height = "100%";
-					videoTrack.appendChild(imgElement);
-				}
-				window.setupVideoTrack();
-			})
-			.catch((err) => {
-				if (isStaleRequest()) return;
-				console.error("Error generating filmstrip thumbnails:", err);
-				if (videoTrack) {
-					videoTrack.textContent = "Failed to load filmstrip.";
-					window.setupVideoTrack();
-				}
-			});
 	} catch (err) {
 		if (isStaleRequest()) return;
 		console.error("Error generating waveform data:", err);
@@ -1175,6 +1761,14 @@ window.joinAndCompressVideos = async (videoSegments) => {
 
 /** Processes and loads a new video file into the active project slot. */
 const processNewVideoFile = async (fileOrPath, isTauriPath = false) => {
+	if (isQueueIndexJoined(activeQueueIndex)) {
+		showToast(
+			"Unjoin first before replacing media on this queue item.",
+			"error",
+		);
+		return;
+	}
+
 	resetVideoViewport(player);
 	const currentSrc = player.getAttribute("src");
 	const hasExistingVideo = currentSrc && currentSrc !== "";
@@ -1862,6 +2456,13 @@ const initializePlayer = () => {
 			clipOutTime = duration;
 		}
 
+		// Cache media duration on the active queue entry for sequence spine math
+		if (typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) {
+			videoQueue[activeQueueIndex].mediaDuration = duration || 0;
+			videoQueue[activeQueueIndex].clipInTime = clipInTime;
+			videoQueue[activeQueueIndex].clipOutTime = clipOutTime;
+		}
+
 		updateTimeDisplay(duration, "durationTime");
 		positionControls();
 		updateLoadButtonColor();
@@ -2295,6 +2896,13 @@ const initializePlayer = () => {
 	});
 
 	DOM.videoPlaceholder.addEventListener("click", async () => {
+		if (isQueueIndexJoined(activeQueueIndex)) {
+			showToast(
+				"Unjoin first before loading or replacing media on this queue item.",
+				"error",
+			);
+			return;
+		}
 		const isTauri = window.__TAURI__ !== undefined;
 		if (isTauri) {
 			try {
@@ -3044,13 +3652,35 @@ const seektimeupdate = () => {
 			return;
 		}
 
-		// Stop playback and constrain seek if we hit the clipOutTime
+		// At clipOut: hand off to next joined clip, or stop as today
 		if (clipOutTime > 0 && currentTime > clipOutTime) {
+			const activeItem =
+				typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
+			if (
+				activeItem?.joinedToNext &&
+				activeQueueIndex < videoQueue.length - 1 &&
+				!window._sequenceHandoffInProgress
+			) {
+				void handoffToNextJoinedClip();
+				return;
+			}
 			if (!player.paused) {
 				player.pause();
 			}
 			player.currentTime = clipOutTime;
 			return;
+		}
+
+		// Sequence-mode playhead: position by sequence time across the active run
+		if (window._sequenceMode?.active && duration > 0) {
+			const seqT = getSequencePlayheadTime();
+			const seqDur = window._sequenceMode.totalDuration || duration;
+			if (seqDur > 0) {
+				const seqPct = (seqT / seqDur) * 100;
+				for (let i = 0; i < playheadsLiveCollection.length; i++) {
+					playheadsLiveCollection[i].style.left = `${seqPct}%`;
+				}
+			}
 		}
 	}
 };
@@ -3129,6 +3759,15 @@ const positionControls = () => {
 /** Updates the load video button visual styling based on player load state. */
 const updateLoadButtonColor = () => {
 	if (loadVideoButton && player && playPauseButton) {
+		// Disable folder/load while active queue item is part of a join
+		const joined = isQueueIndexJoined(activeQueueIndex);
+		loadVideoButton.disabled = joined;
+		loadVideoButton.title = joined
+			? "Unjoin first before loading or replacing media"
+			: "Load Video";
+		loadVideoButton.classList.toggle("opacity-40", joined);
+		loadVideoButton.classList.toggle("cursor-not-allowed", joined);
+
 		const src = player.getAttribute("src");
 		if (!src) {
 			loadVideoButton.classList.add("btn-icon-highlight");
@@ -4525,12 +5164,23 @@ const switchVideoInQueue = async (index) => {
 
 	showToast(`Switched to: ${currentVideo.videoName}`, "success");
 	updateSliderTicks();
+	// Active join run may change with selection — rebuild sequence timeline
+	syncSequenceModeState();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
 };
 
 /** Removes the currently active video from the project queue. */
 const removeCurrentVideo = async () => {
-	resetVideoViewport(player);
 	if (videoQueue.length === 0) return;
+
+	if (isQueueIndexJoined(activeQueueIndex)) {
+		showToast("Unjoin first before removing this queue item.", "error");
+		return;
+	}
+
+	resetVideoViewport(player);
 
 	const confirmRemove = await asyncConfirm(
 		"Are you sure you want to remove this video from the project?",
@@ -4539,6 +5189,9 @@ const removeCurrentVideo = async () => {
 	if (!confirmRemove) return;
 
 	videoQueue.splice(activeQueueIndex, 1);
+	if (videoQueue.length > 0) {
+		videoQueue[videoQueue.length - 1].joinedToNext = false;
+	}
 
 	if (videoQueue.length === 0) {
 		activeQueueIndex = 0;
@@ -4630,6 +5283,7 @@ const addVideoToQueue = async () => {
 				...JSON.parse(JSON.stringify(videoQueue[activeQueueIndex])),
 				videoId: newVideoId,
 				videoName,
+				joinedToNext: false,
 			}
 		: {
 				videoId: newVideoId,
@@ -4638,10 +5292,13 @@ const addVideoToQueue = async () => {
 				videoFilePath: "",
 				clipInTime: 0,
 				clipOutTime: 0,
+				joinedToNext: false,
 				appState: { markers: [] },
 			};
 
+	// Previous last item may keep joinedToNext; new last must not join past end
 	videoQueue.push(newVideo);
+	videoQueue[videoQueue.length - 1].joinedToNext = false;
 	await switchVideoInQueue(videoQueue.length - 1);
 };
 
@@ -4703,11 +5360,16 @@ async function addNewVideoToQueue(event) {
 			videoFilePath: filePath,
 			clipInTime: 0,
 			clipOutTime: 0,
+			joinedToNext: false,
 			appState: { markers: [] },
 		};
 
 		saveLocalState();
 		videoQueue.push(newItem);
+		if (videoQueue.length > 1) {
+			// New tail cannot be joined forward
+			videoQueue[videoQueue.length - 1].joinedToNext = false;
+		}
 
 		renderVideoQueueSelect();
 		await switchVideoInQueue(videoQueue.length - 1);
@@ -4737,12 +5399,19 @@ const editVideoInQueue = async () => {
 
 let _sidebarPlaylistElements = [];
 
+const JOIN_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+
 /** Rebuilds the DOM list of videos for the left playlist sidebar using cached nodes and diffing for performance. */
 window.renderSidebarPlaylist = () => {
 	const container = document.getElementById("sidebar-queue-list");
 	if (!container) return;
 
 	const queueLen = videoQueue.length;
+
+	// Ensure last item never claims a next join
+	if (queueLen > 0 && videoQueue[queueLen - 1]) {
+		videoQueue[queueLen - 1].joinedToNext = false;
+	}
 
 	// If the queue size has changed (added, removed, cleared), rebuild the DOM elements
 	if (_sidebarPlaylistElements.length !== queueLen) {
@@ -4751,9 +5420,12 @@ window.renderSidebarPlaylist = () => {
 		const fragment = document.createDocumentFragment();
 
 		for (let index = 0; index < queueLen; index++) {
+			const group = document.createElement("div");
+			group.className = "queue-item-group";
+
 			const div = document.createElement("div");
 			div.className =
-				"flex items-center justify-between gap-2 p-2.5 rounded mb-1.5 cursor-pointer text-sm transition-colors border select-none";
+				"flex items-center justify-between gap-2 p-2.5 rounded cursor-pointer text-sm transition-colors border select-none";
 
 			const span = document.createElement("span");
 			span.className = "truncate flex-1 pointer-events-none";
@@ -4768,6 +5440,7 @@ window.renderSidebarPlaylist = () => {
 			moveUpBtn.className =
 				"p-1 rounded hover:bg-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer flex items-center justify-center transition-colors";
 			moveUpBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`;
+			moveUpBtn.title = "Move up";
 			moveUpBtn.addEventListener("click", (e) => {
 				e.stopPropagation();
 				const idx = parseInt(moveUpBtn.dataset.index, 10);
@@ -4785,9 +5458,15 @@ window.renderSidebarPlaylist = () => {
 					activeQueueIndex = idx;
 				}
 
+				// Tail cannot stay joined forward after reorder
+				if (videoQueue.length > 0) {
+					videoQueue[videoQueue.length - 1].joinedToNext = false;
+				}
+
 				saveLocalState();
 				renderVideoQueueSelect();
 				window.renderSidebarPlaylist();
+				scheduleJoinTimelineRebuild();
 			});
 			actionWrapper.appendChild(moveUpBtn);
 
@@ -4797,6 +5476,7 @@ window.renderSidebarPlaylist = () => {
 			moveDownBtn.className =
 				"p-1 rounded hover:bg-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer flex items-center justify-center transition-colors";
 			moveDownBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+			moveDownBtn.title = "Move down";
 			moveDownBtn.addEventListener("click", (e) => {
 				e.stopPropagation();
 				const idx = parseInt(moveDownBtn.dataset.index, 10);
@@ -4814,9 +5494,14 @@ window.renderSidebarPlaylist = () => {
 					activeQueueIndex = idx;
 				}
 
+				if (videoQueue.length > 0) {
+					videoQueue[videoQueue.length - 1].joinedToNext = false;
+				}
+
 				saveLocalState();
 				renderVideoQueueSelect();
 				window.renderSidebarPlaylist();
+				scheduleJoinTimelineRebuild();
 			});
 			actionWrapper.appendChild(moveDownBtn);
 
@@ -4827,19 +5512,41 @@ window.renderSidebarPlaylist = () => {
 				const idx = parseInt(div.dataset.index, 10);
 				await switchVideoInQueue(idx);
 				window.renderSidebarPlaylist();
+				// Active run may change — rebuild sequence timeline
+				scheduleJoinTimelineRebuild();
 			});
 
+			group.appendChild(div);
+
+			// Between-row Join control (not on last item)
+			let joinBtn = null;
+			if (index < queueLen - 1) {
+				joinBtn = document.createElement("button");
+				joinBtn.type = "button";
+				joinBtn.className = "queue-join-control";
+				joinBtn.innerHTML = JOIN_ICON_SVG;
+				joinBtn.addEventListener("click", (e) => {
+					e.stopPropagation();
+					const idx = parseInt(joinBtn.dataset.index, 10);
+					toggleJoinedToNext(idx);
+				});
+				group.appendChild(joinBtn);
+			}
+
 			_sidebarPlaylistElements.push({
+				group,
 				div,
 				span,
 				moveUpBtn,
 				moveDownBtn,
+				joinBtn,
 				lastVideoName: null,
 				lastActive: null,
 				lastIndex: -1,
+				lastJoined: null,
 			});
 
-			fragment.appendChild(div);
+			fragment.appendChild(group);
 		}
 
 		container.appendChild(fragment);
@@ -4852,12 +5559,14 @@ window.renderSidebarPlaylist = () => {
 
 		const isActive = index === activeQueueIndex;
 		const videoName = video.videoFileName || "Unknown File";
+		const isJoined = !!video.joinedToNext && index < queueLen - 1;
 
 		const videoChanged = els.lastVideoName !== videoName;
 		const activeChanged = els.lastActive !== isActive;
 		const indexChanged = els.lastIndex !== index;
+		const joinedChanged = els.lastJoined !== isJoined;
 
-		if (!videoChanged && !activeChanged && !indexChanged) {
+		if (!videoChanged && !activeChanged && !indexChanged && !joinedChanged) {
 			continue;
 		}
 
@@ -4871,10 +5580,10 @@ window.renderSidebarPlaylist = () => {
 		if (activeChanged) {
 			if (isActive) {
 				els.div.className =
-					"flex items-center justify-between gap-2 p-2.5 rounded mb-1.5 cursor-pointer text-sm transition-colors border select-none bg-zinc-200 dark:bg-zinc-800 border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white font-semibold";
+					"flex items-center justify-between gap-2 p-2.5 rounded cursor-pointer text-sm transition-colors border select-none bg-zinc-200 dark:bg-zinc-800 border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white font-semibold";
 			} else {
 				els.div.className =
-					"flex items-center justify-between gap-2 p-2.5 rounded mb-1.5 cursor-pointer text-sm transition-colors border select-none bg-zinc-100 dark:bg-zinc-800/40 border-transparent text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700/60";
+					"flex items-center justify-between gap-2 p-2.5 rounded cursor-pointer text-sm transition-colors border select-none bg-zinc-100 dark:bg-zinc-800/40 border-transparent text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700/60";
 			}
 		}
 
@@ -4885,11 +5594,28 @@ window.renderSidebarPlaylist = () => {
 
 			els.moveUpBtn.disabled = index === 0;
 			els.moveDownBtn.disabled = index === queueLen - 1;
+			if (els.joinBtn) {
+				els.joinBtn.dataset.index = index;
+			}
+		}
+
+		if (els.joinBtn && (joinedChanged || indexChanged)) {
+			els.joinBtn.dataset.index = index;
+			els.joinBtn.classList.toggle("is-joined", isJoined);
+			els.joinBtn.title = isJoined ? "Unjoin" : "Join";
+			els.joinBtn.setAttribute("aria-label", isJoined ? "Unjoin" : "Join");
+			els.joinBtn.setAttribute("aria-pressed", isJoined ? "true" : "false");
 		}
 
 		els.lastVideoName = videoName;
 		els.lastActive = isActive;
 		els.lastIndex = index;
+		els.lastJoined = isJoined;
+	}
+
+	// Disable load control while the active row is part of a join
+	if (typeof updateLoadButtonColor === "function") {
+		updateLoadButtonColor();
 	}
 };
 

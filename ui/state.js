@@ -3,9 +3,10 @@
  * # AI CONTEXT MAP
  *
  * ## GLOBAL STATE STRUCTURE
- * - `videoQueue`: Array of objects representing the loaded videos. Each object contains metadata and state like `videoId`, `videoName`, `videoFileName`, `videoFilePath`, `clipInTime`, `clipOutTime`, and `appState` (which holds `markers`).
+ * - `videoQueue`: Array of objects representing the loaded videos. Each object contains metadata and state like `videoId`, `videoName`, `videoFileName`, `videoFilePath`, `clipInTime`, `clipOutTime`, `joinedToNext` (boolean: join this item to the next in list order), and `appState` (which holds `markers`).
  * - `activeQueueIndex`: Integer representing the currently selected video slot in `videoQueue`.
  * - `markers`: Array of current active video markers (syncs back to `videoQueue[activeQueueIndex].appState.markers`).
+ * - Active join run: contiguous chain of `joinedToNext` that contains `activeQueueIndex`; detailed timeline shows that run only.
  *
  * ## PERSISTENCE & LIFECYCLE
  * - `saveLocalState()`: Synchronizes memory (active globals like `videoFileName`, `clipInTime`, `markers`) back to the current `videoQueue` slot, and serializes the complete application state payload to `localStorage`.
@@ -45,7 +46,8 @@ const PROJECT_STORAGE_KEY = "lfvideo_project";
 const LEGACY_PROJECT_STORAGE_KEY = "timeStudyData";
 
 /**
- * Normalize a queue entry: map legacy processStartTime/processEndTime → clipIn/Out.
+ * Normalize a queue entry: map legacy processStartTime/processEndTime → clipIn/Out,
+ * and ensure joinedToNext is a boolean (default false).
  * Mutates and returns the video object.
  */
 const normalizeVideoClipBounds = (video) => {
@@ -56,6 +58,7 @@ const normalizeVideoClipBounds = (video) => {
 	if (video.clipOutTime === undefined || video.clipOutTime === null) {
 		video.clipOutTime = video.processEndTime || 0;
 	}
+	video.joinedToNext = !!video.joinedToNext;
 	delete video.processStartTime;
 	delete video.processEndTime;
 	return video;
@@ -199,10 +202,16 @@ const loadLocalState = () => {
 						videoFilePath: "",
 						clipInTime: 0,
 						clipOutTime: 0,
+						joinedToNext: false,
 						appState: { markers: [] },
 					},
 				];
 				activeQueueIndex = 0;
+			}
+
+			// Last queue item can never join "next"
+			if (videoQueue.length > 0) {
+				videoQueue[videoQueue.length - 1].joinedToNext = false;
 			}
 
 			projectFilePath = localStorage.getItem("projectFilePath") || "";
@@ -229,6 +238,7 @@ const loadLocalState = () => {
 				videoFilePath: "",
 				clipInTime: 0,
 				clipOutTime: 0,
+				joinedToNext: false,
 				appState: { markers: [] },
 			},
 		];
@@ -375,6 +385,9 @@ const importFromJSON = async (jsonText, options = {}) => {
 
 		// Normalize legacy processStartTime/processEndTime on every queue entry
 		videoQueue = videoQueue.map(normalizeVideoClipBounds);
+		if (videoQueue.length > 0) {
+			videoQueue[videoQueue.length - 1].joinedToNext = false;
+		}
 
 		// Load active video into memory
 		const currentVideo = videoQueue[activeQueueIndex];
