@@ -233,12 +233,31 @@ const setupVideoTrack = () => {
 	const videoTrack = document.getElementById("timeline-video-track");
 	if (!videoTrack || !player) return;
 
+	// Multi-join spine: never re-flex outer track into a full-width filmstrip —
+	// that destroys absolute segment fills on row 1 (#timeline-video-track).
+	const hasSegmentFill = !!videoTrack.querySelector(".sequence-segment-fill");
+	if (hasSegmentFill || videoTrack.dataset.sequenceSpine === "1") {
+		const oldPlayheads =
+			videoTrack.getElementsByClassName("sequencer-playhead");
+		while (oldPlayheads.length > 0) {
+			oldPlayheads[0].remove();
+		}
+		videoTrack.style.position = "relative";
+		videoTrack.style.width = "100%";
+		videoTrack.style.display = "block";
+		videoTrack.style.overflow = "hidden";
+		const duration = getTimelineDuration();
+		appendPlayheadToTrack(videoTrack, duration);
+		attachTrackSeekListener(videoTrack);
+		return;
+	}
+
 	// Clear any old playheads
 	const oldPlayheads = videoTrack.getElementsByClassName("sequencer-playhead");
 	while (oldPlayheads.length > 0) {
 		oldPlayheads[0].remove();
 	}
-	// Keep filmstrip track full-width flex so thumbs stay edge-to-edge under the ruler
+	// Solo: keep filmstrip track full-width flex so thumbs stay edge-to-edge
 	videoTrack.style.position = "relative";
 	videoTrack.style.width = "100%";
 	videoTrack.style.boxSizing = "border-box";
@@ -248,7 +267,7 @@ const setupVideoTrack = () => {
 	videoTrack.style.alignItems = "stretch";
 
 	// Re-apply equal flex on existing filmstrip tiles (no fixed pixel widths)
-	const filmstripImgs = videoTrack.querySelectorAll("img");
+	const filmstripImgs = videoTrack.querySelectorAll(":scope > img");
 	const n = filmstripImgs.length;
 	if (n > 0) {
 		const tileWidthPct = 100 / n;
@@ -279,7 +298,22 @@ const setupSequenceTracks = (totalDuration) => {
 		".sequence-video-track, .sequence-audio-track, #timeline-video-track, #timeline-audio-track",
 	);
 	for (const track of tracks) {
+		// Outer spine stays block+relative; do not convert to flex (would reflow fills)
 		track.style.position = "relative";
+		track.style.display = "block";
+		track.style.width = "100%";
+		track.style.overflow = "hidden";
+		// Re-assert each segment fill geometry if present
+		const fill = track.querySelector(".sequence-segment-fill");
+		if (fill?.dataset.leftPct != null && fill?.dataset.widthPct != null) {
+			fill.style.position = "absolute";
+			fill.style.top = "0";
+			fill.style.bottom = "0";
+			fill.style.left = `${fill.dataset.leftPct}%`;
+			fill.style.width = `${fill.dataset.widthPct}%`;
+			fill.style.maxWidth = `${fill.dataset.widthPct}%`;
+			fill.style.right = "auto";
+		}
 		appendPlayheadToTrack(track, duration);
 		attachTrackSeekListener(track);
 	}

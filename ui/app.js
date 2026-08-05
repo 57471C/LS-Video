@@ -630,11 +630,10 @@ const handoffToNextJoinedClip = async () => {
 		}
 
 		syncSequenceModeState();
+		// Playhead only — do NOT rebuild filmstrips/waveforms on sequence handoff
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
 		}
-		// Rebuild sequence filmstrips for the still-active run (debounced)
-		scheduleJoinTimelineRebuild();
 	} catch (err) {
 		console.error("[Playback] join handoff failed:", err);
 		hideHandoffFreezeFrame();
@@ -988,6 +987,12 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 	// Same path already loading — drop duplicate concurrent call (restore+open, etc.)
 	if (window._videoLoadInProgress && window._loadVideoPath === normalizedPath) {
 		return;
+	}
+
+	// Soft handoff / sequence seek must not wipe or regenerate filmstrips
+	// (set only once we commit to a real load so a no-op return cannot sticky-skip)
+	if (softHandoff) {
+		window._skipNextTimelineBoot = true;
 	}
 
 	window._videoLoadInProgress = true;
@@ -1641,16 +1646,47 @@ const ensureSequenceTrackRows = (segmentCount) => {
 	return rows;
 };
 
-/** Fill a video track with filmstrip thumbs (full width of the segment fill). */
-const fillFilmstripTrack = (videoTrack, thumbnailPaths) => {
-	if (!videoTrack || !thumbnailPaths?.length) return;
-	videoTrack.innerHTML = "";
-	videoTrack.style.display = "flex";
-	videoTrack.style.width = "100%";
-	videoTrack.style.boxSizing = "border-box";
-	videoTrack.style.overflow = "hidden";
-	videoTrack.style.justifyContent = "flex-start";
-	videoTrack.style.alignItems = "stretch";
+/**
+ * Fill a track/fill element with filmstrip thumbs.
+ * CRITICAL: for `.sequence-segment-fill`, do NOT set width:100% — that expands an
+ * absolutely positioned segment to the full sequence spine (row-1 spill bug).
+ */
+const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
+	if (!trackOrFill || !thumbnailPaths?.length) return;
+
+	const isSegmentFill = trackOrFill.classList.contains("sequence-segment-fill");
+	// Preserve segment geometry before wiping children
+	const preserved = isSegmentFill
+		? {
+				left: trackOrFill.style.left,
+				width: trackOrFill.style.width,
+				top: trackOrFill.style.top || "0",
+				bottom: trackOrFill.style.bottom || "0",
+				position: trackOrFill.style.position || "absolute",
+			}
+		: null;
+
+	trackOrFill.innerHTML = "";
+	trackOrFill.style.display = "flex";
+	trackOrFill.style.boxSizing = "border-box";
+	trackOrFill.style.overflow = "hidden";
+	trackOrFill.style.justifyContent = "flex-start";
+	trackOrFill.style.alignItems = "stretch";
+
+	if (isSegmentFill && preserved) {
+		// Keep left/width as % of sequence spine — never stretch to host width
+		trackOrFill.style.position = preserved.position;
+		trackOrFill.style.top = preserved.top;
+		trackOrFill.style.bottom = preserved.bottom;
+		trackOrFill.style.left = preserved.left;
+		trackOrFill.style.width = preserved.width;
+		trackOrFill.style.maxWidth = preserved.width;
+		trackOrFill.style.right = "auto";
+	} else {
+		// Solo full-row strip
+		trackOrFill.style.width = "100%";
+	}
+
 	const n = thumbnailPaths.length;
 	const tileWidthPct = 100 / n;
 	for (const pathString of thumbnailPaths) {
@@ -1663,29 +1699,49 @@ const fillFilmstripTrack = (videoTrack, thumbnailPaths) => {
 		imgElement.style.width = `${tileWidthPct}%`;
 		imgElement.style.boxSizing = "border-box";
 		imgElement.style.height = "100%";
-		videoTrack.appendChild(imgElement);
+		trackOrFill.appendChild(imgElement);
 	}
 };
 
 /**
  * Layout a track body as full-sequence spine with content only in the segment window.
- * When solo, content fills 100%.
+ * Returns the fill element whose left/width are sequence fractions (not 100% host).
  */
 const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	if (!trackEl || !seg || totalDuration <= 0) return trackEl;
-	const leftPct = (seg.offset / totalDuration) * 100;
-	const widthPct = Math.max(0.5, (seg.duration / totalDuration) * 100);
+	const leftPct = (seg.offset / Math.max(totalDuration, 0.001)) * 100;
+	const widthPct = Math.max(
+		0.05,
+		(Math.max(seg.duration, 0) / Math.max(totalDuration, 0.001)) * 100,
+	);
 
-	// Outer track is full-width sequence spine
+	// Outer track = full-width sequence spine (click target for seek)
 	trackEl.style.position = "relative";
 	trackEl.style.width = "100%";
-	trackEl.style.display = "block";
+	trackEl.style.display = "block"; // not flex — absolute children need this box
 	trackEl.style.overflow = "hidden";
 	trackEl.innerHTML = "";
+	trackEl.dataset.sequenceSpine = "1";
+	trackEl.dataset.segOffset = String(seg.offset);
+	trackEl.dataset.segDuration = String(seg.duration);
 
 	const fill = document.createElement("div");
 	fill.className = "sequence-segment-fill";
-	fill.style.cssText = `position:absolute; top:0; bottom:0; left:${leftPct}%; width:${widthPct}%; display:flex; align-items:stretch; overflow:hidden; box-sizing:border-box;`;
+	fill.dataset.queueIndex = String(seg.queueIndex);
+	fill.dataset.leftPct = String(leftPct);
+	fill.dataset.widthPct = String(widthPct);
+	// Inline geometry is authoritative — CSS must not override left/width
+	fill.style.position = "absolute";
+	fill.style.top = "0";
+	fill.style.bottom = "0";
+	fill.style.left = `${leftPct}%`;
+	fill.style.width = `${widthPct}%`;
+	fill.style.maxWidth = `${widthPct}%`;
+	fill.style.right = "auto";
+	fill.style.display = "flex";
+	fill.style.alignItems = "stretch";
+	fill.style.overflow = "hidden";
+	fill.style.boxSizing = "border-box";
 	trackEl.appendChild(fill);
 	return fill;
 };
@@ -1928,11 +1984,17 @@ window.loadWaveformTimeline = async () => {
 					);
 					if (isStaleRequest()) return;
 					if (videoFill && thumbnailPaths?.length) {
-						// Fill only the segment window — object-cover within equal tiles
 						fillFilmstripTrack(videoFill, thumbnailPaths);
-						// Prevent stretch past segment: lock fill overflow + no scale-up
-						videoFill.style.overflow = "hidden";
-						videoFill.style.maxWidth = "100%";
+						// Re-assert segment geometry after fill (defensive)
+						const lp = videoFill.dataset.leftPct;
+						const wp = videoFill.dataset.widthPct;
+						if (lp != null && wp != null) {
+							videoFill.style.left = `${lp}%`;
+							videoFill.style.width = `${wp}%`;
+							videoFill.style.maxWidth = `${wp}%`;
+							videoFill.style.position = "absolute";
+							videoFill.style.right = "auto";
+						}
 					} else if (videoFill) {
 						videoFill.textContent = "No filmstrip";
 					}
@@ -2703,6 +2765,11 @@ const initializePlayer = () => {
 	}
 
 	function bootTimelineVisualizers() {
+		// Skip full strip rebuild after join handoff / soft sequence source switch
+		if (window._skipNextTimelineBoot || window._sequenceHandoffInProgress) {
+			window._skipNextTimelineBoot = false;
+			return;
+		}
 		if (videoFilePath) {
 			if (window.currentViewMode !== "miniplayer") {
 				window.loadWaveformTimeline();
