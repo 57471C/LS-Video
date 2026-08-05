@@ -752,3 +752,62 @@ body.miniplayer-mode #mediaControlsContainer .mt-4,
 body.miniplayer-mode #mediaControlsContainer #timeline-toggle-btn {
 	display: none !important;
 }
+
+/* Transport row: keep volume slider on the same line as play controls */
+#transport-controls-row {
+	flex-wrap: nowrap !important;
+	overflow-x: auto;
+	overflow-y: hidden;
+	-webkit-overflow-scrolling: touch;
+}
+
+#volume-control-group {
+	flex-shrink: 0;
+	flex-wrap: nowrap;
+	align-items: center;
+}
+
+#volume-control-group #volumeSlider {
+	min-width: 4rem;
+	max-width: 7rem;
+}
+
+body.miniplayer-mode #transport-controls-row {
+	justify-content: flex-start;
+	padding-bottom: 2px;
+}
+
+body.miniplayer-mode #volume-control-group {
+	width: 6.5rem;
+	max-width: 7rem;
+}
+
+/* Join handoff: freeze last frame over the video while next source loads */
+#video-wrapper-id {
+	position: relative;
+}
+
+.video-handoff-freeze,
+#video-handoff-freeze {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	pointer-events: none;
+	z-index: 5;
+	display: none;
+	background: #000;
+}
+
+/* Segment filmstrip: never spill past the sequence slot */
+.sequence-segment-fill {
+	overflow: hidden !important;
+	max-width: 100%;
+}
+
+.sequence-segment-fill img {
+	object-fit: cover;
+	object-position: center;
+	flex-shrink: 1;
+}

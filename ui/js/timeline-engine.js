@@ -56,7 +56,8 @@ const getPlayheadTime = () => {
 };
 
 const seekTimelineTime = (time) => {
-	// Prefer sequence seek whenever active run is multi-clip
+	// Prefer sequence seek whenever active run is multi-clip.
+	// Omit `play` so prior play/pause state is preserved (scrub while playing continues).
 	if (isSequenceMode() && typeof window.seekSequenceTime === "function") {
 		void window.seekSequenceTime(time, { silent: true });
 		return;
