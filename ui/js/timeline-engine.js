@@ -19,12 +19,26 @@ const isPlayerReady = () =>
 	window.playerReady === true ||
 	(typeof playerReady !== "undefined" && playerReady);
 
-/** Sequence mode when active join run has 2+ clips. */
-const isSequenceMode = () => !!window._sequenceMode?.active;
+/** Sequence mode when active join run has 2+ clips (live query, not only cached flag). */
+const isSequenceMode = () => {
+	if (window._sequenceMode?.active) return true;
+	if (typeof window.isActiveRunMulti === "function") {
+		return window.isActiveRunMulti();
+	}
+	if (typeof window.getActiveJoinRun === "function") {
+		const run = window.getActiveJoinRun();
+		return !!(run?.segments && run.segments.length > 1);
+	}
+	return false;
+};
 
 const getTimelineDuration = () => {
 	if (isSequenceMode()) {
-		return Math.max(window._sequenceMode.totalDuration || 0, 0.001);
+		if (typeof window.getActiveJoinRun === "function") {
+			const run = window.getActiveJoinRun();
+			if (run?.totalDuration > 0) return run.totalDuration;
+		}
+		return Math.max(window._sequenceMode?.totalDuration || 0, 0.001);
 	}
 	const p = getPlayer();
 	return Math.max(p?.duration || 0, 0.001);
@@ -42,6 +56,7 @@ const getPlayheadTime = () => {
 };
 
 const seekTimelineTime = (time) => {
+	// Prefer sequence seek whenever active run is multi-clip
 	if (isSequenceMode() && typeof window.seekSequenceTime === "function") {
 		void window.seekSequenceTime(time, { silent: true });
 		return;
@@ -56,7 +71,13 @@ const timelinePlayheadsLive =
 
 function syncTimelinePlayheadSmoothly() {
 	const player = getPlayer();
-	if (player && isPlayerReady() && (player.duration || isSequenceMode())) {
+	// Keep animating through handoff loads when possible
+	if (
+		player &&
+		isPlayerReady() &&
+		(player.duration || isSequenceMode()) &&
+		!window._sequenceHandoffInProgress
+	) {
 		const currentVideoTime = player.currentTime;
 		const duration = getTimelineDuration();
 
@@ -92,8 +113,15 @@ function syncTimelinePlayheadSmoothly() {
 			}
 		}
 
+		// Sequence time when multi-run so playhead crosses join into next segment
+		if (
+			isSequenceMode() &&
+			typeof window.syncSequenceModeState === "function"
+		) {
+			window.syncSequenceModeState();
+		}
 		const playheadTime = getPlayheadTime();
-		const completionPercent = (playheadTime / duration) * 100;
+		const completionPercent = (playheadTime / Math.max(duration, 0.001)) * 100;
 		for (let i = 0; i < timelinePlayheadsLive.length; i++) {
 			timelinePlayheadsLive[i].style.left = `${completionPercent}%`;
 		}

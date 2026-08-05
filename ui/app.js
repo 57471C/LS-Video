@@ -48,11 +48,80 @@ const isAudioOnlyMedia = (pathOrName) => {
 // joinedToNext on queue item i means item i is joined to item i+1.
 // ---------------------------------------------------------------------------
 window._sequenceHandoffInProgress = false;
+/** When true, handoff must resume play() after next source is ready (even if player already ended/paused). */
+window._sequenceContinuePlay = false;
 window._joinTimelineRebuildTimer = null;
 window._sequenceMode = {
 	active: false,
 	totalDuration: 0,
 	segments: [],
+};
+
+/**
+ * Wait until the player can seek/play after a loadVideo swap.
+ * Resolves on canplay/loadeddata or timeout so handoff never hangs forever.
+ */
+const waitForPlayerReadyToSeek = (videoEl, timeoutMs = 12000) =>
+	new Promise((resolve) => {
+		if (!videoEl) {
+			resolve();
+			return;
+		}
+		if (videoEl.readyState >= 2 && Number.isFinite(videoEl.duration)) {
+			resolve();
+			return;
+		}
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			videoEl.removeEventListener("canplay", finish);
+			videoEl.removeEventListener("loadeddata", finish);
+			videoEl.removeEventListener("loadedmetadata", finish);
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(finish, timeoutMs);
+		videoEl.addEventListener("canplay", finish);
+		videoEl.addEventListener("loadeddata", finish);
+		videoEl.addEventListener("loadedmetadata", finish);
+	});
+
+/**
+ * Effective local end of the current clip for handoff/stop:
+ * clipOut if set, else media duration.
+ */
+const getEffectiveClipOut = () => {
+	if (clipOutTime > 0) return clipOutTime;
+	if (typeof player !== "undefined" && player?.duration > 0) {
+		return player.duration;
+	}
+	const q =
+		typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
+	return Number(q?.mediaDuration) || 0;
+};
+
+/** True if playhead is at/past clip out or true media end (with small epsilon). */
+const isAtOrPastClipOut = (currentTime) => {
+	const out = getEffectiveClipOut();
+	const mediaDur =
+		typeof player !== "undefined" && player?.duration > 0 ? player.duration : 0;
+	const epsilon = 0.05;
+	if (out > 0 && currentTime >= out - epsilon) return true;
+	if (mediaDur > 0 && currentTime >= mediaDur - epsilon) return true;
+	if (typeof player !== "undefined" && player?.ended) return true;
+	return false;
+};
+
+/** Whether current queue item should sequence-continue into the next. */
+const shouldHandoffToNextJoined = () => {
+	if (window._sequenceHandoffInProgress) return false;
+	if (typeof videoQueue === "undefined" || !videoQueue.length) return false;
+	if (activeQueueIndex >= videoQueue.length - 1) return false;
+	const current = videoQueue[activeQueueIndex];
+	if (!current?.joinedToNext) return false;
+	const next = videoQueue[activeQueueIndex + 1];
+	return !!next?.videoFilePath;
 };
 
 /** Effective clip out for a queue item (clipOut, mediaDuration, or active player). */
@@ -145,6 +214,13 @@ const getActiveJoinRun = () => {
 };
 window.getActiveJoinRun = getActiveJoinRun;
 
+/** True when the active join run has more than one clip. */
+const isActiveRunMulti = () => {
+	const run = getActiveJoinRun();
+	return !!(run?.segments && run.segments.length > 1);
+};
+window.isActiveRunMulti = isActiveRunMulti;
+
 /** Map sequence time → source queue index + local media time. */
 const sequenceTimeToSource = (seqTime, run = null) => {
 	const r = run || getActiveJoinRun();
@@ -198,13 +274,13 @@ window.getSequencePlayheadTime = getSequencePlayheadTime;
 const syncSequenceModeState = (run = null) => {
 	const r = run || getActiveJoinRun();
 	const multi = r.segments.length > 1;
+	const playerDur =
+		typeof player !== "undefined" && player?.duration ? player.duration : 0;
 	window._sequenceMode = {
 		active: multi,
 		totalDuration: multi
-			? r.totalDuration
-			: (typeof player !== "undefined" && player?.duration) ||
-				r.totalDuration ||
-				0,
+			? Math.max(r.totalDuration, 0.001)
+			: Math.max(playerDur || r.totalDuration || 0, 0.001),
 		segments: r.segments,
 	};
 	const panel = document.getElementById("detailed-timeline-panel");
@@ -296,13 +372,20 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		if (videoFilePath && typeof window.loadVideo === "function") {
 			await window.loadVideo(videoFilePath);
 		}
+		if (typeof player !== "undefined" && player) {
+			await waitForPlayerReadyToSeek(player);
+		}
 		if (!silent) {
 			showToast(`Switched to: ${currentVideo.videoName}`, "success");
 		}
 	}
 
 	if (typeof player !== "undefined" && player) {
-		player.currentTime = mapped.localTime;
+		try {
+			player.currentTime = mapped.localTime;
+		} catch (err) {
+			console.warn("[Playback] sequence seek failed:", err);
+		}
 		if (wasPlaying) {
 			void player
 				.play()
@@ -314,13 +397,11 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		}
 	}
 
-	// Update playheads immediately
-	const mode = syncSequenceModeState();
+	// Update playheads immediately in SEQUENCE time for multi-run
+	const mode = syncSequenceModeState(run);
 	const duration = mode.active ? mode.totalDuration : player?.duration || 1;
-	const pct =
-		duration > 0
-			? ((mode.active ? seqTime : mapped.localTime) / duration) * 100
-			: 0;
+	const headTime = mode.active ? seqTime : mapped.localTime;
+	const pct = duration > 0 ? (headTime / duration) * 100 : 0;
 	const heads = document.getElementsByClassName("sequencer-playhead");
 	for (let i = 0; i < heads.length; i += 1) {
 		heads[i].style.left = `${pct}%`;
@@ -331,29 +412,34 @@ window.seekSequenceTime = seekSequenceTime;
 /** Play across join: hand off to next queue item at its clipIn without stopping. */
 const handoffToNextJoinedClip = async () => {
 	if (window._sequenceHandoffInProgress) return;
-	if (
-		typeof videoQueue === "undefined" ||
-		activeQueueIndex >= videoQueue.length - 1
-	) {
+	if (!shouldHandoffToNextJoined()) {
+		// Unjoined or missing next — stop cleanly at out
+		if (typeof player !== "undefined" && player && !player.paused) {
+			player.pause();
+		}
+		const out = getEffectiveClipOut();
+		if (typeof player !== "undefined" && player && out > 0) {
+			try {
+				player.currentTime = Math.min(out, player.duration || out);
+			} catch (_) {
+				/* ignore seek on dead element */
+			}
+		}
+		window._sequenceContinuePlay = false;
 		return;
 	}
-	const current = videoQueue[activeQueueIndex];
-	if (!current?.joinedToNext) return;
 
 	window._sequenceHandoffInProgress = true;
+	// Capture continue intent BEFORE load (ended/pause will clear player.paused)
+	const resumeAfterLoad =
+		window._sequenceContinuePlay ||
+		(typeof player !== "undefined" && player && !player.paused);
+	window._sequenceContinuePlay = true;
+
 	try {
 		const nextIndex = activeQueueIndex + 1;
 		const next = videoQueue[nextIndex];
-		if (!next?.videoFilePath) {
-			if (typeof player !== "undefined" && player) {
-				player.pause();
-				if (clipOutTime > 0) player.currentTime = clipOutTime;
-			}
-			return;
-		}
 
-		const wasPlaying =
-			typeof player !== "undefined" && player && !player.paused;
 		preserveClipBounds = true;
 		if (typeof saveLocalState === "function") saveLocalState();
 
@@ -376,28 +462,57 @@ const handoffToNextJoinedClip = async () => {
 			window.resetClosedCaptions();
 		}
 
+		// Soft pause only for the load gap — not a user "stop"
+		if (typeof player !== "undefined" && player && !player.paused) {
+			player.pause();
+		}
+
 		if (typeof window.loadVideo === "function") {
 			await window.loadVideo(videoFilePath);
 		}
 
 		if (typeof player !== "undefined" && player) {
-			player.currentTime = clipInTime || 0;
-			if (wasPlaying) {
-				void player
-					.play()
-					?.catch((err) =>
-						console.warn("[Playback] join handoff play() blocked:", err),
-					);
+			await waitForPlayerReadyToSeek(player);
+			const targetIn = clipInTime || 0;
+			try {
+				player.currentTime = targetIn;
+			} catch (err) {
+				console.warn("[Playback] join handoff seek failed:", err);
+			}
+			// Refresh sequence mode so playhead uses run duration for next segment
+			syncSequenceModeState();
+			if (resumeAfterLoad || window._sequenceContinuePlay) {
+				try {
+					await player.play();
+				} catch (err) {
+					console.warn("[Playback] join handoff play() blocked:", err);
+				}
+			}
+			// Restart smooth playhead if play event did not
+			if (
+				!window.playheadAnimationId &&
+				typeof window.syncTimelinePlayheadSmoothly === "function"
+			) {
+				window.playheadAnimationId = requestAnimationFrame(
+					window.syncTimelinePlayheadSmoothly,
+				);
 			}
 		}
 
-		// Keep sequence timeline; refresh markers/playhead without full toast
 		syncSequenceModeState();
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
 		}
+		// Rebuild sequence filmstrips for the still-active run (debounced)
+		scheduleJoinTimelineRebuild();
+	} catch (err) {
+		console.error("[Playback] join handoff failed:", err);
+		if (typeof player !== "undefined" && player && !player.paused) {
+			player.pause();
+		}
 	} finally {
 		window._sequenceHandoffInProgress = false;
+		window._sequenceContinuePlay = false;
 	}
 };
 window.handoffToNextJoinedClip = handoffToNextJoinedClip;
@@ -2527,6 +2642,14 @@ const initializePlayer = () => {
 		}
 	});
 	player.addEventListener("ended", (event) => {
+		// Joined sequence: media end of clip i → hand off to i+1 (do not stop transport)
+		if (shouldHandoffToNextJoined()) {
+			if (event) event.preventDefault();
+			window._sequenceContinuePlay = true;
+			void handoffToNextJoinedClip();
+			return;
+		}
+
 		seektimeupdate();
 
 		let isCurrentlyLooping = false;
@@ -2578,6 +2701,17 @@ const initializePlayer = () => {
 	volumeSlider = document.getElementById("volumeSlider");
 
 	loadLocalState();
+
+	// Ensure Playlist Queue Join chips match restored joinedToNext without
+	// requiring the user to open/close the sidebar (bug 6).
+	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		// Invalidate cache so join state is not sticky from a pre-load shell
+		if (typeof window.invalidateSidebarPlaylistCache === "function") {
+			window.invalidateSidebarPlaylistCache();
+		}
+		window.renderSidebarPlaylist();
+	}
 
 	// Rehydrate active media through the proxy path (H.265-safe) ONLY if intended mode is Normal.
 	// loadLocalState only restores memory; it no longer sets player.src.
@@ -3540,20 +3674,39 @@ const seektimeupdate = () => {
 			}
 		}
 
+		// Do not fight the player mid-handoff load
+		if (window._sequenceHandoffInProgress) return;
+
 		const currentTime = player.currentTime;
 		const duration = player.duration;
+		const run = getActiveJoinRun();
+		const multi = run.segments.length > 1;
+		if (multi) syncSequenceModeState(run);
+
 		if (seekBar) {
 			seekBar.value = currentTime;
 			if (typeof seekBar !== "undefined" && seekBar) {
 				seekBar.max = duration || 0;
 			}
 		}
-		updateTimeDisplay(currentTime, "currentTime");
-		if (duration) {
-			updateTimeDisplay(duration, "durationTime");
+
+		// Transport clock: sequence time when multi-clip run, else local
+		const displayTime = multi ? getSequencePlayheadTime() : currentTime;
+		const displayDuration = multi
+			? Math.max(run.totalDuration, 0.001)
+			: duration || 0;
+		updateTimeDisplay(displayTime, "currentTime");
+		if (displayDuration) {
+			updateTimeDisplay(displayDuration, "durationTime");
 		}
 
-		if (duration > 0) {
+		// Playhead on detailed timeline — always sequence % when multi
+		if (multi && run.totalDuration > 0) {
+			const seqPct = (displayTime / run.totalDuration) * 100;
+			for (let i = 0; i < playheadsLiveCollection.length; i++) {
+				playheadsLiveCollection[i].style.left = `${seqPct}%`;
+			}
+		} else if (duration > 0) {
 			const pct = (currentTime / duration) * 100;
 			for (let i = 0; i < playheadsLiveCollection.length; i++) {
 				playheadsLiveCollection[i].style.left = `${pct}%`;
@@ -3652,35 +3805,29 @@ const seektimeupdate = () => {
 			return;
 		}
 
-		// At clipOut: hand off to next joined clip, or stop as today
-		if (clipOutTime > 0 && currentTime > clipOutTime) {
-			const activeItem =
-				typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
-			if (
-				activeItem?.joinedToNext &&
-				activeQueueIndex < videoQueue.length - 1 &&
-				!window._sequenceHandoffInProgress
-			) {
+		// At clipOut / media end: hand off to next joined clip, or stop as today
+		if (isAtOrPastClipOut(currentTime)) {
+			const playingThrough =
+				!player.paused || !!player.ended || !!window._sequenceContinuePlay;
+			if (shouldHandoffToNextJoined() && playingThrough) {
+				// Sequence-continue — do not treat as "video ended / stop"
+				window._sequenceContinuePlay = true;
 				void handoffToNextJoinedClip();
 				return;
 			}
+			// Solo (or unjoined): stop once while playing; avoid seek-loop when already parked
 			if (!player.paused) {
 				player.pause();
-			}
-			player.currentTime = clipOutTime;
-			return;
-		}
-
-		// Sequence-mode playhead: position by sequence time across the active run
-		if (window._sequenceMode?.active && duration > 0) {
-			const seqT = getSequencePlayheadTime();
-			const seqDur = window._sequenceMode.totalDuration || duration;
-			if (seqDur > 0) {
-				const seqPct = (seqT / seqDur) * 100;
-				for (let i = 0; i < playheadsLiveCollection.length; i++) {
-					playheadsLiveCollection[i].style.left = `${seqPct}%`;
+				const out = getEffectiveClipOut();
+				if (out > 0 && Number.isFinite(out) && currentTime > out + 0.001) {
+					try {
+						player.currentTime = Math.min(out, player.duration || out);
+					} catch (_) {
+						/* ignore */
+					}
 				}
 			}
+			return;
 		}
 	}
 };
@@ -5398,6 +5545,13 @@ const editVideoInQueue = async () => {
 };
 
 let _sidebarPlaylistElements = [];
+
+/** Drop cached playlist nodes so the next render rebuilds Join chips from state. */
+window.invalidateSidebarPlaylistCache = () => {
+	_sidebarPlaylistElements = [];
+	const container = document.getElementById("sidebar-queue-list");
+	if (container) container.innerHTML = "";
+};
 
 const JOIN_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 

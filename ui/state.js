@@ -261,6 +261,13 @@ const loadLocalState = () => {
 	// (verify_and_prepare_video proxy). Avoid convertFileSrc here so H.265 works.
 	if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+	// Join chips must refresh after rehydrate (do not wait for panel open/close)
+	if (typeof window.invalidateSidebarPlaylistCache === "function") {
+		window.invalidateSidebarPlaylistCache();
+	}
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
 };
 
 const exportToJSON = async (isSaveAs = false) => {
@@ -403,6 +410,13 @@ const importFromJSON = async (jsonText, options = {}) => {
 
 		if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+		// Force playlist Join UI refresh immediately after project import
+		if (typeof window.invalidateSidebarPlaylistCache === "function") {
+			window.invalidateSidebarPlaylistCache();
+		}
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
 
 		if (DOM.markersList) DOM.markersList.innerHTML = "";
 
@@ -441,6 +455,10 @@ const importFromJSON = async (jsonText, options = {}) => {
 		if (typeof updateMarkersList === "function") updateMarkersList();
 		if (typeof drawTable === "function") drawTable();
 		if (typeof updateLoadButtonColor === "function") updateLoadButtonColor();
+		// Second refresh after media load so join visuals stay in sync with final queue
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
 
 		toConsole(
 			"Project imported successfully",
