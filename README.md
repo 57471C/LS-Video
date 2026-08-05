@@ -89,26 +89,4 @@ LS.Video values speed and minimalism, entirely avoiding heavy third-party framew
 
 
 ---
-## Detailed Changelog
-
-### v0.4.2
-Added: Context-specific target execution mapping to accept explicit view parameters inside window.cycleViewMode.
-
-Added: Upgraded OS launch argument subsystem to route raw media assets into floating mini-widgets and serialized files into maximized edit panels.
-
-Updated: Transformed full application theme canvas background from harsh high-contrast black (#000000) to premium off-black (#121214).
-
-Fixed: Fixed a timeline bug by separating standalone text metadata loads from destructive video lifecycle purges.
-
-### v0.4.1
-Refactored: Overhauled view carousel state tracking to rely completely on body-level CSS modifiers, resolving an unhandled JavaScript ReferenceError during Cinema mode execution blocks.
-
-Fixed: Restored missing media playback controls and corrected rigidity constraints blocking video resizing inside the compact miniplayer window.
-
-### v0.2.2
-Added: Implemented native OS file associations and automated blank project initializers for passed external media files.
-
-### v0.1.0
-Migrated: Migrated application framework from older multi-lane video editing tracks to focus strictly on high-performance media playback and precise canvas marker annotations.
-
 License: Distributed under the MIT Open-Source parameters. Created and maintained by 57471C.
