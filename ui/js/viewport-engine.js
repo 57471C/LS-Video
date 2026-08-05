@@ -14,35 +14,37 @@ let isPanningVideo = false;
 let startMouseX = 0;
 let startMouseY = 0;
 
-Object.defineProperty(window, "zoomLevel", {
-	get() {
-		return zoomLevel;
-	},
-	set(val) {
-		zoomLevel = val;
-	},
-	configurable: true,
-});
+if (typeof window !== "undefined") {
+	Object.defineProperty(window, "zoomLevel", {
+		get() {
+			return zoomLevel;
+		},
+		set(val) {
+			zoomLevel = val;
+		},
+		configurable: true,
+	});
 
-Object.defineProperty(window, "translateX", {
-	get() {
-		return translateX;
-	},
-	set(val) {
-		translateX = val;
-	},
-	configurable: true,
-});
+	Object.defineProperty(window, "translateX", {
+		get() {
+			return translateX;
+		},
+		set(val) {
+			translateX = val;
+		},
+		configurable: true,
+	});
 
-Object.defineProperty(window, "translateY", {
-	get() {
-		return translateY;
-	},
-	set(val) {
-		translateY = val;
-	},
-	configurable: true,
-});
+	Object.defineProperty(window, "translateY", {
+		get() {
+			return translateY;
+		},
+		set(val) {
+			translateY = val;
+		},
+		configurable: true,
+	});
+}
 
 function syncFromGlobals() {
 	videoScale = zoomLevel;

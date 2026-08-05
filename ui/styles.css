@@ -486,11 +486,11 @@ body.cinema-mode #mainLayoutGrid {
 	height: 100vh !important;
 	margin: 0 !important;
 	padding: 0 !important;
-	background: #f9fafb !important;
+	background: #000000 !important;
 }
 
 .dark body.cinema-mode #mainLayoutGrid {
-	background: #121214 !important;
+	background: #000000 !important;
 }
 
 body.cinema-mode #video-wrapper-id,
@@ -500,7 +500,7 @@ body.cinema-mode #video-viewport {
 	left: 0 !important;
 	width: 100vw !important;
 	height: 100vh !important;
-	background: #f9fafb !important;
+	background: #000000 !important;
 	display: flex !important;
 	align-items: center !important;
 	justify-content: center !important;
@@ -509,7 +509,7 @@ body.cinema-mode #video-viewport {
 
 .dark body.cinema-mode #video-wrapper-id,
 .dark body.cinema-mode #video-viewport {
-	background: #121214 !important;
+	background: #000000 !important;
 }
 
 body.cinema-mode video {
@@ -549,7 +549,11 @@ body.miniplayer-mode #playlist-queue-sidebar,
 body.miniplayer-mode #mainLayoutGrid #rightPanel,
 body.miniplayer-mode #marker-table-container,
 body.miniplayer-mode #sidebar,
-body.miniplayer-mode #detailed-timeline-panel {
+body.miniplayer-mode #detailed-timeline-panel,
+body.miniplayer-mode #trimVideoBtn,
+body.cinema-mode #trimVideoBtn,
+body.miniplayer-mode #takeSnapshotBtn,
+body.cinema-mode #takeSnapshotBtn {
 	display: none !important;
 }
 
@@ -570,11 +574,11 @@ body.miniplayer-mode #mainLayoutGrid {
 	padding: 0 !important;
 	position: relative !important;
 	overflow: hidden !important;
-	background: #f9fafb !important;
+	background: #000000 !important;
 }
 
 .dark body.miniplayer-mode #mainLayoutGrid {
-	background: #121214 !important;
+	background: #000000 !important;
 }
 
 /* Force video viewport to claim everything except the control row */
@@ -591,12 +595,12 @@ body.miniplayer-mode #video-viewport {
 	align-items: center !important;
 	justify-content: center !important;
 	z-index: 10 !important;
-	background: #f9fafb !important;
+	background: #000000 !important;
 }
 
 .dark body.miniplayer-mode #video-wrapper-id,
 .dark body.miniplayer-mode #video-viewport {
-	background: #121214 !important;
+	background: #000000 !important;
 }
 
 body.miniplayer-mode video {

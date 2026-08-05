@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-// Using require to load the module in Node environment without triggering Vite's static ESM analysis errors if module.exports is used
-const { parseFFmpegTime } = require("./app.js");
+import { parseFFmpegTime } from "./app.js";
 
 describe("parseFFmpegTime", () => {
 	it("should extract time and update progress bar correctly", () => {

@@ -21,6 +21,60 @@ import {
 	resetVideoViewport,
 	updateViewportTransform,
 } from "./js/viewport-engine.js";
+import {
+	initVisualizerAudio,
+	isVisualizerActive,
+	resizeVisualizer,
+	startVisualizer,
+	stopVisualizer,
+} from "./js/visualizer-engine.js";
+
+const isAudioOnlyMedia = (pathOrName) => {
+	if (!pathOrName) return false;
+	const lower = pathOrName.toLowerCase();
+	return (
+		lower.endsWith(".mp3") ||
+		lower.endsWith(".wav") ||
+		lower.endsWith(".flac") ||
+		lower.endsWith(".aac") ||
+		lower.endsWith(".m4a") ||
+		lower.endsWith(".ogg") ||
+		lower.endsWith(".wma")
+	);
+};
+
+// --- INITIAL THEME BOOTSTRAP (CSP-SAFE) ---
+if (localStorage.getItem("darkMode") === "true") {
+	document.documentElement.classList.add("dark");
+} else {
+	document.documentElement.classList.remove("dark");
+}
+
+const updateVisualizerControlsVisibility = () => {
+	const vizToggleBtn = document.getElementById("vizToggleBtn");
+	const vizCanvas = document.getElementById("vizCanvas");
+	const isAudio = isAudioOnlyMedia(videoFilePath || videoFileName);
+
+	if (isAudio) {
+		if (vizToggleBtn) {
+			vizToggleBtn.classList.remove("hidden");
+			vizToggleBtn.disabled = false;
+		}
+	} else {
+		if (vizToggleBtn) {
+			vizToggleBtn.classList.add("hidden");
+			vizToggleBtn.disabled = true;
+			vizToggleBtn.classList.remove("btn-icon-highlight");
+			vizToggleBtn.classList.add("btn-icon");
+		}
+		if (vizCanvas) {
+			stopVisualizer(vizCanvas);
+		}
+		if (player) {
+			player.classList.remove("opacity-0");
+		}
+	}
+};
 
 // --- CENTRAL APPLICATION RUNTIME STATE SAFETIES ---
 window.cinemaIdleTimer = window.cinemaIdleTimer || null;
@@ -269,6 +323,35 @@ const isEmptyOrOriginOnlyMediaSrc = (src) => {
 	return false;
 };
 
+/**
+ * Normalizes Windows extended prefixes (\\?\UNC\ and \\?\ prefixes) without stripping UNC network share paths (\\server\share\...).
+ * @param {string} rawPath
+ * @returns {string}
+ */
+export function normalizePath(rawPath) {
+	if (typeof rawPath !== "string" || !rawPath) return rawPath;
+	const trimmed = rawPath.trim();
+	let normalized = trimmed;
+	const upper = trimmed.toUpperCase();
+
+	if (upper.startsWith("\\\\?\\UNC\\")) {
+		normalized = "\\\\" + trimmed.slice("\\\\?\\UNC\\".length);
+	} else if (upper.startsWith("//?/UNC/")) {
+		normalized = "//" + trimmed.slice("//?/UNC/".length);
+	} else if (upper.startsWith("\\\\?\\")) {
+		normalized = trimmed.slice("\\\\?\\".length);
+	} else if (upper.startsWith("//?/")) {
+		normalized = trimmed.slice("//?/".length);
+	}
+
+	console.log(`[Loader Core] Path normalize: "${rawPath}" -> "${normalized}"`);
+	return normalized;
+}
+
+if (typeof window !== "undefined") {
+	window.normalizePath = normalizePath;
+}
+
 window.loadVideo = async (incomingVideoPath) => {
 	if (!incomingVideoPath || incomingVideoPath.trim() === "") {
 		console.error(
@@ -277,7 +360,7 @@ window.loadVideo = async (incomingVideoPath) => {
 		return;
 	}
 
-	const normalizedPath = incomingVideoPath.trim();
+	const normalizedPath = normalizePath(incomingVideoPath);
 
 	// Same path already loading — drop duplicate concurrent call (restore+open, etc.)
 	if (window._videoLoadInProgress && window._loadVideoPath === normalizedPath) {
@@ -374,7 +457,7 @@ window.loadVideo = async (incomingVideoPath) => {
 			}
 
 			// Surgical clearance of native Windows extended UNC safety qualifiers
-			resolvedFilePath = resolvedFilePath.replace(/^\\\\?\\/, "");
+			resolvedFilePath = normalizePath(resolvedFilePath);
 			console.log(
 				"[Loader Core] Video path mapping successfully resolved to:",
 				resolvedFilePath,
@@ -475,9 +558,19 @@ window.loadVideo = async (incomingVideoPath) => {
 		};
 
 		// 5. Fire core media track rehydration paint triggers
+		const vizCanvas = document.getElementById("vizCanvas");
+		if (isAudioOnlyMedia(normalizedPath)) {
+			videoElement.classList.add("opacity-0");
+		} else {
+			videoElement.classList.remove("opacity-0");
+			if (vizCanvas) {
+				stopVisualizer(vizCanvas);
+			}
+		}
 		videoElement.src = validatedStreamUrl;
 		videoElement.preload = "auto";
 		videoElement.load();
+		updateVisualizerControlsVisibility();
 
 		// Fire default post-load interface configurations
 		if (typeof toggleVideoPlaceholder === "function") {
@@ -924,6 +1017,20 @@ window.loadWaveformTimeline = async () => {
 		window.renderAudioWaveformCanvas();
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
+		}
+
+		// Skip filmstrip thumbnail extraction for audio-only media
+		if (isAudioOnlyMedia(requestPath)) {
+			const videoTrack = document.getElementById("timeline-video-track");
+			if (videoTrack) {
+				videoTrack.textContent = "Audio File Track";
+				videoTrack.style.display = "flex";
+				videoTrack.style.alignItems = "center";
+				videoTrack.style.justifyContent = "center";
+				videoTrack.style.width = "100%";
+				window.setupVideoTrack();
+			}
+			return;
 		}
 
 		// Trigger filmstrip thumbnail extraction
@@ -1393,6 +1500,29 @@ window.cycleViewMode = async (targetMode) => {
 			window.setupVideoTrack();
 		}
 
+		const vizCanvas = document.getElementById("vizCanvas");
+		updateVisualizerControlsVisibility();
+		if (vizCanvas) {
+			resizeVisualizer(vizCanvas);
+			if (
+				mode === "normal" &&
+				!isAudioOnlyMedia(videoFilePath || videoFileName)
+			) {
+				stopVisualizer(vizCanvas);
+			} else if (mode === "miniplayer" || mode === "cinema") {
+				if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
+					startVisualizer(vizCanvas, player);
+				}
+			}
+		}
+
+		requestAnimationFrame(() => {
+			if (vizCanvas) resizeVisualizer(vizCanvas);
+			setTimeout(() => {
+				if (vizCanvas) resizeVisualizer(vizCanvas);
+			}, 100);
+		});
+
 		// Rehydrate video session if entering Normal mode and no video currently loaded
 		if (
 			mode === "normal" &&
@@ -1512,6 +1642,45 @@ const initializePlayer = () => {
 		toConsole("Dark mode toggled", isDark ? "On" : "Off", debuggin);
 
 		updateMarkersList();
+	});
+
+	updateVisualizerControlsVisibility();
+
+	const vizToggleBtn = document.getElementById("vizToggleBtn");
+
+	vizToggleBtn?.addEventListener("click", () => {
+		if (
+			vizToggleBtn.disabled ||
+			!isAudioOnlyMedia(videoFilePath || videoFileName)
+		) {
+			return;
+		}
+		const canvas = document.getElementById("vizCanvas");
+		if (!canvas) return;
+		if (isVisualizerActive()) {
+			stopVisualizer(canvas);
+			vizToggleBtn.classList.remove("btn-icon-highlight");
+			vizToggleBtn.classList.add("btn-icon");
+			showToast("Visualizer Off", "info");
+		} else {
+			startVisualizer(canvas, player);
+			vizToggleBtn.classList.add("btn-icon-highlight");
+			vizToggleBtn.classList.remove("btn-icon");
+			showToast("Visualizer On", "success");
+		}
+	});
+
+	player.addEventListener("play", () => {
+		initVisualizerAudio(player);
+		const canvas = document.getElementById("vizCanvas");
+		if (
+			canvas &&
+			(isVisualizerActive() ||
+				(window.currentViewMode !== "normal" &&
+					isAudioOnlyMedia(videoFilePath || videoFileName)))
+		) {
+			startVisualizer(canvas, player);
+		}
 	});
 
 	if (DOM.videoQueueSelect) {
@@ -1708,12 +1877,21 @@ const initializePlayer = () => {
 		toConsole("Playback speed restored", playbackSpeed, debuggin);
 
 		player.volume = volumeLevel;
-		player.muted = true;
-		DOM.volumeOnIcon.classList.add("hidden");
-		DOM.volumeOffIcon.classList.remove("hidden");
-		volumeSlider.value = 0;
-		DOM.volumeValue.textContent = "0";
-		toConsole("Video muted on load", "Success", debuggin);
+		if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
+			player.muted = false;
+			DOM.volumeOnIcon.classList.remove("hidden");
+			DOM.volumeOffIcon.classList.add("hidden");
+			volumeSlider.value = Math.round(volumeLevel * 100);
+			DOM.volumeValue.textContent = Math.round(volumeLevel * 100).toString();
+			toConsole("Audio file unmuted on load", "Success", debuggin);
+		} else {
+			player.muted = true;
+			DOM.volumeOnIcon.classList.add("hidden");
+			DOM.volumeOffIcon.classList.remove("hidden");
+			volumeSlider.value = 0;
+			DOM.volumeValue.textContent = "0";
+			toConsole("Video muted on load", "Success", debuggin);
+		}
 
 		bootTimelineVisualizers();
 		initializeVideoViewportZoomPan(
@@ -2086,7 +2264,22 @@ const initializePlayer = () => {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
 					filters: [
-						{ name: "Video", extensions: ["mp4", "webm", "ogg", "mov", "avi"] },
+						{
+							name: "Media Files",
+							extensions: [
+								"mp4",
+								"webm",
+								"ogg",
+								"mov",
+								"avi",
+								"mkv",
+								"mp3",
+								"wav",
+								"flac",
+								"aac",
+								"m4a",
+							],
+						},
 					],
 				});
 				if (selected) {
@@ -2108,7 +2301,22 @@ const initializePlayer = () => {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
 					filters: [
-						{ name: "Video", extensions: ["mp4", "webm", "ogg", "mov", "avi"] },
+						{
+							name: "Media Files",
+							extensions: [
+								"mp4",
+								"webm",
+								"ogg",
+								"mov",
+								"avi",
+								"mkv",
+								"mp3",
+								"wav",
+								"flac",
+								"aac",
+								"m4a",
+							],
+						},
 					],
 				});
 				if (selected) {
@@ -3159,7 +3367,7 @@ window.updateSliderTicks = updateSliderTicks;
 window.toggleSettings = toggleSettings;
 
 /** Parses the FFmpeg log output to extract timestamp and update progress. */
-function parseFFmpegTime(line, totalSeconds, progressBar) {
+export function parseFFmpegTime(line, totalSeconds, progressBar) {
 	if (!line) return;
 	const match = line.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
 	if (match) {

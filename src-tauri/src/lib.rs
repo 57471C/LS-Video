@@ -1087,6 +1087,15 @@ async fn verify_and_prepare_video(
         );
     };
 
+    let is_audio = matches!(ext.as_str(), "mp3" | "wav" | "m4a" | "ogg" | "aac" | "flac");
+    if is_audio {
+        println!(
+            "[Proxy Backend] Audio file detected ({}); skipping video proxy pipeline.",
+            ext
+        );
+        return Ok(video_path);
+    }
+
     let is_unsafe_container = matches!(ext.as_str(), "avi" | "mkv" | "wmv" | "flv");
 
     // 3. Probe the video metadata using the bundled static ffmpeg sidecar binary
