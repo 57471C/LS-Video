@@ -114,7 +114,7 @@ In `setup`, use `tauri::async_runtime::spawn`, not a bare `tokio::spawn` that as
 
 - `externalBin: ["binaries/ffmpeg"]` → platform-triple-named binary under `src-tauri/binaries/`
 - Not in git (too large). Local/CI must supply before `tauri build`
-- GPL (x264) implications if you ship a full build — keep LICENSE notes honest
+- Full builds that link **libx264** are **GPL** — see root `LICENSE` §2 (bundled FFmpeg). App source stays MIT; do not call the whole installer MIT-only
 - Custom minimal ffmpeg is optional size work, not required for correctness
 
 ---

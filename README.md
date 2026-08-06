@@ -89,4 +89,9 @@ LS.Video values speed and minimalism, entirely avoiding heavy third-party framew
 
 
 ---
-License: Distributed under the MIT Open-Source parameters. Created and maintained by 57471C.
+## License
+
+- **LS.Video application source** (UI, Tauri/Rust host, project packaging): [MIT](LICENSE).
+- **Bundled FFmpeg sidecar** (`ffmpeg.exe`, including builds linked with **libx264**): **GPL** (or LGPL for LGPL-only builds). Not MIT. See [LICENSE](LICENSE) §2 for distribution obligations and source availability.
+
+Do not describe the full installer/bundle as MIT-only when the FFmpeg sidecar is included. Created and maintained by 57471C.
