@@ -176,7 +176,14 @@ const getActiveRunMarkerViewEntries = () => {
 			});
 		}
 	}
-	entries.sort((a, b) => a.displayTime - b.displayTime);
+	// Sort by SEQUENCE time for multi-clip runs (not raw source-local time alone).
+	// Stable tie-break: queue order then source-local index — never shuffle markers between files.
+	entries.sort((a, b) => {
+		const dt = a.displayTime - b.displayTime;
+		if (dt !== 0) return dt;
+		if (a.queueIndex !== b.queueIndex) return a.queueIndex - b.queueIndex;
+		return a.markerIndex - b.markerIndex;
+	});
 	return entries;
 };
 
@@ -369,23 +376,46 @@ const updateMarkersListImmediate = () => {
 
 		DOM.markersList.innerHTML = rows.join("");
 
-		const markerTableBody =
-			document.getElementById("markersTableBodyId") ||
-			document.querySelector(".markers-table");
+		// #addMarkerBtn lives in <thead>, not tbody — re-bind after every re-render
+		// (innerHTML destroys the previous node; Enter uses window.addMarker directly).
+		const addMarkerBtnEl = document.getElementById("addMarkerBtn");
+		if (addMarkerBtnEl) {
+			addMarkerBtnEl.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				if (typeof window.addMarker === "function") {
+					window.addMarker();
+				}
+			});
+		}
 
-		if (markerTableBody) {
-			markerTableBody.addEventListener("click", async (event) => {
+		// Delegate row actions from the list host so thead + tbody both work after re-render
+		if (!DOM.markersList.dataset.markerClickBound) {
+			DOM.markersList.dataset.markerClickBound = "1";
+			DOM.markersList.addEventListener("click", async (event) => {
+				// Add Marker (header button; also covered by re-bind above)
+				const addBtn = event.target.closest("#addMarkerBtn");
+				if (addBtn) {
+					event.preventDefault();
+					event.stopPropagation();
+					if (typeof window.addMarker === "function") {
+						window.addMarker();
+					}
+					return;
+				}
+
 				// 1. Context trigger
 				const contextBtn = event.target.closest(".marker-context-trigger");
 				if (contextBtn) {
 					event.preventDefault();
 					event.stopPropagation();
-					const markerIndex = parseInt(
-						contextBtn.getAttribute("data-marker-index"),
+					const viewIndex = parseInt(
+						contextBtn.getAttribute("data-view-index") ??
+							contextBtn.getAttribute("data-marker-index"),
 						10,
 					);
 					if (typeof openMarkerMenu === "function") {
-						openMarkerMenu(event, markerIndex);
+						openMarkerMenu(event, viewIndex);
 					}
 					return;
 				}
@@ -554,18 +584,14 @@ const updateMarkersListImmediate = () => {
 					}
 					return;
 				}
-
-				// 7. Add Marker (button is re-created each render)
-				const addBtn = event.target.closest("#addMarkerBtn");
-				if (addBtn) {
-					event.preventDefault();
-					event.stopPropagation();
-					if (typeof window.addMarker === "function") {
-						window.addMarker();
-					}
-					return;
-				}
 			});
+		}
+
+		const markerTableBody =
+			document.getElementById("markersTableBodyId") ||
+			document.querySelector(".markers-table");
+
+		if (markerTableBody) {
 
 			// Attach name input change listeners (terry/tetris easter egg via updateMarkerName)
 			markerTableBody
@@ -740,6 +766,41 @@ const updateVideoTimeSummary = () => {
 		const playerEl = getMarkersPlayer();
 		const activeVideo =
 			(typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) || {};
+
+		// Multi-clip join run: footer reflects SEQUENCE bounds (sum of segment lengths).
+		// Solo / unjoined: keep per-clip Clip In / Out / Duration behaviour.
+		const multi =
+			typeof window.isActiveRunMulti === "function" && window.isActiveRunMulti();
+		if (multi) {
+			const run =
+				typeof window.getActiveJoinRun === "function"
+					? window.getActiveJoinRun()
+					: null;
+			// Sequence start is always 0 on the spine (first segment offset).
+			const seqIn = 0;
+			const seqOut = Math.max(0, Number(run?.totalDuration) || 0);
+			const seqDur = seqOut;
+			const formattedStartTime = formatTimeToHHMMSSMS(seqIn);
+			const formattedEndTime = formatTimeToHHMMSSMS(seqOut);
+			const formattedDuration = formatTimeToHHMMSSMS(seqDur);
+
+			footer.innerHTML = `
+      <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full py-1 text-sm font-medium">
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Clip In:</span>
+          <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Clip Out:</span>
+          <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Video Duration:</span>
+          <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
+        </span>
+    `;
+			return;
+		}
 
 		const startMarker = markers.find(
 			(m) => m.type === "in" || m.type === "start",

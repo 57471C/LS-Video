@@ -50,6 +50,9 @@ const isAudioOnlyMedia = (pathOrName) => {
 window._sequenceHandoffInProgress = false;
 /** When true, handoff must resume play() after next source is ready (even if player already ended/paused). */
 window._sequenceContinuePlay = false;
+/** Soft handoff / sequence continue: skip mute-on-load and re-apply captured volume. */
+window._softHandoffVolumeActive = false;
+window._softHandoffAudio = null;
 window._joinTimelineRebuildTimer = null;
 window._sequenceMode = {
 	active: false,
@@ -450,8 +453,18 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 
 	const wasPlaying = typeof player !== "undefined" && player && !player.paused;
 	const shouldPlay = play === true ? true : play === false ? false : wasPlaying;
+	const seekVol =
+		typeof player !== "undefined" && player && Number.isFinite(player.volume)
+			? player.volume
+			: volumeLevel;
+	const seekMuted =
+		typeof player !== "undefined" && player ? !!player.muted : false;
+	let switchedSource = false;
 
 	if (mapped.queueIndex !== activeQueueIndex) {
+		switchedSource = true;
+		window._softHandoffVolumeActive = true;
+		window._softHandoffAudio = { volume: seekVol, muted: seekMuted };
 		// Silent switch into target source without toast spam
 		preserveClipBounds = true;
 		if (typeof saveLocalState === "function") saveLocalState();
@@ -485,6 +498,10 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		}
 		if (typeof player !== "undefined" && player) {
 			await waitForPlayerReadyToSeek(player);
+			// Preserve volume across soft source switch
+			player.volume = seekVol;
+			player.muted = seekMuted;
+			volumeLevel = seekVol;
 		}
 		if (!silent) {
 			showToast(`Switched to: ${currentVideo.videoName}`, "success");
@@ -497,6 +514,9 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		} catch (err) {
 			console.warn("[Playback] sequence seek failed:", err);
 		}
+		// Re-assert audio after seek/play in case loadedmetadata raced
+		player.volume = seekVol;
+		player.muted = seekMuted;
 		if (shouldPlay) {
 			void player
 				.play()
@@ -504,6 +524,8 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 					console.warn("[Playback] sequence seek play() blocked:", err),
 				)
 				.finally(() => {
+					player.volume = seekVol;
+					player.muted = seekMuted;
 					// Reveal after a paint so first frame is more likely present
 					requestAnimationFrame(() => hideHandoffFreezeFrame());
 				});
@@ -526,6 +548,10 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 	const heads = document.getElementsByClassName("sequencer-playhead");
 	for (let i = 0; i < heads.length; i += 1) {
 		heads[i].style.left = `${pct}%`;
+	}
+	if (switchedSource) {
+		window._softHandoffVolumeActive = false;
+		window._softHandoffAudio = null;
 	}
 };
 window.seekSequenceTime = seekSequenceTime;
@@ -556,6 +582,16 @@ const handoffToNextJoinedClip = async () => {
 		window._sequenceContinuePlay ||
 		(typeof player !== "undefined" && player && !player.paused);
 	window._sequenceContinuePlay = true;
+
+	// Capture audio before softHandoff loadVideo (also stashed inside loadVideo)
+	const handoffVolume =
+		typeof player !== "undefined" && player && Number.isFinite(player.volume)
+			? player.volume
+			: volumeLevel;
+	const handoffMuted =
+		typeof player !== "undefined" && player ? !!player.muted : false;
+	window._softHandoffVolumeActive = true;
+	window._softHandoffAudio = { volume: handoffVolume, muted: handoffMuted };
 
 	try {
 		const nextIndex = activeQueueIndex + 1;
@@ -603,6 +639,24 @@ const handoffToNextJoinedClip = async () => {
 			} catch (err) {
 				console.warn("[Playback] join handoff seek failed:", err);
 			}
+			// Re-apply pre-handoff volume/mute after canplay/seek (unless user muted intentionally)
+			player.volume = handoffVolume;
+			player.muted = handoffMuted;
+			volumeLevel = handoffVolume;
+			if (DOM.volumeOnIcon && DOM.volumeOffIcon) {
+				DOM.volumeOnIcon.classList.toggle("hidden", handoffMuted);
+				DOM.volumeOffIcon.classList.toggle("hidden", !handoffMuted);
+			}
+			if (volumeSlider) {
+				volumeSlider.value = handoffMuted
+					? 0
+					: Math.round(handoffVolume * 100);
+			}
+			if (DOM.volumeValue) {
+				DOM.volumeValue.textContent = handoffMuted
+					? "0"
+					: Math.round(handoffVolume * 100).toString();
+			}
 			// Refresh sequence mode so playhead uses run duration for next segment
 			syncSequenceModeState();
 			if (resumeAfterLoad || window._sequenceContinuePlay) {
@@ -611,6 +665,9 @@ const handoffToNextJoinedClip = async () => {
 				} catch (err) {
 					console.warn("[Playback] join handoff play() blocked:", err);
 				}
+				// Play can race with mute-on-load; re-assert once more after play
+				player.volume = handoffVolume;
+				player.muted = handoffMuted;
 			}
 			// Drop freeze after paint of new source
 			requestAnimationFrame(() => {
@@ -643,6 +700,8 @@ const handoffToNextJoinedClip = async () => {
 	} finally {
 		window._sequenceHandoffInProgress = false;
 		window._sequenceContinuePlay = false;
+		window._softHandoffVolumeActive = false;
+		window._softHandoffAudio = null;
 	}
 };
 window.handoffToNextJoinedClip = handoffToNextJoinedClip;
@@ -993,6 +1052,27 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 	// (set only once we commit to a real load so a no-op return cannot sticky-skip)
 	if (softHandoff) {
 		window._skipNextTimelineBoot = true;
+		window._softHandoffVolumeActive = true;
+		// Capture audio state before src swap so loadedmetadata does not force mute
+		const ve =
+			document.querySelector("video") ||
+			document.getElementById("video-player") ||
+			document.getElementById("my_video") ||
+			(typeof player !== "undefined" ? player : null);
+		// Prefer existing capture (handoff may have stashed user state already)
+		if (!window._softHandoffAudio) {
+			if (ve) {
+				window._softHandoffAudio = {
+					volume: Number.isFinite(ve.volume) ? ve.volume : volumeLevel,
+					muted: !!ve.muted,
+				};
+			} else {
+				window._softHandoffAudio = {
+					volume: volumeLevel,
+					muted: false,
+				};
+			}
+		}
 	}
 
 	window._videoLoadInProgress = true;
@@ -2820,8 +2900,43 @@ const initializePlayer = () => {
 		DOM.speedValue.textContent = `${playbackSpeed.toFixed(1)}x`;
 		toConsole("Playback speed restored", playbackSpeed, debuggin);
 
-		player.volume = volumeLevel;
-		if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
+		// Soft handoff / sequence continue: preserve volume+mute (do NOT force mute-on-load)
+		const softAudio = window._softHandoffAudio;
+		const isSoftHandoffLoad =
+			!!window._softHandoffVolumeActive ||
+			!!softAudio ||
+			!!window._sequenceHandoffInProgress ||
+			!!window._sequenceContinuePlay;
+		if (isSoftHandoffLoad) {
+			const vol = softAudio
+				? Number.isFinite(softAudio.volume)
+					? softAudio.volume
+					: volumeLevel
+				: volumeLevel;
+			const muted = softAudio ? !!softAudio.muted : !!player.muted;
+			player.volume = vol;
+			player.muted = muted;
+			volumeLevel = vol;
+			if (DOM.volumeOnIcon && DOM.volumeOffIcon) {
+				DOM.volumeOnIcon.classList.toggle("hidden", muted);
+				DOM.volumeOffIcon.classList.toggle("hidden", !muted);
+			}
+			if (volumeSlider) {
+				volumeSlider.value = muted ? 0 : Math.round(vol * 100);
+			}
+			if (DOM.volumeValue) {
+				DOM.volumeValue.textContent = muted
+					? "0"
+					: Math.round(vol * 100).toString();
+			}
+			// Keep capture until handoff/seek finally clears the active flag
+			toConsole(
+				"Soft handoff volume preserved",
+				{ volume: vol, muted },
+				debuggin,
+			);
+		} else if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
+			player.volume = volumeLevel;
 			player.muted = false;
 			DOM.volumeOnIcon.classList.remove("hidden");
 			DOM.volumeOffIcon.classList.add("hidden");
@@ -2829,6 +2944,7 @@ const initializePlayer = () => {
 			DOM.volumeValue.textContent = Math.round(volumeLevel * 100).toString();
 			toConsole("Audio file unmuted on load", "Success", debuggin);
 		} else {
+			player.volume = volumeLevel;
 			player.muted = true;
 			DOM.volumeOnIcon.classList.add("hidden");
 			DOM.volumeOffIcon.classList.remove("hidden");
@@ -3096,7 +3212,8 @@ const initializePlayer = () => {
 		saveLocalState();
 	}
 
-	addMarkerBtn?.addEventListener("click", addMarker, false);
+	// #addMarkerBtn is re-created inside updateMarkersList; binding is handled there
+	// (and via #markersList event delegation). Enter/"m" call addMarker() directly.
 
 	projectImportButton?.addEventListener("click", async () => {
 		const isTauri = window.__TAURI__ !== undefined;
@@ -4214,6 +4331,51 @@ const toggleSettings = (show) => {
 	}
 };
 
+/**
+ * Next auto-name "Marker N" unique within the active join run (or solo source).
+ * Stored data stays source-local; only the default label uses sequence/run context.
+ */
+const getNextRunMarkerDefaultName = () => {
+	const used = new Set();
+	const collect = (list) => {
+		if (!Array.isArray(list)) return;
+		for (const m of list) {
+			if (m?.name) used.add(String(m.name));
+		}
+	};
+
+	const multi =
+		typeof isActiveRunMulti === "function"
+			? isActiveRunMulti()
+			: typeof window.isActiveRunMulti === "function" &&
+				window.isActiveRunMulti();
+	if (multi) {
+		const run =
+			typeof getActiveJoinRun === "function"
+				? getActiveJoinRun()
+				: typeof window.getActiveJoinRun === "function"
+					? window.getActiveJoinRun()
+					: null;
+		if (run?.segments?.length) {
+			for (const seg of run.segments) {
+				if (seg.queueIndex === activeQueueIndex) {
+					collect(markers);
+				} else {
+					collect(seg.video?.appState?.markers);
+				}
+			}
+		} else {
+			collect(markers);
+		}
+	} else {
+		collect(markers);
+	}
+
+	let n = 1;
+	while (used.has(`Marker ${n}`)) n += 1;
+	return `Marker ${n}`;
+};
+
 /** Inserts a new standard marker at the current video playback time. */
 const addMarker = () => {
 	if (!player.src) {
@@ -4230,7 +4392,8 @@ const addMarker = () => {
 		showToast("Marker starts after Clip Out.", "error");
 	}
 
-	const defaultName = `Marker ${markers.length + 1}`;
+	// Global next index across the active join run so names do not collide per-file
+	const defaultName = getNextRunMarkerDefaultName();
 
 	markers.push({
 		id: Date.now(),
@@ -4239,6 +4402,7 @@ const addMarker = () => {
 		type: "standard",
 	});
 
+	// Keep source-local order by local time only (do not shuffle across files)
 	markers.sort((a, b) => a.startTime - b.startTime);
 
 	saveLocalState();
