@@ -3,9 +3,10 @@
  * # AI CONTEXT MAP
  *
  * ## GLOBAL STATE STRUCTURE
- * - `videoQueue`: Array of objects representing the loaded videos. Each object contains metadata and state like `videoId`, `videoName`, `videoFileName`, `videoFilePath`, `clipInTime`, `clipOutTime`, and `appState` (which holds `markers`).
+ * - `videoQueue`: Array of objects representing the loaded videos. Each object contains metadata and state like `videoId`, `videoName`, `videoFileName`, `videoFilePath`, `clipInTime`, `clipOutTime`, `joinedToNext` (boolean: join this item to the next in list order), and `appState` (which holds `markers`).
  * - `activeQueueIndex`: Integer representing the currently selected video slot in `videoQueue`.
  * - `markers`: Array of current active video markers (syncs back to `videoQueue[activeQueueIndex].appState.markers`).
+ * - Active join run: contiguous chain of `joinedToNext` that contains `activeQueueIndex`; detailed timeline shows that run only.
  *
  * ## PERSISTENCE & LIFECYCLE
  * - `saveLocalState()`: Synchronizes memory (active globals like `videoFileName`, `clipInTime`, `markers`) back to the current `videoQueue` slot, and serializes the complete application state payload to `localStorage`.
@@ -45,7 +46,8 @@ const PROJECT_STORAGE_KEY = "lfvideo_project";
 const LEGACY_PROJECT_STORAGE_KEY = "timeStudyData";
 
 /**
- * Normalize a queue entry: map legacy processStartTime/processEndTime → clipIn/Out.
+ * Normalize a queue entry: map legacy processStartTime/processEndTime → clipIn/Out,
+ * and ensure joinedToNext is a boolean (default false).
  * Mutates and returns the video object.
  */
 const normalizeVideoClipBounds = (video) => {
@@ -56,6 +58,7 @@ const normalizeVideoClipBounds = (video) => {
 	if (video.clipOutTime === undefined || video.clipOutTime === null) {
 		video.clipOutTime = video.processEndTime || 0;
 	}
+	video.joinedToNext = !!video.joinedToNext;
 	delete video.processStartTime;
 	delete video.processEndTime;
 	return video;
@@ -127,6 +130,8 @@ const saveLocalState = () => {
 	videoQueue[activeQueueIndex].videoFilePath = videoFilePath;
 	videoQueue[activeQueueIndex].clipInTime = clipInTime;
 	videoQueue[activeQueueIndex].clipOutTime = clipOutTime;
+	// Per-clip volume is written only via rememberVolumeOnQueueIndex (slider/mute/handoff leave)
+	// so unset clips can inherit the previous clip's level across joins.
 	videoQueue[activeQueueIndex].appState = { markers };
 	// Drop legacy field names if still present on the active slot
 	delete videoQueue[activeQueueIndex].processStartTime;
@@ -199,10 +204,16 @@ const loadLocalState = () => {
 						videoFilePath: "",
 						clipInTime: 0,
 						clipOutTime: 0,
+						joinedToNext: false,
 						appState: { markers: [] },
 					},
 				];
 				activeQueueIndex = 0;
+			}
+
+			// Last queue item can never join "next"
+			if (videoQueue.length > 0) {
+				videoQueue[videoQueue.length - 1].joinedToNext = false;
 			}
 
 			projectFilePath = localStorage.getItem("projectFilePath") || "";
@@ -229,6 +240,7 @@ const loadLocalState = () => {
 				videoFilePath: "",
 				clipInTime: 0,
 				clipOutTime: 0,
+				joinedToNext: false,
 				appState: { markers: [] },
 			},
 		];
@@ -251,6 +263,13 @@ const loadLocalState = () => {
 	// (verify_and_prepare_video proxy). Avoid convertFileSrc here so H.265 works.
 	if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+	// Join chips must refresh after rehydrate (do not wait for panel open/close)
+	if (typeof window.invalidateSidebarPlaylistCache === "function") {
+		window.invalidateSidebarPlaylistCache();
+	}
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
 };
 
 const exportToJSON = async (isSaveAs = false) => {
@@ -375,6 +394,9 @@ const importFromJSON = async (jsonText, options = {}) => {
 
 		// Normalize legacy processStartTime/processEndTime on every queue entry
 		videoQueue = videoQueue.map(normalizeVideoClipBounds);
+		if (videoQueue.length > 0) {
+			videoQueue[videoQueue.length - 1].joinedToNext = false;
+		}
 
 		// Load active video into memory
 		const currentVideo = videoQueue[activeQueueIndex];
@@ -390,6 +412,13 @@ const importFromJSON = async (jsonText, options = {}) => {
 
 		if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+		// Force playlist Join UI refresh immediately after project import
+		if (typeof window.invalidateSidebarPlaylistCache === "function") {
+			window.invalidateSidebarPlaylistCache();
+		}
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
 
 		if (DOM.markersList) DOM.markersList.innerHTML = "";
 
@@ -428,6 +457,10 @@ const importFromJSON = async (jsonText, options = {}) => {
 		if (typeof updateMarkersList === "function") updateMarkersList();
 		if (typeof drawTable === "function") drawTable();
 		if (typeof updateLoadButtonColor === "function") updateLoadButtonColor();
+		// Second refresh after media load so join visuals stay in sync with final queue
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
 
 		toConsole(
 			"Project imported successfully",

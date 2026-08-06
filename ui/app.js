@@ -43,6 +43,784 @@ const isAudioOnlyMedia = (pathOrName) => {
 	);
 };
 
+// ---------------------------------------------------------------------------
+// Queue join / active-run sequence helpers (Phase 1)
+// joinedToNext on queue item i means item i is joined to item i+1.
+// ---------------------------------------------------------------------------
+window._sequenceHandoffInProgress = false;
+/** When true, handoff must resume play() after next source is ready (even if player already ended/paused). */
+window._sequenceContinuePlay = false;
+/** Soft handoff / sequence continue: skip mute-on-load and re-apply captured volume. */
+window._softHandoffVolumeActive = false;
+window._softHandoffAudio = null;
+window._joinTimelineRebuildTimer = null;
+
+/** Clamp transport volume to HTMLMediaElement range [0, 1]. */
+const clampVolume01 = (v, fallback = 1) => {
+	const n = Number(v);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.min(1, Math.max(0, n));
+};
+
+/** True when a queue item has an explicit per-clip volume (including 0). */
+const queueItemHasOwnVolume = (video) =>
+	!!video &&
+	video.volumeLevel !== undefined &&
+	video.volumeLevel !== null &&
+	Number.isFinite(Number(video.volumeLevel));
+
+/**
+ * Resolve volume for a queue index: use that clip's remembered level if set,
+ * otherwise walk backward and inherit the nearest previous clip's volume.
+ * Falls back to current global volumeLevel.
+ */
+const resolveVolumeForQueueIndex = (index) => {
+	const fallbackVol = clampVolume01(
+		typeof volumeLevel !== "undefined" ? volumeLevel : 1,
+		1,
+	);
+	const fallbackMuted =
+		typeof player !== "undefined" && player ? !!player.muted : false;
+	if (
+		typeof videoQueue === "undefined" ||
+		!videoQueue.length ||
+		index === undefined ||
+		index === null
+	) {
+		return { volume: fallbackVol, muted: fallbackMuted, sourceIndex: -1 };
+	}
+	const i0 = Math.max(0, Math.min(index, videoQueue.length - 1));
+	for (let i = i0; i >= 0; i -= 1) {
+		const v = videoQueue[i];
+		if (queueItemHasOwnVolume(v)) {
+			return {
+				volume: clampVolume01(v.volumeLevel, fallbackVol),
+				muted:
+					v.volumeMuted !== undefined && v.volumeMuted !== null
+						? !!v.volumeMuted
+						: false,
+				sourceIndex: i,
+			};
+		}
+	}
+	return { volume: fallbackVol, muted: fallbackMuted, sourceIndex: -1 };
+};
+window.resolveVolumeForQueueIndex = resolveVolumeForQueueIndex;
+
+/** Persist volume/mute on a queue item (source-local). */
+const rememberVolumeOnQueueIndex = (index, volume, muted) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		index < 0 ||
+		index >= videoQueue.length ||
+		!videoQueue[index]
+	) {
+		return;
+	}
+	videoQueue[index].volumeLevel = clampVolume01(volume, volumeLevel);
+	if (muted !== undefined && muted !== null) {
+		videoQueue[index].volumeMuted = !!muted;
+	}
+};
+window.rememberVolumeOnQueueIndex = rememberVolumeOnQueueIndex;
+
+/**
+ * Apply volume + mute to player, global volumeLevel, and transport UI.
+ * volumeSlider is 0–1 (not percent). volumeValue text is percent 0–100.
+ */
+const applyTransportVolume = (volume, muted) => {
+	const vol = clampVolume01(volume, volumeLevel);
+	const isMuted = !!muted;
+	if (typeof player !== "undefined" && player) {
+		player.volume = vol;
+		player.muted = isMuted;
+	}
+	volumeLevel = vol;
+	if (DOM?.volumeOnIcon && DOM?.volumeOffIcon) {
+		DOM.volumeOnIcon.classList.toggle("hidden", isMuted);
+		DOM.volumeOffIcon.classList.toggle("hidden", !isMuted);
+	}
+	if (typeof volumeSlider !== "undefined" && volumeSlider) {
+		// Range input max=1 — never write percent (e.g. 10) or it clamps to 100%
+		volumeSlider.value = isMuted ? 0 : vol;
+	}
+	if (DOM?.volumeValue) {
+		DOM.volumeValue.textContent = isMuted
+			? "0"
+			: String(Math.round(vol * 100));
+	}
+	return { volume: vol, muted: isMuted };
+};
+window.applyTransportVolume = applyTransportVolume;
+window._sequenceMode = {
+	active: false,
+	totalDuration: 0,
+	segments: [],
+};
+
+/**
+ * Wait until the player can seek/play after a loadVideo swap.
+ * Resolves on canplay/loadeddata or timeout so handoff never hangs forever.
+ */
+const waitForPlayerReadyToSeek = (videoEl, timeoutMs = 12000) =>
+	new Promise((resolve) => {
+		if (!videoEl) {
+			resolve();
+			return;
+		}
+		if (videoEl.readyState >= 2 && Number.isFinite(videoEl.duration)) {
+			resolve();
+			return;
+		}
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			videoEl.removeEventListener("canplay", finish);
+			videoEl.removeEventListener("loadeddata", finish);
+			videoEl.removeEventListener("loadedmetadata", finish);
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(finish, timeoutMs);
+		videoEl.addEventListener("canplay", finish);
+		videoEl.addEventListener("loadeddata", finish);
+		videoEl.addEventListener("loadedmetadata", finish);
+	});
+
+/**
+ * Effective local end of the current clip for handoff/stop:
+ * clipOut if set, else media duration.
+ */
+const getEffectiveClipOut = () => {
+	if (clipOutTime > 0) return clipOutTime;
+	if (typeof player !== "undefined" && player?.duration > 0) {
+		return player.duration;
+	}
+	const q =
+		typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
+	return Number(q?.mediaDuration) || 0;
+};
+
+/** True if playhead is at/past clip out or true media end (with small epsilon). */
+const isAtOrPastClipOut = (currentTime) => {
+	const out = getEffectiveClipOut();
+	const mediaDur =
+		typeof player !== "undefined" && player?.duration > 0 ? player.duration : 0;
+	const epsilon = 0.05;
+	if (out > 0 && currentTime >= out - epsilon) return true;
+	if (mediaDur > 0 && currentTime >= mediaDur - epsilon) return true;
+	if (typeof player !== "undefined" && player?.ended) return true;
+	return false;
+};
+
+/** Whether current queue item should sequence-continue into the next. */
+const shouldHandoffToNextJoined = () => {
+	if (window._sequenceHandoffInProgress) return false;
+	if (typeof videoQueue === "undefined" || !videoQueue.length) return false;
+	if (activeQueueIndex >= videoQueue.length - 1) return false;
+	const current = videoQueue[activeQueueIndex];
+	if (!current?.joinedToNext) return false;
+	const next = videoQueue[activeQueueIndex + 1];
+	return !!next?.videoFilePath;
+};
+
+/** Effective clip out for a queue item (clipOut, mediaDuration, or active player). */
+const getClipOutTime = (video, queueIndex) => {
+	if (!video) return 0;
+	let outT = Number(video.clipOutTime) || 0;
+	if (outT <= 0) outT = Number(video.mediaDuration) || 0;
+	if (
+		outT <= 0 &&
+		queueIndex === activeQueueIndex &&
+		typeof player !== "undefined" &&
+		player?.duration
+	) {
+		outT = player.duration;
+	}
+	return outT;
+};
+
+/** Segment duration on the sequence spine: max(0, clipOut - clipIn). */
+const getClipSegmentDuration = (video, queueIndex) => {
+	if (!video) return 0;
+	const inT = Number(video.clipInTime) || 0;
+	const outT = getClipOutTime(video, queueIndex);
+	return Math.max(0, outT - inT);
+};
+
+/** True if this index is part of a join (its flag or previous item's flag). */
+const isQueueIndexJoined = (index) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		index < 0 ||
+		index >= videoQueue.length
+	) {
+		return false;
+	}
+	if (videoQueue[index]?.joinedToNext) return true;
+	if (index > 0 && videoQueue[index - 1]?.joinedToNext) return true;
+	return false;
+};
+window.isQueueIndexJoined = isQueueIndexJoined;
+
+/**
+ * Contiguous join-run that contains activeQueueIndex.
+ * Solo (no joins touching current) → single-item run.
+ */
+const getActiveJoinRun = () => {
+	const empty = {
+		startIndex: 0,
+		endIndex: 0,
+		segments: [],
+		totalDuration: 0,
+	};
+	if (typeof videoQueue === "undefined" || !videoQueue.length) return empty;
+
+	const n = videoQueue.length;
+	const cur = Math.max(0, Math.min(activeQueueIndex || 0, n - 1));
+
+	let start = cur;
+	while (start > 0 && videoQueue[start - 1]?.joinedToNext) {
+		start -= 1;
+	}
+	let end = cur;
+	while (end < n - 1 && videoQueue[end]?.joinedToNext) {
+		end += 1;
+	}
+
+	const segments = [];
+	let offset = 0;
+	for (let i = start; i <= end; i += 1) {
+		const video = videoQueue[i];
+		const clipIn = Number(video.clipInTime) || 0;
+		const clipOut = getClipOutTime(video, i);
+		const duration = Math.max(0, (clipOut || 0) - clipIn);
+		segments.push({
+			queueIndex: i,
+			video,
+			offset,
+			duration,
+			clipIn,
+			clipOut: clipOut > 0 ? clipOut : clipIn + duration,
+		});
+		offset += duration;
+	}
+	return {
+		startIndex: start,
+		endIndex: end,
+		segments,
+		totalDuration: offset,
+	};
+};
+window.getActiveJoinRun = getActiveJoinRun;
+
+/** True when the active join run has more than one clip. */
+const isActiveRunMulti = () => {
+	const run = getActiveJoinRun();
+	return !!(run?.segments && run.segments.length > 1);
+};
+window.isActiveRunMulti = isActiveRunMulti;
+
+/** Map sequence time → source queue index + local media time. */
+const sequenceTimeToSource = (seqTime, run = null) => {
+	const r = run || getActiveJoinRun();
+	if (!r.segments.length) return null;
+	const t = Math.max(0, Number(seqTime) || 0);
+	for (let i = 0; i < r.segments.length; i += 1) {
+		const seg = r.segments[i];
+		const segEnd = seg.offset + seg.duration;
+		const isLast = i === r.segments.length - 1;
+		if (t < segEnd || isLast) {
+			const localOffset = Math.min(
+				Math.max(0, t - seg.offset),
+				Math.max(0, seg.duration),
+			);
+			return {
+				queueIndex: seg.queueIndex,
+				localTime: seg.clipIn + localOffset,
+				segment: seg,
+			};
+		}
+	}
+	const last = r.segments[r.segments.length - 1];
+	return {
+		queueIndex: last.queueIndex,
+		localTime: last.clipOut,
+		segment: last,
+	};
+};
+window.sequenceTimeToSource = sequenceTimeToSource;
+
+/** Map source-local time → sequence time for a queue index in the active run. */
+const sourceTimeToSequence = (queueIndex, localTime, run = null) => {
+	const r = run || getActiveJoinRun();
+	const seg = r.segments.find((s) => s.queueIndex === queueIndex);
+	if (!seg) return Number(localTime) || 0;
+	return seg.offset + Math.max(0, (Number(localTime) || 0) - seg.clipIn);
+};
+window.sourceTimeToSequence = sourceTimeToSequence;
+
+/** Current playhead as sequence time (local when solo). */
+const getSequencePlayheadTime = () => {
+	const run = getActiveJoinRun();
+	const local =
+		typeof player !== "undefined" && player ? player.currentTime || 0 : 0;
+	if (run.segments.length <= 1) return local;
+	return sourceTimeToSequence(activeQueueIndex, local, run);
+};
+window.getSequencePlayheadTime = getSequencePlayheadTime;
+
+/**
+ * Relative seek that crosses join boundaries when the active run is multi-clip.
+ * @param {number} deltaSeconds positive = forward
+ */
+const seekRelativeInActiveRun = async (deltaSeconds) => {
+	if (typeof player === "undefined" || !player) return;
+	const run = getActiveJoinRun();
+	const multi = run.segments.length > 1;
+	const wasPlaying = !player.paused;
+
+	if (multi) {
+		const seqT = getSequencePlayheadTime();
+		const nextSeq = Math.max(
+			0,
+			Math.min(run.totalDuration || 0, seqT + deltaSeconds),
+		);
+		// Preserve play/pause; scrub-style sequence map handles source switch
+		await seekSequenceTime(nextSeq, {
+			play: wasPlaying,
+			silent: true,
+		});
+		return;
+	}
+
+	// Solo: clipIn/Out constrained local seek (existing behaviour)
+	const inT = clipInTime || 0;
+	const outT =
+		clipOutTime > 0
+			? clipOutTime
+			: player.duration > 0
+				? player.duration
+				: Number.POSITIVE_INFINITY;
+	const target = player.currentTime + deltaSeconds;
+	player.currentTime = Math.max(inT, Math.min(outT, target));
+};
+window.seekRelativeInActiveRun = seekRelativeInActiveRun;
+
+/** Capture current video frame to cover black flash during join handoff load. */
+const showHandoffFreezeFrame = () => {
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		document.getElementById("my_video") ||
+		document.querySelector("video");
+	const wrapper =
+		document.getElementById("video-wrapper-id") || videoEl?.parentElement;
+	if (!videoEl || !wrapper) return;
+
+	let freeze = document.getElementById("video-handoff-freeze");
+	if (!freeze) {
+		freeze = document.createElement("canvas");
+		freeze.id = "video-handoff-freeze";
+		freeze.setAttribute("aria-hidden", "true");
+		freeze.className = "video-handoff-freeze";
+		wrapper.appendChild(freeze);
+	}
+
+	const w = videoEl.videoWidth || videoEl.clientWidth || 0;
+	const h = videoEl.videoHeight || videoEl.clientHeight || 0;
+	if (w < 2 || h < 2) {
+		// No decodable frame yet — use opaque hold instead of black pop
+		videoEl.style.opacity = "0";
+		freeze.dataset.opacityHold = "1";
+		freeze.style.display = "none";
+		return;
+	}
+
+	try {
+		freeze.width = w;
+		freeze.height = h;
+		const ctx = freeze.getContext("2d");
+		ctx.drawImage(videoEl, 0, 0, w, h);
+		freeze.style.display = "block";
+		freeze.dataset.opacityHold = "0";
+		// Keep last frame visible while next source buffers
+		videoEl.style.opacity = "0";
+	} catch (err) {
+		console.warn("[Playback] freeze frame capture failed:", err);
+		videoEl.style.opacity = "0";
+		freeze.dataset.opacityHold = "1";
+	}
+};
+
+const hideHandoffFreezeFrame = () => {
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		document.getElementById("my_video") ||
+		document.querySelector("video");
+	const freeze = document.getElementById("video-handoff-freeze");
+	if (videoEl) {
+		videoEl.style.opacity = "";
+	}
+	if (freeze) {
+		freeze.style.display = "none";
+		try {
+			const ctx = freeze.getContext("2d");
+			ctx.clearRect(0, 0, freeze.width, freeze.height);
+		} catch (_) {
+			/* ignore */
+		}
+	}
+};
+window.showHandoffFreezeFrame = showHandoffFreezeFrame;
+window.hideHandoffFreezeFrame = hideHandoffFreezeFrame;
+
+/** Publish sequence mode snapshot for timeline-engine seek/playhead. */
+const syncSequenceModeState = (run = null) => {
+	const r = run || getActiveJoinRun();
+	const multi = r.segments.length > 1;
+	const playerDur =
+		typeof player !== "undefined" && player?.duration ? player.duration : 0;
+	window._sequenceMode = {
+		active: multi,
+		totalDuration: multi
+			? Math.max(r.totalDuration, 0.001)
+			: Math.max(playerDur || r.totalDuration || 0, 0.001),
+		segments: r.segments,
+	};
+	const panel = document.getElementById("detailed-timeline-panel");
+	const grid = document.getElementById("mainLayoutGrid");
+	if (panel) panel.classList.toggle("sequence-multi", multi);
+	if (grid) grid.classList.toggle("sequence-multi", multi);
+	return window._sequenceMode;
+};
+window.syncSequenceModeState = syncSequenceModeState;
+
+/** Debounced rebuild of detailed timeline after rapid join toggles (~175ms). */
+const scheduleJoinTimelineRebuild = () => {
+	if (window._joinTimelineRebuildTimer) {
+		clearTimeout(window._joinTimelineRebuildTimer);
+	}
+	window._joinTimelineRebuildTimer = setTimeout(() => {
+		window._joinTimelineRebuildTimer = null;
+		syncSequenceModeState();
+		if (typeof window.loadWaveformTimeline === "function") {
+			window.loadWaveformTimeline();
+		}
+		if (typeof window.updateMarkersList === "function") {
+			window.updateMarkersList();
+		}
+		if (typeof window.paintTimelineMarkersAndShading === "function") {
+			window.paintTimelineMarkersAndShading();
+		}
+	}, 175);
+};
+window.scheduleJoinTimelineRebuild = scheduleJoinTimelineRebuild;
+
+const toggleJoinedToNext = (upperIndex) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		upperIndex < 0 ||
+		upperIndex >= videoQueue.length - 1
+	) {
+		return;
+	}
+	const item = videoQueue[upperIndex];
+	if (!item) return;
+	item.joinedToNext = !item.joinedToNext;
+	// Join does not change which clip is current
+	if (typeof saveLocalState === "function") saveLocalState();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
+	scheduleJoinTimelineRebuild();
+};
+window.toggleJoinedToNext = toggleJoinedToNext;
+
+/**
+ * Seek by sequence time: resolve source, switch queue slot if needed, seek local.
+ * @param {number} seqTime
+ * @param {{ play?: boolean, silent?: boolean }} [opts]
+ */
+const seekSequenceTime = async (seqTime, opts = {}) => {
+	// play: true = force play, false = force pause, undefined = preserve prior state
+	const { play, silent = true } = opts;
+	const run = getActiveJoinRun();
+	const mapped = sequenceTimeToSource(seqTime, run);
+	if (!mapped) return;
+
+	const wasPlaying = typeof player !== "undefined" && player && !player.paused;
+	const shouldPlay = play === true ? true : play === false ? false : wasPlaying;
+	const leavingIndex = activeQueueIndex;
+	const leavingVol =
+		typeof player !== "undefined" && player && Number.isFinite(player.volume)
+			? player.volume
+			: volumeLevel;
+	const leavingMuted =
+		typeof player !== "undefined" && player ? !!player.muted : false;
+	let switchedSource = false;
+	// Target audio: per-clip remembered volume, else inherit previous
+	let targetAudio = {
+		volume: leavingVol,
+		muted: leavingMuted,
+	};
+
+	if (mapped.queueIndex !== activeQueueIndex) {
+		switchedSource = true;
+		// Remember volume on the clip we leave
+		rememberVolumeOnQueueIndex(leavingIndex, leavingVol, leavingMuted);
+		targetAudio = resolveVolumeForQueueIndex(mapped.queueIndex);
+		// If target has no own volume, inherit the volume we just left with
+		if (!queueItemHasOwnVolume(videoQueue[mapped.queueIndex])) {
+			targetAudio = {
+				volume: clampVolume01(leavingVol),
+				muted: leavingMuted,
+				sourceIndex: leavingIndex,
+			};
+		}
+		window._softHandoffVolumeActive = true;
+		window._softHandoffAudio = {
+			volume: targetAudio.volume,
+			muted: targetAudio.muted,
+		};
+		// Silent switch into target source without toast spam
+		preserveClipBounds = true;
+		if (typeof saveLocalState === "function") saveLocalState();
+		activeQueueIndex = mapped.queueIndex;
+		const currentVideo = videoQueue[activeQueueIndex];
+		videoFileName = currentVideo.videoFileName || "";
+		videoFilePath = currentVideo.videoFilePath || "";
+		clipInTime = currentVideo.clipInTime || 0;
+		clipOutTime = currentVideo.clipOutTime || 0;
+		markers = currentVideo.appState?.markers || [];
+		for (const m of markers) {
+			if (!m.type) m.type = "standard";
+		}
+		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
+		if (typeof updateMarkersList === "function") updateMarkersList();
+		if (typeof player !== "undefined" && player) player.pause();
+		if (typeof window.resetClosedCaptions === "function") {
+			window.resetClosedCaptions();
+		}
+		if (videoFilePath && typeof window.loadVideo === "function") {
+			// Soft handoff when jump/scrub switches source mid-run
+			showHandoffFreezeFrame();
+			try {
+				await window.loadVideo(videoFilePath, { softHandoff: true });
+			} finally {
+				// Hold freeze until seek+play decision below
+			}
+		}
+		if (typeof player !== "undefined" && player) {
+			await waitForPlayerReadyToSeek(player);
+			applyTransportVolume(targetAudio.volume, targetAudio.muted);
+		}
+		if (!silent) {
+			showToast(`Switched to: ${currentVideo.videoName}`, "success");
+		}
+	}
+
+	if (typeof player !== "undefined" && player) {
+		try {
+			player.currentTime = mapped.localTime;
+		} catch (err) {
+			console.warn("[Playback] sequence seek failed:", err);
+		}
+		// Re-assert target audio after seek/play in case loadedmetadata raced
+		if (switchedSource) {
+			applyTransportVolume(targetAudio.volume, targetAudio.muted);
+		}
+		if (shouldPlay) {
+			void player
+				.play()
+				?.catch((err) =>
+					console.warn("[Playback] sequence seek play() blocked:", err),
+				)
+				.finally(() => {
+					if (switchedSource) {
+						applyTransportVolume(targetAudio.volume, targetAudio.muted);
+					}
+					// Reveal after a paint so first frame is more likely present
+					requestAnimationFrame(() => hideHandoffFreezeFrame());
+				});
+		} else {
+			player.pause();
+			// Wait one frame so seek paints, then drop freeze
+			requestAnimationFrame(() => {
+				requestAnimationFrame(() => hideHandoffFreezeFrame());
+			});
+		}
+	} else {
+		hideHandoffFreezeFrame();
+	}
+
+	// Update playheads immediately in SEQUENCE time for multi-run
+	const mode = syncSequenceModeState(run);
+	const duration = mode.active ? mode.totalDuration : player?.duration || 1;
+	const headTime = mode.active ? seqTime : mapped.localTime;
+	const pct = duration > 0 ? (headTime / duration) * 100 : 0;
+	const heads = document.getElementsByClassName("sequencer-playhead");
+	for (let i = 0; i < heads.length; i += 1) {
+		heads[i].style.left = `${pct}%`;
+	}
+	if (switchedSource) {
+		window._softHandoffVolumeActive = false;
+		window._softHandoffAudio = null;
+	}
+};
+window.seekSequenceTime = seekSequenceTime;
+
+/** Play across join: hand off to next queue item at its clipIn without stopping. */
+const handoffToNextJoinedClip = async () => {
+	if (window._sequenceHandoffInProgress) return;
+	if (!shouldHandoffToNextJoined()) {
+		// Unjoined or missing next — stop cleanly at out
+		if (typeof player !== "undefined" && player && !player.paused) {
+			player.pause();
+		}
+		const out = getEffectiveClipOut();
+		if (typeof player !== "undefined" && player && out > 0) {
+			try {
+				player.currentTime = Math.min(out, player.duration || out);
+			} catch (_) {
+				/* ignore seek on dead element */
+			}
+		}
+		window._sequenceContinuePlay = false;
+		return;
+	}
+
+	window._sequenceHandoffInProgress = true;
+	// Capture continue intent BEFORE load (ended/pause will clear player.paused)
+	const resumeAfterLoad =
+		window._sequenceContinuePlay ||
+		(typeof player !== "undefined" && player && !player.paused);
+	window._sequenceContinuePlay = true;
+
+	// Capture leaving-clip audio, remember it, resolve target (own or inherit previous)
+	const leavingIndex = activeQueueIndex;
+	const handoffVolume =
+		typeof player !== "undefined" && player && Number.isFinite(player.volume)
+			? player.volume
+			: volumeLevel;
+	const handoffMuted =
+		typeof player !== "undefined" && player ? !!player.muted : false;
+	rememberVolumeOnQueueIndex(leavingIndex, handoffVolume, handoffMuted);
+
+	const nextIndex = activeQueueIndex + 1;
+	let targetAudio = resolveVolumeForQueueIndex(nextIndex);
+	// Explicit inherit: if next has no remembered volume, keep leaving clip's level
+	if (!queueItemHasOwnVolume(videoQueue[nextIndex])) {
+		targetAudio = {
+			volume: clampVolume01(handoffVolume),
+			muted: handoffMuted,
+			sourceIndex: leavingIndex,
+		};
+	}
+	window._softHandoffVolumeActive = true;
+	window._softHandoffAudio = {
+		volume: targetAudio.volume,
+		muted: targetAudio.muted,
+	};
+
+	try {
+		const next = videoQueue[nextIndex];
+
+		preserveClipBounds = true;
+		if (typeof saveLocalState === "function") saveLocalState();
+
+		activeQueueIndex = nextIndex;
+		videoFileName = next.videoFileName || "";
+		videoFilePath = next.videoFilePath || "";
+		clipInTime = next.clipInTime || 0;
+		clipOutTime = next.clipOutTime || 0;
+		markers = next.appState?.markers || [];
+		for (const m of markers) {
+			if (!m.type) m.type = "standard";
+		}
+
+		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
+		if (typeof updateMarkersList === "function") updateMarkersList();
+		if (typeof window.resetClosedCaptions === "function") {
+			window.resetClosedCaptions();
+		}
+
+		// Capture last frame before pause/src swap to hide black flash
+		showHandoffFreezeFrame();
+
+		// Soft pause only for the load gap — not a user "stop"
+		if (typeof player !== "undefined" && player && !player.paused) {
+			player.pause();
+		}
+
+		if (typeof window.loadVideo === "function") {
+			await window.loadVideo(videoFilePath, { softHandoff: true });
+		}
+
+		if (typeof player !== "undefined" && player) {
+			await waitForPlayerReadyToSeek(player);
+			const targetIn = clipInTime || 0;
+			try {
+				player.currentTime = targetIn;
+			} catch (err) {
+				console.warn("[Playback] join handoff seek failed:", err);
+			}
+			// Apply target clip volume (own or inherited) — never force 100% / mute-on-load
+			applyTransportVolume(targetAudio.volume, targetAudio.muted);
+			// Refresh sequence mode so playhead uses run duration for next segment
+			syncSequenceModeState();
+			if (resumeAfterLoad || window._sequenceContinuePlay) {
+				try {
+					await player.play();
+				} catch (err) {
+					console.warn("[Playback] join handoff play() blocked:", err);
+				}
+				// Play can race with mute-on-load; re-assert once more after play
+				applyTransportVolume(targetAudio.volume, targetAudio.muted);
+			}
+			// Drop freeze after paint of new source
+			requestAnimationFrame(() => {
+				requestAnimationFrame(() => hideHandoffFreezeFrame());
+			});
+			// Restart smooth playhead if play event did not
+			if (
+				!window.playheadAnimationId &&
+				typeof window.syncTimelinePlayheadSmoothly === "function"
+			) {
+				window.playheadAnimationId = requestAnimationFrame(
+					window.syncTimelinePlayheadSmoothly,
+				);
+			}
+		} else {
+			hideHandoffFreezeFrame();
+		}
+
+		syncSequenceModeState();
+		// Playhead only — do NOT rebuild filmstrips/waveforms on sequence handoff
+		if (typeof window.paintTimelineMarkersAndShading === "function") {
+			window.paintTimelineMarkersAndShading();
+		}
+	} catch (err) {
+		console.error("[Playback] join handoff failed:", err);
+		hideHandoffFreezeFrame();
+		if (typeof player !== "undefined" && player && !player.paused) {
+			player.pause();
+		}
+	} finally {
+		window._sequenceHandoffInProgress = false;
+		window._sequenceContinuePlay = false;
+		window._softHandoffVolumeActive = false;
+		window._softHandoffAudio = null;
+	}
+};
+window.handoffToNextJoinedClip = handoffToNextJoinedClip;
+
 // --- INITIAL THEME BOOTSTRAP (CSP-SAFE) ---
 if (localStorage.getItem("darkMode") === "true") {
 	document.documentElement.classList.add("dark");
@@ -252,10 +1030,12 @@ window.clearAllPreviousProjectData = () => {
 			videoFilePath: "",
 			clipInTime: 0,
 			clipOutTime: 0,
+			joinedToNext: false,
 			appState: { markers: [] },
 		},
 	];
 	activeQueueIndex = 0;
+	window._sequenceMode = { active: false, totalDuration: 0, segments: [] };
 
 	if (DOM.projectNameInput) DOM.projectNameInput.value = "";
 
@@ -267,6 +1047,8 @@ window.clearAllPreviousProjectData = () => {
 	if (typeof updateMarkersList === "function") updateMarkersList();
 
 	// Hard visual reset of timeline graphics panels
+	const tracksHost = document.getElementById("timeline-tracks-host");
+	if (tracksHost) tracksHost.innerHTML = "";
 	const videoTrack = document.getElementById("timeline-video-track");
 	if (videoTrack) videoTrack.innerHTML = "";
 	const audioTrack = document.getElementById("timeline-audio-track");
@@ -278,9 +1060,17 @@ window.clearAllPreviousProjectData = () => {
 
 	window.currentWaveformData = [];
 	window.currentWaveformDataPath = null;
+	window._sequenceMode = { active: false, totalDuration: 0, segments: [] };
+	const mainGrid = document.getElementById("mainLayoutGrid");
+	if (mainGrid) mainGrid.classList.remove("sequence-multi");
+	const timelinePanel = document.getElementById("detailed-timeline-panel");
+	if (timelinePanel) timelinePanel.classList.remove("sequence-multi");
 
 	// Single project-reset path: keep queue UI and sliders in sync
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
 	saveLocalState();
 	if (typeof updateSliderTicks === "function") updateSliderTicks();
 };
@@ -352,7 +1142,12 @@ if (typeof window !== "undefined") {
 	window.normalizePath = normalizePath;
 }
 
-window.loadVideo = async (incomingVideoPath) => {
+/**
+ * @param {string} incomingVideoPath
+ * @param {{ softHandoff?: boolean }} [options]
+ *   softHandoff: join handoff — skip hard timeline wipe (freeze frame covers video)
+ */
+window.loadVideo = async (incomingVideoPath, options = {}) => {
 	if (!incomingVideoPath || incomingVideoPath.trim() === "") {
 		console.error(
 			"[Loader Core] Resource assignment blocked: empty path string.",
@@ -360,11 +1155,39 @@ window.loadVideo = async (incomingVideoPath) => {
 		return;
 	}
 
+	const softHandoff = options?.softHandoff === true;
 	const normalizedPath = normalizePath(incomingVideoPath);
 
 	// Same path already loading — drop duplicate concurrent call (restore+open, etc.)
 	if (window._videoLoadInProgress && window._loadVideoPath === normalizedPath) {
 		return;
+	}
+
+	// Soft handoff / sequence seek must not wipe or regenerate filmstrips
+	// (set only once we commit to a real load so a no-op return cannot sticky-skip)
+	if (softHandoff) {
+		window._skipNextTimelineBoot = true;
+		window._softHandoffVolumeActive = true;
+		// Capture audio state before src swap so loadedmetadata does not force mute
+		const ve =
+			document.querySelector("video") ||
+			document.getElementById("video-player") ||
+			document.getElementById("my_video") ||
+			(typeof player !== "undefined" ? player : null);
+		// Prefer existing capture (handoff may have stashed user state already)
+		if (!window._softHandoffAudio) {
+			if (ve) {
+				window._softHandoffAudio = {
+					volume: Number.isFinite(ve.volume) ? ve.volume : volumeLevel,
+					muted: !!ve.muted,
+				};
+			} else {
+				window._softHandoffAudio = {
+					volume: volumeLevel,
+					muted: false,
+				};
+			}
+		}
 	}
 
 	window._videoLoadInProgress = true;
@@ -382,26 +1205,32 @@ window.loadVideo = async (incomingVideoPath) => {
 	let settleViaTimeout = false;
 
 	try {
-		// Hard visual reset of timeline graphics panels
-		const videoTrack = document.getElementById("timeline-video-track");
-		if (videoTrack) {
-			videoTrack.innerHTML = "";
-		}
-		const audioTrack = document.getElementById("timeline-audio-track");
-		if (audioTrack) {
-			audioTrack.innerHTML = "";
-		}
-		const rulerTrack = document.getElementById("timeline-ruler-track");
-		if (rulerTrack) {
-			rulerTrack.innerHTML = "";
-		}
-		const overlayTrack = document.getElementById("timeline-marker-overlay");
-		if (overlayTrack) {
-			overlayTrack.innerHTML = "";
-		}
+		// Hard visual reset of timeline graphics panels (skip during join soft-handoff)
+		if (!softHandoff) {
+			const tracksHost = document.getElementById("timeline-tracks-host");
+			if (tracksHost) {
+				tracksHost.innerHTML = "";
+			}
+			const videoTrack = document.getElementById("timeline-video-track");
+			if (videoTrack) {
+				videoTrack.innerHTML = "";
+			}
+			const audioTrack = document.getElementById("timeline-audio-track");
+			if (audioTrack) {
+				audioTrack.innerHTML = "";
+			}
+			const rulerTrack = document.getElementById("timeline-ruler-track");
+			if (rulerTrack) {
+				rulerTrack.innerHTML = "";
+			}
+			const overlayTrack = document.getElementById("timeline-marker-overlay");
+			if (overlayTrack) {
+				overlayTrack.innerHTML = "";
+			}
 
-		window.currentWaveformData = [];
-		window.currentWaveformDataPath = null;
+			window.currentWaveformData = [];
+			window.currentWaveformDataPath = null;
+		}
 
 		console.log(
 			"[Loader Core] Processing absolute ingestion path parameter:",
@@ -965,20 +1794,168 @@ window.loadSubtitleTrack = async (filePath) => {
 	}
 };
 
-/** Generates and loads the waveform timeline and thumbnails. */
+/**
+ * Ensure timeline tracks host has N video+audio row pairs for the active run.
+ * Solo (1 segment) keeps classic #timeline-video-track / #timeline-audio-track ids.
+ */
+const ensureSequenceTrackRows = (segmentCount) => {
+	const host = document.getElementById("timeline-tracks-host");
+	if (!host) return [];
+
+	host.innerHTML = "";
+	const rows = [];
+
+	for (let i = 0; i < segmentCount; i += 1) {
+		const pair = document.createElement("div");
+		pair.className = "sequence-av-pair";
+		pair.dataset.segmentIndex = String(i);
+
+		if (segmentCount > 1) {
+			const label = document.createElement("div");
+			label.className = "sequence-segment-label";
+			label.dataset.segmentIndex = String(i);
+			pair.appendChild(label);
+		}
+
+		const videoTrack = document.createElement("div");
+		videoTrack.className =
+			"w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed sequence-video-track";
+		videoTrack.style.cssText =
+			"height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;";
+		if (i === 0) videoTrack.id = "timeline-video-track";
+		videoTrack.dataset.segmentIndex = String(i);
+
+		const audioTrack = document.createElement("div");
+		audioTrack.className =
+			"w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed sequence-audio-track";
+		audioTrack.style.cssText =
+			"height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;";
+		if (i === 0) audioTrack.id = "timeline-audio-track";
+		audioTrack.dataset.segmentIndex = String(i);
+
+		pair.appendChild(videoTrack);
+		pair.appendChild(audioTrack);
+		host.appendChild(pair);
+		rows.push({ videoTrack, audioTrack, pair, segmentIndex: i });
+	}
+	return rows;
+};
+
+/**
+ * Fill a track/fill element with filmstrip thumbs.
+ * CRITICAL: for `.sequence-segment-fill`, do NOT set width:100% — that expands an
+ * absolutely positioned segment to the full sequence spine (row-1 spill bug).
+ */
+const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
+	if (!trackOrFill || !thumbnailPaths?.length) return;
+
+	const isSegmentFill = trackOrFill.classList.contains("sequence-segment-fill");
+	// Preserve segment geometry before wiping children
+	const preserved = isSegmentFill
+		? {
+				left: trackOrFill.style.left,
+				width: trackOrFill.style.width,
+				top: trackOrFill.style.top || "0",
+				bottom: trackOrFill.style.bottom || "0",
+				position: trackOrFill.style.position || "absolute",
+			}
+		: null;
+
+	trackOrFill.innerHTML = "";
+	trackOrFill.style.display = "flex";
+	trackOrFill.style.boxSizing = "border-box";
+	trackOrFill.style.overflow = "hidden";
+	trackOrFill.style.justifyContent = "flex-start";
+	trackOrFill.style.alignItems = "stretch";
+
+	if (isSegmentFill && preserved) {
+		// Keep left/width as % of sequence spine — never stretch to host width
+		trackOrFill.style.position = preserved.position;
+		trackOrFill.style.top = preserved.top;
+		trackOrFill.style.bottom = preserved.bottom;
+		trackOrFill.style.left = preserved.left;
+		trackOrFill.style.width = preserved.width;
+		trackOrFill.style.maxWidth = preserved.width;
+		trackOrFill.style.right = "auto";
+	} else {
+		// Solo full-row strip
+		trackOrFill.style.width = "100%";
+	}
+
+	const n = thumbnailPaths.length;
+	const tileWidthPct = 100 / n;
+	for (const pathString of thumbnailPaths) {
+		const imgElement = document.createElement("img");
+		imgElement.src = window.__TAURI__.core.convertFileSrc(pathString);
+		imgElement.className =
+			"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
+		imgElement.style.flex = "1 1 0";
+		imgElement.style.minWidth = "0";
+		imgElement.style.width = `${tileWidthPct}%`;
+		imgElement.style.boxSizing = "border-box";
+		imgElement.style.height = "100%";
+		trackOrFill.appendChild(imgElement);
+	}
+};
+
+/**
+ * Layout a track body as full-sequence spine with content only in the segment window.
+ * Returns the fill element whose left/width are sequence fractions (not 100% host).
+ */
+const applySegmentWindow = (trackEl, seg, totalDuration) => {
+	if (!trackEl || !seg || totalDuration <= 0) return trackEl;
+	const leftPct = (seg.offset / Math.max(totalDuration, 0.001)) * 100;
+	const widthPct = Math.max(
+		0.05,
+		(Math.max(seg.duration, 0) / Math.max(totalDuration, 0.001)) * 100,
+	);
+
+	// Outer track = full-width sequence spine (click target for seek)
+	trackEl.style.position = "relative";
+	trackEl.style.width = "100%";
+	trackEl.style.display = "block"; // not flex — absolute children need this box
+	trackEl.style.overflow = "hidden";
+	trackEl.innerHTML = "";
+	trackEl.dataset.sequenceSpine = "1";
+	trackEl.dataset.segOffset = String(seg.offset);
+	trackEl.dataset.segDuration = String(seg.duration);
+
+	const fill = document.createElement("div");
+	fill.className = "sequence-segment-fill";
+	fill.dataset.queueIndex = String(seg.queueIndex);
+	fill.dataset.leftPct = String(leftPct);
+	fill.dataset.widthPct = String(widthPct);
+	// Inline geometry is authoritative — CSS must not override left/width
+	fill.style.position = "absolute";
+	fill.style.top = "0";
+	fill.style.bottom = "0";
+	fill.style.left = `${leftPct}%`;
+	fill.style.width = `${widthPct}%`;
+	fill.style.maxWidth = `${widthPct}%`;
+	fill.style.right = "auto";
+	fill.style.display = "flex";
+	fill.style.alignItems = "stretch";
+	fill.style.overflow = "hidden";
+	fill.style.boxSizing = "border-box";
+	trackEl.appendChild(fill);
+	return fill;
+};
+
+/** Generates and loads the waveform timeline and thumbnails (solo or active join run). */
 window.loadWaveformTimeline = async () => {
 	const isTauri = window.__TAURI__ !== undefined;
 	if (!isTauri || !videoFilePath) return;
 
 	// Capture request identity so stale async jobs (switch A→B mid-flight) never mutate UI
 	const requestPath = videoFilePath;
+	const requestActiveIndex = activeQueueIndex;
 	window._timelineGenId = (window._timelineGenId || 0) + 1;
 	const genId = window._timelineGenId;
 	const isStaleRequest = () =>
-		genId !== window._timelineGenId || videoFilePath !== requestPath;
+		genId !== window._timelineGenId ||
+		videoFilePath !== requestPath ||
+		activeQueueIndex !== requestActiveIndex;
 
-	// Custom timeline panel (Rust waveform + filmstrip) — not Peaks.js
-	const wrapper = document.getElementById("detailed-timeline-panel");
 	const seekBarContainer = document.getElementById("seekBarContainer");
 
 	if (document.body.classList.contains("miniplayer-mode")) {
@@ -992,105 +1969,247 @@ window.loadWaveformTimeline = async () => {
 	}
 	// Visibility of #detailed-timeline-panel is driven by .timeline-expanded CSS
 
-	try {
-		const videoEl = document.querySelector("video") || player;
-		const duration = videoEl.duration || player.duration || 0;
-		const peakArray = await window.__TAURI__.core.invoke("get_waveform_data", {
-			videoPath: requestPath,
-			durationSeconds: duration,
-		});
-		if (isStaleRequest()) return;
+	const run = getActiveJoinRun();
+	const mode = syncSequenceModeState(run);
+	const multi = mode.active && run.segments.length > 1;
+	const rows = ensureSequenceTrackRows(Math.max(1, run.segments.length || 1));
 
-		if (!peakArray || peakArray.length === 0) {
-			console.warn("Waveform data empty, bypassing timeline initialization.");
-			window.currentWaveformData = [];
+	try {
+		if (!multi) {
+			// -------- Solo path (unchanged behaviour) --------
+			const videoEl = document.querySelector("video") || player;
+			const duration = videoEl.duration || player.duration || 0;
+			const peakArray = await window.__TAURI__.core.invoke(
+				"get_waveform_data",
+				{
+					videoPath: requestPath,
+					durationSeconds: duration,
+				},
+			);
+			if (isStaleRequest()) return;
+
+			if (!peakArray || peakArray.length === 0) {
+				console.warn("Waveform data empty, bypassing timeline initialization.");
+				window.currentWaveformData = [];
+				return;
+			}
+
+			window.currentWaveformData = peakArray;
+			window.currentWaveformDataPath = requestPath;
+
+			window.paintTimelineRuler(duration);
+			window.setupVideoTrack();
+			window.renderAudioWaveformCanvas();
+			if (typeof window.paintTimelineMarkersAndShading === "function") {
+				window.paintTimelineMarkersAndShading();
+			}
+
+			const videoTrack =
+				rows[0]?.videoTrack || document.getElementById("timeline-video-track");
+
+			if (isAudioOnlyMedia(requestPath)) {
+				if (videoTrack) {
+					videoTrack.textContent = "Audio File Track";
+					videoTrack.style.display = "flex";
+					videoTrack.style.alignItems = "center";
+					videoTrack.style.justifyContent = "center";
+					videoTrack.style.width = "100%";
+					window.setupVideoTrack();
+				}
+				return;
+			}
+
+			if (videoTrack) {
+				videoTrack.textContent = "Developing Video Filmstrip Tracks...";
+				videoTrack.style.width = "100%";
+				videoTrack.style.display = "flex";
+				videoTrack.style.boxSizing = "border-box";
+				window.setupVideoTrack();
+			}
+
+			const trackWidth = videoTrack?.offsetWidth || 0;
+			const requiredTileCount = Math.max(Math.floor(trackWidth / 120), 1);
+
+			// Solo: still bound to active clipIn/Out so full-file strip is not used
+			// when the user has trimmed the slot.
+			const soloIn = clipInTime || 0;
+			const soloOut =
+				clipOutTime > 0
+					? clipOutTime
+					: (document.querySelector("video") || player)?.duration || 0;
+
+			window.__TAURI__.core
+				.invoke("generate_timeline_thumbnails", {
+					videoPath: requestPath,
+					tileCount: requiredTileCount,
+					startSeconds: soloIn,
+					endSeconds: soloOut > soloIn ? soloOut : undefined,
+				})
+				.then((thumbnailPaths) => {
+					if (isStaleRequest()) return;
+					if (!videoTrack || !thumbnailPaths || thumbnailPaths.length === 0) {
+						return;
+					}
+					fillFilmstripTrack(videoTrack, thumbnailPaths);
+					window.setupVideoTrack();
+				})
+				.catch((err) => {
+					if (isStaleRequest()) return;
+					console.error("Error generating filmstrip thumbnails:", err);
+					if (videoTrack) {
+						videoTrack.textContent = "Failed to load filmstrip.";
+						window.setupVideoTrack();
+					}
+				});
 			return;
 		}
 
-		// Save peaks only for the still-current request path
-		window.currentWaveformData = peakArray;
-		window.currentWaveformDataPath = requestPath;
+		// -------- Multi-segment active join run --------
+		const totalDuration = Math.max(run.totalDuration, 0.001);
+		window.currentWaveformData = [];
+		window.currentWaveformDataPath = null;
 
-		// Trigger ruler, video, and audio track rendering
-		window.paintTimelineRuler(duration);
-		window.setupVideoTrack();
-		window.renderAudioWaveformCanvas();
+		window.paintTimelineRuler(totalDuration);
+
+		// Wire seek listeners + playheads on each track (sequence mode)
+		if (typeof window.setupSequenceTracks === "function") {
+			window.setupSequenceTracks(totalDuration);
+		}
+
+		const hostWidth =
+			document.getElementById("timeline-tracks-host")?.offsetWidth || 600;
+
+		// Generate per-segment filmstrip + waveform concurrently
+		await Promise.all(
+			run.segments.map(async (seg, i) => {
+				const row = rows[i];
+				if (!row) return;
+				const path = seg.video?.videoFilePath || "";
+				const labelEl = row.pair.querySelector(".sequence-segment-label");
+				if (labelEl) {
+					const name =
+						seg.video?.videoFileName ||
+						seg.video?.videoName ||
+						`Clip ${seg.queueIndex + 1}`;
+					labelEl.textContent = `${seg.queueIndex + 1}. ${name}`;
+				}
+
+				const videoFill = applySegmentWindow(
+					row.videoTrack,
+					seg,
+					totalDuration,
+				);
+				const audioFill = applySegmentWindow(
+					row.audioTrack,
+					seg,
+					totalDuration,
+				);
+
+				if (!path) {
+					if (videoFill) videoFill.textContent = "No media";
+					return;
+				}
+
+				// Waveform for this source
+				try {
+					const segDur =
+						seg.duration ||
+						Number(seg.video?.mediaDuration) ||
+						seg.clipOut - seg.clipIn ||
+						0;
+					const peaks = await window.__TAURI__.core.invoke(
+						"get_waveform_data",
+						{
+							videoPath: path,
+							durationSeconds: segDur > 0 ? segDur : 1,
+						},
+					);
+					if (isStaleRequest()) return;
+					if (typeof window.renderWaveformInto === "function") {
+						window.renderWaveformInto(audioFill || row.audioTrack, peaks);
+					}
+					// Keep active clip peaks for any legacy readers
+					if (seg.queueIndex === activeQueueIndex) {
+						window.currentWaveformData = peaks || [];
+						window.currentWaveformDataPath = path;
+					}
+				} catch (err) {
+					if (isStaleRequest()) return;
+					console.warn("Segment waveform failed:", path, err);
+				}
+
+				if (isAudioOnlyMedia(path)) {
+					if (videoFill) {
+						videoFill.textContent = "Audio File Track";
+						videoFill.style.alignItems = "center";
+						videoFill.style.justifyContent = "center";
+						videoFill.style.display = "flex";
+					}
+					return;
+				}
+
+				if (videoFill) {
+					videoFill.textContent = "…";
+					videoFill.style.display = "flex";
+					videoFill.style.alignItems = "center";
+					videoFill.style.justifyContent = "center";
+				}
+
+				// Tile density from segment pixel width; sample only [clipIn, clipOut]
+				const segWidthPx = Math.max(
+					40,
+					(seg.duration / totalDuration) * hostWidth,
+				);
+				const tileCount = Math.max(Math.floor(segWidthPx / 120), 1);
+				const startSec = Number(seg.clipIn) || 0;
+				const endSec =
+					Number(seg.clipOut) > startSec
+						? Number(seg.clipOut)
+						: startSec + Math.max(seg.duration, 0.05);
+
+				try {
+					const thumbnailPaths = await window.__TAURI__.core.invoke(
+						"generate_timeline_thumbnails",
+						{
+							videoPath: path,
+							tileCount: tileCount,
+							startSeconds: startSec,
+							endSeconds: endSec,
+						},
+					);
+					if (isStaleRequest()) return;
+					if (videoFill && thumbnailPaths?.length) {
+						fillFilmstripTrack(videoFill, thumbnailPaths);
+						// Re-assert segment geometry after fill (defensive)
+						const lp = videoFill.dataset.leftPct;
+						const wp = videoFill.dataset.widthPct;
+						if (lp != null && wp != null) {
+							videoFill.style.left = `${lp}%`;
+							videoFill.style.width = `${wp}%`;
+							videoFill.style.maxWidth = `${wp}%`;
+							videoFill.style.position = "absolute";
+							videoFill.style.right = "auto";
+						}
+					} else if (videoFill) {
+						videoFill.textContent = "No filmstrip";
+					}
+				} catch (err) {
+					if (isStaleRequest()) return;
+					console.error("Segment filmstrip failed:", path, err);
+					if (videoFill) videoFill.textContent = "Failed to load filmstrip.";
+				}
+			}),
+		);
+
+		if (isStaleRequest()) return;
+
+		// Playheads + markers on sequence spine
+		if (typeof window.setupSequenceTracks === "function") {
+			window.setupSequenceTracks(totalDuration);
+		}
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
 		}
-
-		// Skip filmstrip thumbnail extraction for audio-only media
-		if (isAudioOnlyMedia(requestPath)) {
-			const videoTrack = document.getElementById("timeline-video-track");
-			if (videoTrack) {
-				videoTrack.textContent = "Audio File Track";
-				videoTrack.style.display = "flex";
-				videoTrack.style.alignItems = "center";
-				videoTrack.style.justifyContent = "center";
-				videoTrack.style.width = "100%";
-				window.setupVideoTrack();
-			}
-			return;
-		}
-
-		// Trigger filmstrip thumbnail extraction
-		const videoTrack = document.getElementById("timeline-video-track");
-		if (videoTrack) {
-			videoTrack.textContent = "Developing Video Filmstrip Tracks...";
-			// Track is always full width; density follows measured width (~120px tiles)
-			videoTrack.style.width = "100%";
-			videoTrack.style.display = "flex";
-			videoTrack.style.boxSizing = "border-box";
-			window.setupVideoTrack();
-		}
-
-		// Density matches track width; tiles still stretch to fill 100% after append
-		const trackWidth = videoTrack?.offsetWidth || 0;
-		const requiredTileCount = Math.max(Math.floor(trackWidth / 120), 1);
-
-		window.__TAURI__.core
-			.invoke("generate_timeline_thumbnails", {
-				videoPath: requestPath,
-				tileCount: requiredTileCount,
-			})
-			.then((thumbnailPaths) => {
-				if (isStaleRequest()) return;
-				if (!videoTrack || !thumbnailPaths || thumbnailPaths.length === 0) {
-					return;
-				}
-				// Stretch thumbs flush left→right under the ruler (no fixed px tile width)
-				videoTrack.innerHTML = "";
-				videoTrack.style.display = "flex";
-				videoTrack.style.width = "100%";
-				videoTrack.style.boxSizing = "border-box";
-				videoTrack.style.overflow = "hidden";
-				videoTrack.style.justifyContent = "flex-start";
-				videoTrack.style.alignItems = "stretch";
-				const n = thumbnailPaths.length;
-				const tileWidthPct = 100 / n;
-				for (const pathString of thumbnailPaths) {
-					const imgElement = document.createElement("img");
-					imgElement.src = window.__TAURI__.core.convertFileSrc(pathString);
-					// No w-[120px] / fixed pixel widths — equal flex tiles fill the track
-					imgElement.className =
-						"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
-					imgElement.style.flex = "1 1 0";
-					imgElement.style.minWidth = "0";
-					imgElement.style.width = `${tileWidthPct}%`;
-					imgElement.style.boxSizing = "border-box";
-					imgElement.style.height = "100%";
-					videoTrack.appendChild(imgElement);
-				}
-				window.setupVideoTrack();
-			})
-			.catch((err) => {
-				if (isStaleRequest()) return;
-				console.error("Error generating filmstrip thumbnails:", err);
-				if (videoTrack) {
-					videoTrack.textContent = "Failed to load filmstrip.";
-					window.setupVideoTrack();
-				}
-			});
 	} catch (err) {
 		if (isStaleRequest()) return;
 		console.error("Error generating waveform data:", err);
@@ -1175,6 +2294,14 @@ window.joinAndCompressVideos = async (videoSegments) => {
 
 /** Processes and loads a new video file into the active project slot. */
 const processNewVideoFile = async (fileOrPath, isTauriPath = false) => {
+	if (isQueueIndexJoined(activeQueueIndex)) {
+		showToast(
+			"Unjoin first before replacing media on this queue item.",
+			"error",
+		);
+		return;
+	}
+
 	resetVideoViewport(player);
 	const currentSrc = player.getAttribute("src");
 	const hasExistingVideo = currentSrc && currentSrc !== "";
@@ -1833,6 +2960,11 @@ const initializePlayer = () => {
 	}
 
 	function bootTimelineVisualizers() {
+		// Skip full strip rebuild after join handoff / soft sequence source switch
+		if (window._skipNextTimelineBoot || window._sequenceHandoffInProgress) {
+			window._skipNextTimelineBoot = false;
+			return;
+		}
 		if (videoFilePath) {
 			if (window.currentViewMode !== "miniplayer") {
 				window.loadWaveformTimeline();
@@ -1862,6 +2994,13 @@ const initializePlayer = () => {
 			clipOutTime = duration;
 		}
 
+		// Cache media duration on the active queue entry for sequence spine math
+		if (typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) {
+			videoQueue[activeQueueIndex].mediaDuration = duration || 0;
+			videoQueue[activeQueueIndex].clipInTime = clipInTime;
+			videoQueue[activeQueueIndex].clipOutTime = clipOutTime;
+		}
+
 		updateTimeDisplay(duration, "durationTime");
 		positionControls();
 		updateLoadButtonColor();
@@ -1876,20 +3015,72 @@ const initializePlayer = () => {
 		DOM.speedValue.textContent = `${playbackSpeed.toFixed(1)}x`;
 		toConsole("Playback speed restored", playbackSpeed, debuggin);
 
-		player.volume = volumeLevel;
-		if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
-			player.muted = false;
-			DOM.volumeOnIcon.classList.remove("hidden");
-			DOM.volumeOffIcon.classList.add("hidden");
-			volumeSlider.value = Math.round(volumeLevel * 100);
-			DOM.volumeValue.textContent = Math.round(volumeLevel * 100).toString();
+		// Soft handoff / sequence continue: preserve volume+mute (do NOT force mute-on-load)
+		const softAudio = window._softHandoffAudio;
+		const isSoftHandoffLoad =
+			!!window._softHandoffVolumeActive ||
+			!!softAudio ||
+			!!window._sequenceHandoffInProgress ||
+			!!window._sequenceContinuePlay;
+		if (isSoftHandoffLoad) {
+			const vol = softAudio
+				? Number.isFinite(softAudio.volume)
+					? softAudio.volume
+					: volumeLevel
+				: volumeLevel;
+			const muted = softAudio ? !!softAudio.muted : !!player.muted;
+			if (typeof applyTransportVolume === "function") {
+				applyTransportVolume(vol, muted);
+			} else if (typeof window.applyTransportVolume === "function") {
+				window.applyTransportVolume(vol, muted);
+			} else {
+				player.volume = clampVolume01(vol);
+				player.muted = muted;
+				volumeLevel = player.volume;
+			}
+			// Keep capture until handoff/seek finally clears the active flag
+			toConsole(
+				"Soft handoff volume preserved",
+				{ volume: vol, muted },
+				debuggin,
+			);
+		} else if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
+			// Prefer per-clip remembered volume when available
+			const resolved =
+				typeof resolveVolumeForQueueIndex === "function"
+					? resolveVolumeForQueueIndex(activeQueueIndex)
+					: { volume: volumeLevel, muted: false };
+			if (typeof applyTransportVolume === "function") {
+				applyTransportVolume(resolved.volume, false);
+			} else {
+				player.volume = clampVolume01(resolved.volume);
+				player.muted = false;
+				volumeLevel = player.volume;
+				if (volumeSlider) volumeSlider.value = volumeLevel;
+				if (DOM.volumeValue) {
+					DOM.volumeValue.textContent = String(Math.round(volumeLevel * 100));
+				}
+				DOM.volumeOnIcon?.classList.remove("hidden");
+				DOM.volumeOffIcon?.classList.add("hidden");
+			}
 			toConsole("Audio file unmuted on load", "Success", debuggin);
 		} else {
-			player.muted = true;
-			DOM.volumeOnIcon.classList.add("hidden");
-			DOM.volumeOffIcon.classList.remove("hidden");
-			volumeSlider.value = 0;
-			DOM.volumeValue.textContent = "0";
+			// Hard load: keep existing mute-on-load UX, but volume from per-clip memory
+			const resolved =
+				typeof resolveVolumeForQueueIndex === "function"
+					? resolveVolumeForQueueIndex(activeQueueIndex)
+					: { volume: volumeLevel, muted: true };
+			if (typeof applyTransportVolume === "function") {
+				applyTransportVolume(resolved.volume, true);
+			} else {
+				player.volume = clampVolume01(resolved.volume);
+				player.muted = true;
+				volumeLevel = player.volume;
+				if (volumeSlider) volumeSlider.value = 0;
+				if (DOM.volumeValue) DOM.volumeValue.textContent = "0";
+				DOM.volumeOnIcon?.classList.add("hidden");
+				DOM.volumeOffIcon?.classList.remove("hidden");
+			}
 			toConsole("Video muted on load", "Success", debuggin);
 		}
 
@@ -1926,6 +3117,14 @@ const initializePlayer = () => {
 		}
 	});
 	player.addEventListener("ended", (event) => {
+		// Joined sequence: media end of clip i → hand off to i+1 (do not stop transport)
+		if (shouldHandoffToNextJoined()) {
+			if (event) event.preventDefault();
+			window._sequenceContinuePlay = true;
+			void handoffToNextJoinedClip();
+			return;
+		}
+
 		seektimeupdate();
 
 		let isCurrentlyLooping = false;
@@ -1977,6 +3176,17 @@ const initializePlayer = () => {
 	volumeSlider = document.getElementById("volumeSlider");
 
 	loadLocalState();
+
+	// Ensure Playlist Queue Join chips match restored joinedToNext without
+	// requiring the user to open/close the sidebar (bug 6).
+	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		// Invalidate cache so join state is not sticky from a pre-load shell
+		if (typeof window.invalidateSidebarPlaylistCache === "function") {
+			window.invalidateSidebarPlaylistCache();
+		}
+		window.renderSidebarPlaylist();
+	}
 
 	// Rehydrate active media through the proxy path (H.265-safe) ONLY if intended mode is Normal.
 	// loadLocalState only restores memory; it no longer sets player.src.
@@ -2133,7 +3343,8 @@ const initializePlayer = () => {
 		saveLocalState();
 	}
 
-	addMarkerBtn?.addEventListener("click", addMarker, false);
+	// #addMarkerBtn is re-created inside updateMarkersList; binding is handled there
+	// (and via #markersList event delegation). Enter/"m" call addMarker() directly.
 
 	projectImportButton?.addEventListener("click", async () => {
 		const isTauri = window.__TAURI__ !== undefined;
@@ -2295,6 +3506,13 @@ const initializePlayer = () => {
 	});
 
 	DOM.videoPlaceholder.addEventListener("click", async () => {
+		if (isQueueIndexJoined(activeQueueIndex)) {
+			showToast(
+				"Unjoin first before loading or replacing media on this queue item.",
+				"error",
+			);
+			return;
+		}
 		const isTauri = window.__TAURI__ !== undefined;
 		if (isTauri) {
 			try {
@@ -2352,19 +3570,19 @@ const initializePlayer = () => {
 	});
 
 	rewind5sButton.addEventListener("click", () => {
-		player.currentTime = Math.max(clipInTime || 0, player.currentTime - 5);
+		void seekRelativeInActiveRun(-5);
 		toConsole("Rewind 5s", player.currentTime, debuggin);
 	});
 	rewind1sButton.addEventListener("click", () => {
-		player.currentTime = Math.max(clipInTime || 0, player.currentTime - 1);
+		void seekRelativeInActiveRun(-1);
 		toConsole("Rewind 1s", player.currentTime, debuggin);
 	});
 	forward1sButton.addEventListener("click", () => {
-		player.currentTime = Math.min(player.duration, player.currentTime + 1);
+		void seekRelativeInActiveRun(1);
 		toConsole("Forward 1s", player.currentTime, debuggin);
 	});
 	forward5sButton.addEventListener("click", () => {
-		player.currentTime = Math.min(player.duration, player.currentTime + 5);
+		void seekRelativeInActiveRun(5);
 		toConsole("Forward 5s", player.currentTime, debuggin);
 	});
 
@@ -2381,32 +3599,26 @@ const initializePlayer = () => {
 	if (closeHelpBtnX) closeHelpBtnX.addEventListener("click", closeModal);
 
 	muteButton.addEventListener("click", () => {
-		player.muted = !player.muted;
-		DOM.volumeOnIcon.classList.toggle("hidden", player.muted);
-		DOM.volumeOffIcon.classList.toggle("hidden", !player.muted);
-		toConsole("Mute toggled", player.muted, debuggin);
-		if (!player.muted && volumeLevel === 0) {
-			volumeLevel = 1;
-			player.volume = 1;
-			saveLocalState();
+		const nextMuted = !player.muted;
+		let vol = clampVolume01(volumeLevel);
+		if (!nextMuted && vol === 0) {
+			vol = 1;
 		}
-		volumeSlider.value = player.muted ? 0 : volumeLevel;
-		DOM.volumeValue.textContent = player.muted
-			? "0"
-			: Math.round(volumeLevel * 100);
+		applyTransportVolume(vol, nextMuted);
+		rememberVolumeOnQueueIndex(activeQueueIndex, vol, nextMuted);
+		toConsole("Mute toggled", nextMuted, debuggin);
+		saveLocalState();
 	});
 
 	volumeSlider.addEventListener(
 		"input",
 		debounce((event) => {
-			const volume = Number.parseFloat(event.target.value);
+			const volume = clampVolume01(Number.parseFloat(event.target.value));
 			if (!Number.isNaN(volume)) {
-				player.volume = volume;
-				volumeLevel = volume;
-				player.muted = volume === 0;
-				DOM.volumeOnIcon.classList.toggle("hidden", player.muted);
-				DOM.volumeOffIcon.classList.toggle("hidden", !player.muted);
-				DOM.volumeValue.textContent = Math.round(volume * 100);
+				const muted = volume === 0;
+				applyTransportVolume(volume, muted);
+				// User-set volume is remembered on this clip for later join handoffs
+				rememberVolumeOnQueueIndex(activeQueueIndex, volume, muted);
 				toConsole("Volume adjusted", volume, debuggin);
 				saveLocalState();
 			}
@@ -2667,25 +3879,25 @@ const initializePlayer = () => {
 			case "ArrowLeft":
 				e.preventDefault();
 				if (!player.src) return;
-				player.currentTime = Math.max(clipInTime || 0, player.currentTime - 1);
+				void seekRelativeInActiveRun(-1);
 				toConsole("Rewind 1s (Left Arrow)", player.currentTime, debuggin);
 				break;
 			case "ArrowDown":
 				e.preventDefault();
 				if (!player.src) return;
-				player.currentTime = Math.max(clipInTime || 0, player.currentTime - 5);
+				void seekRelativeInActiveRun(-5);
 				toConsole("Rewind 5s (Down Arrow)", player.currentTime, debuggin);
 				break;
 			case "ArrowRight":
 				e.preventDefault();
 				if (!player.src) return;
-				player.currentTime = Math.min(player.duration, player.currentTime + 1);
+				void seekRelativeInActiveRun(1);
 				toConsole("Forward 1s (Right Arrow)", player.currentTime, debuggin);
 				break;
 			case "ArrowUp":
 				e.preventDefault();
 				if (!player.src) return;
-				player.currentTime = Math.min(player.duration, player.currentTime + 5);
+				void seekRelativeInActiveRun(5);
 				toConsole("Forward 5s (Up Arrow)", player.currentTime, debuggin);
 				break;
 			case "s":
@@ -2932,20 +4144,39 @@ const seektimeupdate = () => {
 			}
 		}
 
+		// Do not fight the player mid-handoff load
+		if (window._sequenceHandoffInProgress) return;
+
 		const currentTime = player.currentTime;
 		const duration = player.duration;
+		const run = getActiveJoinRun();
+		const multi = run.segments.length > 1;
+		if (multi) syncSequenceModeState(run);
+
 		if (seekBar) {
 			seekBar.value = currentTime;
 			if (typeof seekBar !== "undefined" && seekBar) {
 				seekBar.max = duration || 0;
 			}
 		}
-		updateTimeDisplay(currentTime, "currentTime");
-		if (duration) {
-			updateTimeDisplay(duration, "durationTime");
+
+		// Transport clock: sequence time when multi-clip run, else local
+		const displayTime = multi ? getSequencePlayheadTime() : currentTime;
+		const displayDuration = multi
+			? Math.max(run.totalDuration, 0.001)
+			: duration || 0;
+		updateTimeDisplay(displayTime, "currentTime");
+		if (displayDuration) {
+			updateTimeDisplay(displayDuration, "durationTime");
 		}
 
-		if (duration > 0) {
+		// Playhead on detailed timeline — always sequence % when multi
+		if (multi && run.totalDuration > 0) {
+			const seqPct = (displayTime / run.totalDuration) * 100;
+			for (let i = 0; i < playheadsLiveCollection.length; i++) {
+				playheadsLiveCollection[i].style.left = `${seqPct}%`;
+			}
+		} else if (duration > 0) {
 			const pct = (currentTime / duration) * 100;
 			for (let i = 0; i < playheadsLiveCollection.length; i++) {
 				playheadsLiveCollection[i].style.left = `${pct}%`;
@@ -3044,12 +4275,28 @@ const seektimeupdate = () => {
 			return;
 		}
 
-		// Stop playback and constrain seek if we hit the clipOutTime
-		if (clipOutTime > 0 && currentTime > clipOutTime) {
+		// At clipOut / media end: hand off to next joined clip, or stop as today
+		if (isAtOrPastClipOut(currentTime)) {
+			const playingThrough =
+				!player.paused || !!player.ended || !!window._sequenceContinuePlay;
+			if (shouldHandoffToNextJoined() && playingThrough) {
+				// Sequence-continue — do not treat as "video ended / stop"
+				window._sequenceContinuePlay = true;
+				void handoffToNextJoinedClip();
+				return;
+			}
+			// Solo (or unjoined): stop once while playing; avoid seek-loop when already parked
 			if (!player.paused) {
 				player.pause();
+				const out = getEffectiveClipOut();
+				if (out > 0 && Number.isFinite(out) && currentTime > out + 0.001) {
+					try {
+						player.currentTime = Math.min(out, player.duration || out);
+					} catch (_) {
+						/* ignore */
+					}
+				}
 			}
-			player.currentTime = clipOutTime;
 			return;
 		}
 	}
@@ -3129,6 +4376,15 @@ const positionControls = () => {
 /** Updates the load video button visual styling based on player load state. */
 const updateLoadButtonColor = () => {
 	if (loadVideoButton && player && playPauseButton) {
+		// Disable folder/load while active queue item is part of a join
+		const joined = isQueueIndexJoined(activeQueueIndex);
+		loadVideoButton.disabled = joined;
+		loadVideoButton.title = joined
+			? "Unjoin first before loading or replacing media"
+			: "Load Video";
+		loadVideoButton.classList.toggle("opacity-40", joined);
+		loadVideoButton.classList.toggle("cursor-not-allowed", joined);
+
 		const src = player.getAttribute("src");
 		if (!src) {
 			loadVideoButton.classList.add("btn-icon-highlight");
@@ -3200,6 +4456,51 @@ const toggleSettings = (show) => {
 	}
 };
 
+/**
+ * Next auto-name "Marker N" unique within the active join run (or solo source).
+ * Stored data stays source-local; only the default label uses sequence/run context.
+ */
+const getNextRunMarkerDefaultName = () => {
+	const used = new Set();
+	const collect = (list) => {
+		if (!Array.isArray(list)) return;
+		for (const m of list) {
+			if (m?.name) used.add(String(m.name));
+		}
+	};
+
+	const multi =
+		typeof isActiveRunMulti === "function"
+			? isActiveRunMulti()
+			: typeof window.isActiveRunMulti === "function" &&
+				window.isActiveRunMulti();
+	if (multi) {
+		const run =
+			typeof getActiveJoinRun === "function"
+				? getActiveJoinRun()
+				: typeof window.getActiveJoinRun === "function"
+					? window.getActiveJoinRun()
+					: null;
+		if (run?.segments?.length) {
+			for (const seg of run.segments) {
+				if (seg.queueIndex === activeQueueIndex) {
+					collect(markers);
+				} else {
+					collect(seg.video?.appState?.markers);
+				}
+			}
+		} else {
+			collect(markers);
+		}
+	} else {
+		collect(markers);
+	}
+
+	let n = 1;
+	while (used.has(`Marker ${n}`)) n += 1;
+	return `Marker ${n}`;
+};
+
 /** Inserts a new standard marker at the current video playback time. */
 const addMarker = () => {
 	if (!player.src) {
@@ -3216,7 +4517,8 @@ const addMarker = () => {
 		showToast("Marker starts after Clip Out.", "error");
 	}
 
-	const defaultName = `Marker ${markers.length + 1}`;
+	// Global next index across the active join run so names do not collide per-file
+	const defaultName = getNextRunMarkerDefaultName();
 
 	markers.push({
 		id: Date.now(),
@@ -3225,6 +4527,7 @@ const addMarker = () => {
 		type: "standard",
 	});
 
+	// Keep source-local order by local time only (do not shuffle across files)
 	markers.sort((a, b) => a.startTime - b.startTime);
 
 	saveLocalState();
@@ -3309,8 +4612,15 @@ const jumpToMarkerTime = (markerIndexOrTime, type) => {
 		time = type === "start" ? marker.startTime : marker.endTime;
 	}
 	if (time !== undefined && time !== null) {
-		player.currentTime = time;
+		// Always pause — matches "Jump here (Paused)" control label
 		player.pause();
+		player.currentTime = time;
+		// Some engines auto-resume after seek while readyState changes; re-assert pause
+		const ensurePaused = () => {
+			if (!player.paused) player.pause();
+		};
+		player.addEventListener("seeked", ensurePaused, { once: true });
+		requestAnimationFrame(ensurePaused);
 		toConsole("Jumped to marker time", time, debuggin);
 	}
 };
@@ -4525,12 +5835,23 @@ const switchVideoInQueue = async (index) => {
 
 	showToast(`Switched to: ${currentVideo.videoName}`, "success");
 	updateSliderTicks();
+	// Active join run may change with selection — rebuild sequence timeline
+	syncSequenceModeState();
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
 };
 
 /** Removes the currently active video from the project queue. */
 const removeCurrentVideo = async () => {
-	resetVideoViewport(player);
 	if (videoQueue.length === 0) return;
+
+	if (isQueueIndexJoined(activeQueueIndex)) {
+		showToast("Unjoin first before removing this queue item.", "error");
+		return;
+	}
+
+	resetVideoViewport(player);
 
 	const confirmRemove = await asyncConfirm(
 		"Are you sure you want to remove this video from the project?",
@@ -4539,6 +5860,9 @@ const removeCurrentVideo = async () => {
 	if (!confirmRemove) return;
 
 	videoQueue.splice(activeQueueIndex, 1);
+	if (videoQueue.length > 0) {
+		videoQueue[videoQueue.length - 1].joinedToNext = false;
+	}
 
 	if (videoQueue.length === 0) {
 		activeQueueIndex = 0;
@@ -4630,6 +5954,7 @@ const addVideoToQueue = async () => {
 				...JSON.parse(JSON.stringify(videoQueue[activeQueueIndex])),
 				videoId: newVideoId,
 				videoName,
+				joinedToNext: false,
 			}
 		: {
 				videoId: newVideoId,
@@ -4638,10 +5963,13 @@ const addVideoToQueue = async () => {
 				videoFilePath: "",
 				clipInTime: 0,
 				clipOutTime: 0,
+				joinedToNext: false,
 				appState: { markers: [] },
 			};
 
+	// Previous last item may keep joinedToNext; new last must not join past end
 	videoQueue.push(newVideo);
+	videoQueue[videoQueue.length - 1].joinedToNext = false;
 	await switchVideoInQueue(videoQueue.length - 1);
 };
 
@@ -4703,11 +6031,16 @@ async function addNewVideoToQueue(event) {
 			videoFilePath: filePath,
 			clipInTime: 0,
 			clipOutTime: 0,
+			joinedToNext: false,
 			appState: { markers: [] },
 		};
 
 		saveLocalState();
 		videoQueue.push(newItem);
+		if (videoQueue.length > 1) {
+			// New tail cannot be joined forward
+			videoQueue[videoQueue.length - 1].joinedToNext = false;
+		}
 
 		renderVideoQueueSelect();
 		await switchVideoInQueue(videoQueue.length - 1);
@@ -4737,12 +6070,26 @@ const editVideoInQueue = async () => {
 
 let _sidebarPlaylistElements = [];
 
+/** Drop cached playlist nodes so the next render rebuilds Join chips from state. */
+window.invalidateSidebarPlaylistCache = () => {
+	_sidebarPlaylistElements = [];
+	const container = document.getElementById("sidebar-queue-list");
+	if (container) container.innerHTML = "";
+};
+
+const JOIN_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+
 /** Rebuilds the DOM list of videos for the left playlist sidebar using cached nodes and diffing for performance. */
 window.renderSidebarPlaylist = () => {
 	const container = document.getElementById("sidebar-queue-list");
 	if (!container) return;
 
 	const queueLen = videoQueue.length;
+
+	// Ensure last item never claims a next join
+	if (queueLen > 0 && videoQueue[queueLen - 1]) {
+		videoQueue[queueLen - 1].joinedToNext = false;
+	}
 
 	// If the queue size has changed (added, removed, cleared), rebuild the DOM elements
 	if (_sidebarPlaylistElements.length !== queueLen) {
@@ -4751,9 +6098,12 @@ window.renderSidebarPlaylist = () => {
 		const fragment = document.createDocumentFragment();
 
 		for (let index = 0; index < queueLen; index++) {
+			const group = document.createElement("div");
+			group.className = "queue-item-group";
+
 			const div = document.createElement("div");
 			div.className =
-				"flex items-center justify-between gap-2 p-2.5 rounded mb-1.5 cursor-pointer text-sm transition-colors border select-none";
+				"flex items-center justify-between gap-2 p-2.5 rounded cursor-pointer text-sm transition-colors border select-none";
 
 			const span = document.createElement("span");
 			span.className = "truncate flex-1 pointer-events-none";
@@ -4768,6 +6118,7 @@ window.renderSidebarPlaylist = () => {
 			moveUpBtn.className =
 				"p-1 rounded hover:bg-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer flex items-center justify-center transition-colors";
 			moveUpBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg>`;
+			moveUpBtn.title = "Move up";
 			moveUpBtn.addEventListener("click", (e) => {
 				e.stopPropagation();
 				const idx = parseInt(moveUpBtn.dataset.index, 10);
@@ -4785,9 +6136,15 @@ window.renderSidebarPlaylist = () => {
 					activeQueueIndex = idx;
 				}
 
+				// Tail cannot stay joined forward after reorder
+				if (videoQueue.length > 0) {
+					videoQueue[videoQueue.length - 1].joinedToNext = false;
+				}
+
 				saveLocalState();
 				renderVideoQueueSelect();
 				window.renderSidebarPlaylist();
+				scheduleJoinTimelineRebuild();
 			});
 			actionWrapper.appendChild(moveUpBtn);
 
@@ -4797,6 +6154,7 @@ window.renderSidebarPlaylist = () => {
 			moveDownBtn.className =
 				"p-1 rounded hover:bg-zinc-300 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer flex items-center justify-center transition-colors";
 			moveDownBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+			moveDownBtn.title = "Move down";
 			moveDownBtn.addEventListener("click", (e) => {
 				e.stopPropagation();
 				const idx = parseInt(moveDownBtn.dataset.index, 10);
@@ -4814,9 +6172,14 @@ window.renderSidebarPlaylist = () => {
 					activeQueueIndex = idx;
 				}
 
+				if (videoQueue.length > 0) {
+					videoQueue[videoQueue.length - 1].joinedToNext = false;
+				}
+
 				saveLocalState();
 				renderVideoQueueSelect();
 				window.renderSidebarPlaylist();
+				scheduleJoinTimelineRebuild();
 			});
 			actionWrapper.appendChild(moveDownBtn);
 
@@ -4827,19 +6190,41 @@ window.renderSidebarPlaylist = () => {
 				const idx = parseInt(div.dataset.index, 10);
 				await switchVideoInQueue(idx);
 				window.renderSidebarPlaylist();
+				// Active run may change — rebuild sequence timeline
+				scheduleJoinTimelineRebuild();
 			});
 
+			group.appendChild(div);
+
+			// Between-row Join control (not on last item)
+			let joinBtn = null;
+			if (index < queueLen - 1) {
+				joinBtn = document.createElement("button");
+				joinBtn.type = "button";
+				joinBtn.className = "queue-join-control";
+				joinBtn.innerHTML = JOIN_ICON_SVG;
+				joinBtn.addEventListener("click", (e) => {
+					e.stopPropagation();
+					const idx = parseInt(joinBtn.dataset.index, 10);
+					toggleJoinedToNext(idx);
+				});
+				group.appendChild(joinBtn);
+			}
+
 			_sidebarPlaylistElements.push({
+				group,
 				div,
 				span,
 				moveUpBtn,
 				moveDownBtn,
+				joinBtn,
 				lastVideoName: null,
 				lastActive: null,
 				lastIndex: -1,
+				lastJoined: null,
 			});
 
-			fragment.appendChild(div);
+			fragment.appendChild(group);
 		}
 
 		container.appendChild(fragment);
@@ -4852,12 +6237,14 @@ window.renderSidebarPlaylist = () => {
 
 		const isActive = index === activeQueueIndex;
 		const videoName = video.videoFileName || "Unknown File";
+		const isJoined = !!video.joinedToNext && index < queueLen - 1;
 
 		const videoChanged = els.lastVideoName !== videoName;
 		const activeChanged = els.lastActive !== isActive;
 		const indexChanged = els.lastIndex !== index;
+		const joinedChanged = els.lastJoined !== isJoined;
 
-		if (!videoChanged && !activeChanged && !indexChanged) {
+		if (!videoChanged && !activeChanged && !indexChanged && !joinedChanged) {
 			continue;
 		}
 
@@ -4871,10 +6258,10 @@ window.renderSidebarPlaylist = () => {
 		if (activeChanged) {
 			if (isActive) {
 				els.div.className =
-					"flex items-center justify-between gap-2 p-2.5 rounded mb-1.5 cursor-pointer text-sm transition-colors border select-none bg-zinc-200 dark:bg-zinc-800 border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white font-semibold";
+					"flex items-center justify-between gap-2 p-2.5 rounded cursor-pointer text-sm transition-colors border select-none bg-zinc-200 dark:bg-zinc-800 border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-white font-semibold";
 			} else {
 				els.div.className =
-					"flex items-center justify-between gap-2 p-2.5 rounded mb-1.5 cursor-pointer text-sm transition-colors border select-none bg-zinc-100 dark:bg-zinc-800/40 border-transparent text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700/60";
+					"flex items-center justify-between gap-2 p-2.5 rounded cursor-pointer text-sm transition-colors border select-none bg-zinc-100 dark:bg-zinc-800/40 border-transparent text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700/60";
 			}
 		}
 
@@ -4885,11 +6272,28 @@ window.renderSidebarPlaylist = () => {
 
 			els.moveUpBtn.disabled = index === 0;
 			els.moveDownBtn.disabled = index === queueLen - 1;
+			if (els.joinBtn) {
+				els.joinBtn.dataset.index = index;
+			}
+		}
+
+		if (els.joinBtn && (joinedChanged || indexChanged)) {
+			els.joinBtn.dataset.index = index;
+			els.joinBtn.classList.toggle("is-joined", isJoined);
+			els.joinBtn.title = isJoined ? "Unjoin" : "Join";
+			els.joinBtn.setAttribute("aria-label", isJoined ? "Unjoin" : "Join");
+			els.joinBtn.setAttribute("aria-pressed", isJoined ? "true" : "false");
 		}
 
 		els.lastVideoName = videoName;
 		els.lastActive = isActive;
 		els.lastIndex = index;
+		els.lastJoined = isJoined;
+	}
+
+	// Disable load control while the active row is part of a join
+	if (typeof updateLoadButtonColor === "function") {
+		updateLoadButtonColor();
 	}
 };
 

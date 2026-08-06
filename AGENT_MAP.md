@@ -27,6 +27,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 | `src-tauri/tauri.conf.json` | productName, identifier, associations, externalBin |
 | `src-tauri/capabilities/default.json` | Permissions (fs, shell spawn/open) |
 | `src-tauri/binaries/` | ffmpeg sidecar (gitignored; required for build) |
+| `LICENSE` | MIT for app source; §2 GPL notice for bundled FFmpeg/x264 sidecar |
 
 ---
 

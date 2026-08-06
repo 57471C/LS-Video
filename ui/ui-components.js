@@ -128,6 +128,86 @@ const getMarkersPlayer = () =>
 	document.getElementById("my_video") ||
 	document.querySelector("video");
 
+/**
+ * Build marker rows for the active join run (or solo current source).
+ * displayTime is sequence time when multi-clip, else source-local.
+ * Entries keep queueIndex + markerIndex for write-back in source-local time.
+ */
+const getActiveRunMarkerViewEntries = () => {
+	const run =
+		typeof window.getActiveJoinRun === "function"
+			? window.getActiveJoinRun()
+			: null;
+	const multi = !!(run?.segments && run.segments.length > 1);
+
+	if (!multi) {
+		return (markers || []).map((m, i) => ({
+			queueIndex: activeQueueIndex,
+			markerIndex: i,
+			marker: m,
+			displayTime: m.startTime,
+			isSequence: false,
+			clipIn: typeof clipInTime !== "undefined" ? clipInTime : 0,
+			clipOut: typeof clipOutTime !== "undefined" ? clipOutTime : 0,
+		}));
+	}
+
+	const entries = [];
+	for (const seg of run.segments) {
+		const sourceMarkers =
+			seg.queueIndex === activeQueueIndex
+				? markers || []
+				: seg.video?.appState?.markers || [];
+		for (let i = 0; i < sourceMarkers.length; i += 1) {
+			const m = sourceMarkers[i];
+			const displayTime =
+				typeof window.sourceTimeToSequence === "function"
+					? window.sourceTimeToSequence(seg.queueIndex, m.startTime, run)
+					: m.startTime;
+			entries.push({
+				queueIndex: seg.queueIndex,
+				markerIndex: i,
+				marker: m,
+				displayTime,
+				isSequence: true,
+				clipIn: seg.clipIn,
+				clipOut: seg.clipOut,
+				segment: seg,
+			});
+		}
+	}
+	// Sort by SEQUENCE time for multi-clip runs (not raw source-local time alone).
+	// Stable tie-break: queue order then source-local index — never shuffle markers between files.
+	entries.sort((a, b) => {
+		const dt = a.displayTime - b.displayTime;
+		if (dt !== 0) return dt;
+		if (a.queueIndex !== b.queueIndex) return a.queueIndex - b.queueIndex;
+		return a.markerIndex - b.markerIndex;
+	});
+	return entries;
+};
+
+/** Write a source-local startTime for a marker, syncing active globals when needed. */
+const writeMarkerLocalTime = (queueIndex, markerIndex, localTime) => {
+	if (typeof videoQueue === "undefined" || !videoQueue[queueIndex]?.appState) {
+		return;
+	}
+	if (!videoQueue[queueIndex].appState.markers) {
+		videoQueue[queueIndex].appState.markers = [];
+	}
+	const list =
+		queueIndex === activeQueueIndex
+			? markers
+			: videoQueue[queueIndex].appState.markers;
+	if (!list[markerIndex]) return;
+	list[markerIndex].startTime = localTime;
+	list.sort((a, b) => a.startTime - b.startTime);
+	if (queueIndex === activeQueueIndex) {
+		// Keep queue slot in sync
+		videoQueue[queueIndex].appState.markers = markers;
+	}
+};
+
 let _updateMarkersListScheduled = false;
 const updateMarkersListImmediate = () => {
 	const playerEl = getMarkersPlayer();
@@ -138,6 +218,15 @@ const updateMarkersListImmediate = () => {
 			DOM.markersList = document.getElementById("markersList");
 		}
 		if (!DOM.markersList) throw new Error("Markers list element not found");
+
+		const viewEntries = getActiveRunMarkerViewEntries();
+		// Stash for edit handlers (time write-back conversion)
+		window._markerViewEntries = viewEntries;
+
+		const timeHeader = viewEntries.some((e) => e.isSequence)
+			? "Seq Time"
+			: "Start Time";
+
 		const rows = [
 			`<table class="table table-fixed w-full font-mono text-base tabular-nums [&_th]:align-middle [&_td]:align-middle [&_th]:text-sm sm:[&_th]:text-base [&_td]:text-sm sm:[&_td]:text-base [&_th]:py-1 [&_th]:h-5">
            <thead class="sticky top-0 z-20 text-slate-800 dark:text-slate-100 font-semibold bg-slate-200 dark:bg-slate-800 shadow-sm">
@@ -151,32 +240,37 @@ const updateMarkersListImmediate = () => {
                  </button>
                </div>
              </th>
-             <th scope="col" class="text-center w-[155px] whitespace-nowrap px-1">Start Time</th>
+             <th scope="col" class="text-center w-[155px] whitespace-nowrap px-1">${timeHeader}</th>
              <th scope="col" class="text-center w-24 whitespace-nowrap px-1">Duration</th>
               <th scope="col" class="text-center w-32 whitespace-nowrap pr-1 sm:pr-2">Actions</th>
            </tr>
          </thead>
          <tbody id="markersTableBodyId">`,
 		];
-		for (let i = 0; i < markers.length; i += 1) {
-			const marker = markers[i];
+		for (let i = 0; i < viewEntries.length; i += 1) {
+			const entry = viewEntries[i];
+			const marker = entry.marker;
 			const markerTimeInputId = `markerTimeInput-${i}`;
-			const formattedTime = formatTimeToHHMMSSMS(marker.startTime);
+			const displayTime = entry.displayTime;
+			const formattedTime = formatTimeToHHMMSSMS(displayTime);
 			const safeMarkerName = escapeHTML(marker.name);
 			const isNegative = marker.startTime < 0;
 			const isInvalid =
 				isNegative ||
-				marker.startTime < clipInTime ||
-				(clipOutTime > 0 && marker.startTime > clipOutTime);
+				marker.startTime < entry.clipIn ||
+				(entry.clipOut > 0 && marker.startTime > entry.clipOut);
 			const inputClass = isInvalid ? "text-red-500 dark:text-red-400" : "";
 			const rowBgClass = isNegative
 				? "bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-400"
 				: "hover:bg-zinc-50 dark:hover:bg-zinc-800/40";
 
-			// Dynamically calculate Duration
+			// Dynamically calculate Duration (in display timeline units)
 			let duration = 0;
-			if (i < markers.length - 1) {
-				duration = markers[i + 1].startTime - marker.startTime;
+			if (i < viewEntries.length - 1) {
+				duration = viewEntries[i + 1].displayTime - displayTime;
+			} else if (entry.isSequence && entry.segment) {
+				const segEnd = entry.segment.offset + entry.segment.duration;
+				duration = segEnd - displayTime;
 			} else if (playerEl) {
 				const activeVideo = videoQueue[activeQueueIndex] || {};
 				const endLimit =
@@ -197,48 +291,57 @@ const updateMarkersListImmediate = () => {
 					? `${hrs.toString().padStart(2, "0")}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
 					: `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
 
+			// Jump/play use display time; sequence mode seeks via seekSequenceTime
+			const seekTimeAttr = entry.isSequence ? displayTime : marker.startTime;
+			const clipBadge =
+				entry.isSequence && entry.queueIndex !== activeQueueIndex
+					? `<span class="flex-shrink-0 text-[10px] font-bold text-zinc-400 dark:text-zinc-500" title="Clip ${entry.queueIndex + 1}">${entry.queueIndex + 1}</span>`
+					: "";
+
 			rows.push(`
-        <tr class="marker-row ${rowBgClass} border-b border-zinc-200 dark:border-zinc-700">
+        <tr class="marker-row ${rowBgClass} border-b border-zinc-200 dark:border-zinc-700" data-view-index="${i}" data-queue-index="${entry.queueIndex}" data-marker-index="${entry.markerIndex}" data-sequence="${entry.isSequence ? "1" : "0"}">
           <td class="pl-1 sm:pl-2 py-2">
             <div class="flex items-center gap-2">
-              <button class="flex-shrink-0 text-yellow-500 hover:text-yellow-400 transition-colors focus:outline-none marker-jump-trigger" data-time="${marker.startTime}" title="Jump here (Paused)">
+              <button class="flex-shrink-0 text-yellow-500 hover:text-yellow-400 transition-colors focus:outline-none marker-jump-trigger" data-time="${seekTimeAttr}" data-sequence="${entry.isSequence ? "1" : "0"}" title="Jump here (Paused)">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <rect x="6" y="4" width="4" height="16"></rect>
                   <rect x="14" y="4" width="4" height="16"></rect>
                 </svg>
               </button>
-              <button class="flex-shrink-0 text-green-500 hover:text-green-400 transition-colors focus:outline-none marker-play-trigger" data-time="${marker.startTime}" title="Play from here">
+              <button class="flex-shrink-0 text-green-500 hover:text-green-400 transition-colors focus:outline-none marker-play-trigger" data-time="${seekTimeAttr}" data-sequence="${entry.isSequence ? "1" : "0"}" title="Play from here">
                 <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polygon points="5 3 19 12 5 21 5 3"></polygon>
                 </svg>
               </button>
-              <input type="text" class="bg-transparent border border-transparent hover:border-zinc-300 dark:hover:border-zinc-700 focus:bg-white dark:focus:bg-zinc-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 rounded px-1 w-full text-sm font-semibold text-zinc-900 dark:text-zinc-200 marker-name-input" data-marker-index="${i}" value="${safeMarkerName}" placeholder="Marker ${i + 1}">
+              ${clipBadge}
+              <input type="text" class="bg-transparent border border-transparent hover:border-zinc-300 dark:hover:border-zinc-700 focus:bg-white dark:focus:bg-zinc-900 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 rounded px-1 w-full text-sm font-semibold text-zinc-900 dark:text-zinc-200 marker-name-input" data-view-index="${i}" data-queue-index="${entry.queueIndex}" data-marker-index="${entry.markerIndex}" value="${safeMarkerName}" placeholder="Marker ${i + 1}">
               <div class="relative inline-block text-left marker-type-dropdown">
-                <button type="button" class="inline-flex items-center justify-center p-1 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer gap-1 marker-context-trigger" data-marker-index="${i}" id="type-btn-${i}">
+                <button type="button" class="inline-flex items-center justify-center p-1 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer gap-1 marker-context-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-view-index="${i}" id="type-btn-${i}">
                   ${marker.type === "loop" ? `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none">${marker.loopCount || 1}</span>` : ""}
                   ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "in" ? ICONS.inType : ICONS.outType}
                 </button>
                 <div id="type-menu-${i}" class="hidden absolute left-0 mt-1 w-40 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
                   <div class="py-1">
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${i}" data-type="standard">
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="standard">
                       ${ICONS.standard} Standard
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${i}" data-type="jump">
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="jump">
                       ${ICONS.jumpType} Jump
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${i}" data-type="loop">
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="loop">
                       <span class="flex items-center gap-2">${ICONS.loopType} Loop</span>
                       <input type="text" 
                              class="w-8 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 loop-count-input" 
                              value="${String(marker.loopCount || 1).padStart(2, "0")}" 
                              placeholder="01" 
                              maxlength="2" 
-                             data-marker-index="${i}">
+                             data-marker-index="${entry.markerIndex}"
+                             data-queue-index="${entry.queueIndex}">
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${i}" data-type="in">
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="in">
                       ${ICONS.inType} Set Clip In
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${i}" data-type="out">
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="out">
                       ${ICONS.outType} Set Clip Out
                     </button>
                   </div>
@@ -248,8 +351,8 @@ const updateMarkersListImmediate = () => {
           </td>
           <td class="text-center py-2">
             <span class="inline-flex items-center gap-1">
-              <input type="text" id="${markerTimeInputId}" class="form-control w-28 px-1 text-center font-mono tabular-nums text-sm ${inputClass}" value="${formattedTime}">
-              <button class="p-1 text-zinc-400 hover:text-blue-500 transition-colors marker-sync-trigger" data-marker-index="${i}" title="Sync to Playhead">${ICONS.capture}</button>
+              <input type="text" id="${markerTimeInputId}" class="form-control w-28 px-1 text-center font-mono tabular-nums text-sm ${inputClass}" value="${formattedTime}" data-view-index="${i}">
+              <button class="p-1 text-zinc-400 hover:text-blue-500 transition-colors marker-sync-trigger" data-view-index="${i}" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" title="Sync to Playhead">${ICONS.capture}</button>
             </span>
           </td>
           <td class="text-center py-2">
@@ -258,7 +361,7 @@ const updateMarkersListImmediate = () => {
           <td class="text-center py-2 pr-1 sm:pr-2">
             <div class="flex gap-1.5 justify-center">
               
-              <button class="btn btn-outline-danger p-1 flex items-center justify-center marker-delete-trigger" data-marker-index="${i}" title="Delete Marker">${ICONS.trash}</button>
+              <button class="btn btn-outline-danger p-1 flex items-center justify-center marker-delete-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" title="Delete Marker">${ICONS.trash}</button>
             </div>
           </td>
         </tr>
@@ -273,34 +376,63 @@ const updateMarkersListImmediate = () => {
 
 		DOM.markersList.innerHTML = rows.join("");
 
-		const markerTableBody =
-			document.getElementById("markersTableBodyId") ||
-			document.querySelector(".markers-table");
+		// #addMarkerBtn lives in <thead>, not tbody — re-bind after every re-render
+		// (innerHTML destroys the previous node; Enter uses window.addMarker directly).
+		const addMarkerBtnEl = document.getElementById("addMarkerBtn");
+		if (addMarkerBtnEl) {
+			addMarkerBtnEl.addEventListener("click", (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				if (typeof window.addMarker === "function") {
+					window.addMarker();
+				}
+			});
+		}
 
-		if (markerTableBody) {
-			markerTableBody.addEventListener("click", (event) => {
+		// Delegate row actions from the list host so thead + tbody both work after re-render
+		if (!DOM.markersList.dataset.markerClickBound) {
+			DOM.markersList.dataset.markerClickBound = "1";
+			DOM.markersList.addEventListener("click", async (event) => {
+				// Add Marker (header button; also covered by re-bind above)
+				const addBtn = event.target.closest("#addMarkerBtn");
+				if (addBtn) {
+					event.preventDefault();
+					event.stopPropagation();
+					if (typeof window.addMarker === "function") {
+						window.addMarker();
+					}
+					return;
+				}
+
 				// 1. Context trigger
 				const contextBtn = event.target.closest(".marker-context-trigger");
 				if (contextBtn) {
 					event.preventDefault();
 					event.stopPropagation();
-					const markerIndex = parseInt(
-						contextBtn.getAttribute("data-marker-index"),
+					const viewIndex = parseInt(
+						contextBtn.getAttribute("data-view-index") ??
+							contextBtn.getAttribute("data-marker-index"),
 						10,
 					);
 					if (typeof openMarkerMenu === "function") {
-						openMarkerMenu(event, markerIndex);
+						openMarkerMenu(event, viewIndex);
 					}
 					return;
 				}
 
-				// 2. Jump trigger
+				// 2. Jump trigger (sequence time when data-sequence=1)
 				const jumpBtn = event.target.closest(".marker-jump-trigger");
 				if (jumpBtn) {
 					event.preventDefault();
 					event.stopPropagation();
 					const time = parseFloat(jumpBtn.getAttribute("data-time"));
-					if (typeof window.jumpToMarkerTime === "function") {
+					const isSeq = jumpBtn.getAttribute("data-sequence") === "1";
+					if (isSeq && typeof window.seekSequenceTime === "function") {
+						void window.seekSequenceTime(time, {
+							play: false,
+							silent: true,
+						});
+					} else if (typeof window.jumpToMarkerTime === "function") {
 						window.jumpToMarkerTime(time);
 					}
 					return;
@@ -312,13 +444,19 @@ const updateMarkersListImmediate = () => {
 					event.preventDefault();
 					event.stopPropagation();
 					const time = parseFloat(playBtn.getAttribute("data-time"));
-					if (typeof window.playFromMarkerTime === "function") {
+					const isSeq = playBtn.getAttribute("data-sequence") === "1";
+					if (isSeq && typeof window.seekSequenceTime === "function") {
+						void window.seekSequenceTime(time, {
+							play: true,
+							silent: true,
+						});
+					} else if (typeof window.playFromMarkerTime === "function") {
 						window.playFromMarkerTime(time);
 					}
 					return;
 				}
 
-				// 4. Sync trigger
+				// 4. Sync trigger — write playhead as source-local (convert from sequence when joined)
 				const syncBtn = event.target.closest(".marker-sync-trigger");
 				if (syncBtn) {
 					event.preventDefault();
@@ -327,13 +465,54 @@ const updateMarkersListImmediate = () => {
 						syncBtn.getAttribute("data-marker-index"),
 						10,
 					);
-					if (typeof window.syncMarkerToPlayhead === "function") {
+					const queueIndex = parseInt(
+						syncBtn.getAttribute("data-queue-index") ?? activeQueueIndex,
+						10,
+					);
+					const viewIndex = parseInt(
+						syncBtn.getAttribute("data-view-index"),
+						10,
+					);
+					const entry = window._markerViewEntries?.[viewIndex];
+					if (
+						entry?.isSequence &&
+						typeof window.getSequencePlayheadTime === "function"
+					) {
+						const seqT = window.getSequencePlayheadTime();
+						const localT =
+							typeof window.sequenceTimeToSource === "function"
+								? window.sequenceTimeToSource(seqT)?.localTime
+								: seqT - (entry.segment?.offset || 0) + (entry.clipIn || 0);
+						// Map sequence playhead into this marker's source
+						let writeLocal = localT;
+						if (entry.segment && entry.queueIndex !== activeQueueIndex) {
+							// Convert sequence time into this entry's source local
+							const mapped = window.sequenceTimeToSource?.(seqT);
+							if (mapped && mapped.queueIndex === entry.queueIndex) {
+								writeLocal = mapped.localTime;
+							} else {
+								// Clamp playhead into this segment's local range via sequence offset
+								writeLocal =
+									entry.clipIn +
+									Math.max(
+										0,
+										Math.min(
+											entry.segment.duration,
+											seqT - entry.segment.offset,
+										),
+									);
+							}
+						}
+						writeMarkerLocalTime(queueIndex, markerIndex, writeLocal);
+						saveLocalState();
+						updateMarkersList();
+					} else if (typeof window.syncMarkerToPlayhead === "function") {
 						window.syncMarkerToPlayhead(markerIndex);
 					}
 					return;
 				}
 
-				// 5. Delete trigger
+				// 5. Delete trigger (may target non-active queue source in a join run)
 				const deleteBtn = event.target.closest(".marker-delete-trigger");
 				if (deleteBtn) {
 					event.preventDefault();
@@ -342,8 +521,33 @@ const updateMarkersListImmediate = () => {
 						deleteBtn.getAttribute("data-marker-index"),
 						10,
 					);
-					if (typeof window.deleteMarker === "function") {
-						window.deleteMarker(markerIndex);
+					const queueIndex = parseInt(
+						deleteBtn.getAttribute("data-queue-index") ?? activeQueueIndex,
+						10,
+					);
+					if (queueIndex === activeQueueIndex) {
+						if (typeof window.deleteMarker === "function") {
+							window.deleteMarker(markerIndex);
+						}
+					} else if (videoQueue[queueIndex]?.appState?.markers) {
+						const name =
+							videoQueue[queueIndex].appState.markers[markerIndex]?.name ||
+							"marker";
+						if (
+							typeof asyncConfirm === "function"
+								? await asyncConfirm(
+										`Are you sure you want to delete the marker "${name}"? This action cannot be undone.`,
+										"Delete Marker",
+									)
+								: confirm(`Delete marker "${name}"?`)
+						) {
+							videoQueue[queueIndex].appState.markers.splice(markerIndex, 1);
+							saveLocalState();
+							updateMarkersList();
+							if (typeof window.paintTimelineMarkersAndShading === "function") {
+								window.paintTimelineMarkersAndShading();
+							}
+						}
 					}
 					return;
 				}
@@ -357,24 +561,37 @@ const updateMarkersListImmediate = () => {
 						typeBtn.getAttribute("data-marker-index"),
 						10,
 					);
+					const qIndex = parseInt(
+						typeBtn.getAttribute("data-queue-index") ?? activeQueueIndex,
+						10,
+					);
 					const type = typeBtn.getAttribute("data-type");
-					if (typeof window.updateMarkerType === "function") {
-						window.updateMarkerType(markerIndex, type);
-					}
-					return;
-				}
-
-				// 7. Add Marker (button is re-created each render)
-				const addBtn = event.target.closest("#addMarkerBtn");
-				if (addBtn) {
-					event.preventDefault();
-					event.stopPropagation();
-					if (typeof window.addMarker === "function") {
-						window.addMarker();
+					if (qIndex === activeQueueIndex) {
+						if (typeof window.updateMarkerType === "function") {
+							window.updateMarkerType(markerIndex, type);
+						}
+					} else if (videoQueue[qIndex]?.appState?.markers?.[markerIndex]) {
+						const m = videoQueue[qIndex].appState.markers[markerIndex];
+						m.type = type;
+						if (type === "loop") {
+							m.loopCount = m.loopCount || 1;
+						}
+						saveLocalState();
+						updateMarkersList();
+						if (typeof window.paintTimelineMarkersAndShading === "function") {
+							window.paintTimelineMarkersAndShading();
+						}
 					}
 					return;
 				}
 			});
+		}
+
+		const markerTableBody =
+			document.getElementById("markersTableBodyId") ||
+			document.querySelector(".markers-table");
+
+		if (markerTableBody) {
 
 			// Attach name input change listeners (terry/tetris easter egg via updateMarkerName)
 			markerTableBody
@@ -382,8 +599,23 @@ const updateMarkersListImmediate = () => {
 				.forEach((input) => {
 					input.addEventListener("change", () => {
 						const index = parseInt(input.getAttribute("data-marker-index"), 10);
-						if (typeof window.updateMarkerName === "function") {
-							window.updateMarkerName(index, input.value);
+						const qIndex = parseInt(
+							input.getAttribute("data-queue-index") ?? activeQueueIndex,
+							10,
+						);
+						if (qIndex === activeQueueIndex) {
+							if (typeof window.updateMarkerName === "function") {
+								window.updateMarkerName(index, input.value);
+							}
+						} else if (videoQueue[qIndex]?.appState?.markers?.[index]) {
+							const trimmed = input.value.trim();
+							if (!trimmed) {
+								alert("Marker name cannot be empty.");
+								updateMarkersList();
+								return;
+							}
+							videoQueue[qIndex].appState.markers[index].name = trimmed;
+							saveLocalState();
 						}
 					});
 				});
@@ -453,23 +685,39 @@ const updateMarkersListImmediate = () => {
 		table.style.display = "table";
 		updateVideoTimeSummary();
 
-		// Attach listeners for manual input typing in start times
-		for (let i = 0; i < markers.length; i += 1) {
+		// Attach listeners for manual input typing in start times (sequence → local on write)
+		for (let i = 0; i < viewEntries.length; i += 1) {
 			const markerTimeInput = document.getElementById(`markerTimeInput-${i}`);
 			if (markerTimeInput) {
 				markerTimeInput.addEventListener("change", (event) => {
-					const newTime = parseTimeFromHHMMSSMS(event.target.value);
-					if (newTime !== null) {
-						markers[i].startTime = newTime;
-						markers.sort((a, b) => a.startTime - b.startTime);
+					const entry = window._markerViewEntries?.[i] || viewEntries[i];
+					const newDisplayTime = parseTimeFromHHMMSSMS(event.target.value);
+					if (newDisplayTime !== null && entry) {
+						let localTime = newDisplayTime;
+						if (entry.isSequence && entry.segment) {
+							// Sequence time → source-local
+							localTime =
+								entry.clipIn +
+								Math.max(0, newDisplayTime - entry.segment.offset);
+						}
+						writeMarkerLocalTime(
+							entry.queueIndex,
+							entry.markerIndex,
+							localTime,
+						);
 						saveLocalState();
 						updateVideoTimeSummary();
 						updateMarkersList();
+						if (typeof window.paintTimelineMarkersAndShading === "function") {
+							window.paintTimelineMarkersAndShading();
+						}
 					} else {
 						alert(
 							"Invalid time format. Please use HH:MM:SS.MS (e.g., 00:01:00.00).",
 						);
-						markerTimeInput.value = formatTimeToHHMMSSMS(markers[i].startTime);
+						const fallback =
+							entry?.displayTime ?? entry?.marker?.startTime ?? 0;
+						markerTimeInput.value = formatTimeToHHMMSSMS(fallback);
 					}
 				});
 			}
@@ -518,6 +766,41 @@ const updateVideoTimeSummary = () => {
 		const playerEl = getMarkersPlayer();
 		const activeVideo =
 			(typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) || {};
+
+		// Multi-clip join run: footer reflects SEQUENCE bounds (sum of segment lengths).
+		// Solo / unjoined: keep per-clip Clip In / Out / Duration behaviour.
+		const multi =
+			typeof window.isActiveRunMulti === "function" && window.isActiveRunMulti();
+		if (multi) {
+			const run =
+				typeof window.getActiveJoinRun === "function"
+					? window.getActiveJoinRun()
+					: null;
+			// Sequence start is always 0 on the spine (first segment offset).
+			const seqIn = 0;
+			const seqOut = Math.max(0, Number(run?.totalDuration) || 0);
+			const seqDur = seqOut;
+			const formattedStartTime = formatTimeToHHMMSSMS(seqIn);
+			const formattedEndTime = formatTimeToHHMMSSMS(seqOut);
+			const formattedDuration = formatTimeToHHMMSSMS(seqDur);
+
+			footer.innerHTML = `
+      <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full py-1 text-sm font-medium">
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Clip In:</span>
+          <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Clip Out:</span>
+          <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Video Duration:</span>
+          <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
+        </span>
+    `;
+			return;
+		}
 
 		const startMarker = markers.find(
 			(m) => m.type === "in" || m.type === "start",

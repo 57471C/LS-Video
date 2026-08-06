@@ -921,16 +921,22 @@ async fn get_waveform_data(
     .map_err(|e| format!("Task panicked: {}", e))?
 }
 
+/// Generate filmstrip tiles for a video.
+/// Optional `start_seconds` / `end_seconds` limit sampling to [clipIn, clipOut]
+/// so join segments do not stretch a full-file strip into a shorter slot.
 #[tauri::command]
 async fn generate_timeline_thumbnails(
     app_handle: tauri::AppHandle,
     video_path: String,
     tile_count: usize,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
 ) -> Result<Vec<String>, String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let app_handle_clone = app_handle.clone();
+    let tile_count = tile_count.max(1);
     tokio::task::spawn_blocking(move || {
         // Helper function to extract native duration using ffmpeg -i
         let get_duration = |path: &str| -> Option<f64> {
@@ -956,12 +962,28 @@ async fn generate_timeline_thumbnails(
         };
 
         let total_duration_seconds = get_duration(&video_path).unwrap_or(10.0);
-        let interval_step = total_duration_seconds / (tile_count as f64);
+        let start = start_seconds.unwrap_or(0.0).max(0.0).min(total_duration_seconds);
+        let end = end_seconds
+            .unwrap_or(total_duration_seconds)
+            .max(start)
+            .min(total_duration_seconds);
+        // Guard zero-length range
+        let end = if end <= start {
+            (start + 0.1).min(total_duration_seconds.max(start + 0.1))
+        } else {
+            end
+        };
+        let segment_duration = (end - start).max(0.05);
+        let interval_step = segment_duration / (tile_count as f64);
         let dynamic_fps_filter = format!("fps=1/{},scale=120:-1", interval_step);
 
-        // Per-video cache subdir so concurrent A/B loads never overwrite each other's JPGs
+        // Per-video+range cache so full-file and segment strips never collide
         let mut hasher = DefaultHasher::new();
         video_path.hash(&mut hasher);
+        // Quantize range into cache key (ms)
+        ((start * 1000.0).round() as i64).hash(&mut hasher);
+        ((end * 1000.0).round() as i64).hash(&mut hasher);
+        (tile_count as u64).hash(&mut hasher);
         let path_hash = format!("{:x}", hasher.finish());
 
         let cache_path = app_handle_clone
@@ -975,7 +997,7 @@ async fn generate_timeline_thumbnails(
         std::fs::create_dir_all(&cache_path)
             .map_err(|e| format!("Failed to create thumbnail directory: {}", e))?;
 
-        // Clear only JPGs in this video's subdir (never wipe sibling video caches)
+        // Clear only JPGs in this range subdir (never wipe sibling video caches)
         if let Ok(entries) = std::fs::read_dir(&cache_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -986,20 +1008,27 @@ async fn generate_timeline_thumbnails(
         }
 
         let cache_path_string = cache_path.to_string_lossy().to_string();
+        let start_str = format!("{:.3}", start);
+        let dur_str = format!("{:.3}", segment_duration);
+        let out_pattern = format!("{}/thumb_%04d.jpg", cache_path_string);
 
-        // Fire bundled "ffmpeg" static sidecar target binary
+        // -ss before -i for faster seek; -t limits decode to the segment window
         let sidecar = app_handle_clone
             .shell()
             .sidecar("ffmpeg")
             .map_err(|e| format!("Failed to find sidecar: {}", e))?
             .args([
+                "-ss",
+                &start_str,
                 "-i",
                 &video_path,
+                "-t",
+                &dur_str,
                 "-vf",
                 &dynamic_fps_filter,
                 "-q:v",
                 "5",
-                &format!("{}/thumb_%04d.jpg", cache_path_string),
+                &out_pattern,
             ]);
 
         // Wait for the ffmpeg execution pipeline child process to terminate successfully
@@ -1010,7 +1039,7 @@ async fn generate_timeline_thumbnails(
             return Err(format_ffmpeg_output_error("FFmpeg failed", &output));
         }
 
-        // Scan only this video's subdir sequentially
+        // Scan only this range's subdir sequentially
         let mut thumbnails = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&cache_path) {
             let mut entry_paths = Vec::new();

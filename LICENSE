@@ -1,4 +1,11 @@
-MIT License
+LS.Video — License
+
+This repository contains software under more than one license. Read each
+section carefully.
+
+==============================================================================
+1. LS.Video application source code — MIT License
+==============================================================================
 
 Copyright (c) 2025 Terry Minett
 
@@ -19,3 +26,62 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+The MIT License above applies to the LS.Video application source in this
+repository (for example the UI, Tauri/Rust host code, and project packaging
+authored for LS.Video). It does not relicense third-party components.
+
+==============================================================================
+2. Bundled FFmpeg sidecar (and related libraries) — GPL notice
+==============================================================================
+
+LS.Video may be distributed together with a static Windows `ffmpeg.exe`
+sidecar (Tauri `externalBin`, typically under `src-tauri/binaries/`). That
+binary is a separate helper process used for proxy generation, trimming, and
+related media work. It is not part of the MIT-licensed application source.
+
+FFmpeg is free software licensed under the GNU Lesser General Public License
+(LGPL) version 2.1 or later, or the GNU General Public License (GPL) version 2
+or later, depending on how it is configured and which libraries it is linked
+against. See:
+
+  https://ffmpeg.org/legal.html
+  https://github.com/FFmpeg/FFmpeg
+
+A build that links **libx264** (or other GPL-only components) is **GPL**.
+Typical full-featured Windows sidecars used with LS.Video fall into this
+category. libx264 is available from VideoLAN:
+
+  https://www.videolan.org/developers/x264.html
+
+------------------------------------------------------------------------------
+Compliance when shipping the sidecar with LS.Video
+------------------------------------------------------------------------------
+
+When you ship `ffmpeg.exe` (or an equivalent FFmpeg binary) next to LS.Video:
+
+1. Keep the app’s own license clear for *your* code (section 1 — MIT for
+   LS.Video application source).
+
+2. State that the bundled FFmpeg binary is GPL (when built with GPL components
+   such as libx264) and that corresponding source for that binary is available.
+   Source means the FFmpeg and (if applicable) x264 upstream trees/tags you
+   built from, or another offer of source that satisfies the GPL obligations
+   for the exact binary you distribute.
+
+3. Do **not** claim the whole installer or application bundle is MIT-only if
+   it includes this sidecar. The distribution is a combination of MIT
+   application code and GPL (or LGPL, for LGPL-only builds) third-party
+   binaries.
+
+4. This project only produces or ships a helper binary; it does **not**
+   relicense FFmpeg or x264. Upstream copyrights and license terms remain with
+   their respective authors.
+
+Corresponding source for common upstream trees can be obtained from the
+project sites above. If you build or repackage a custom FFmpeg binary, you
+must make source for *that* build available under the same GPL/LGPL terms that
+apply to it.
+
+Nothing in this file grants you rights beyond those already granted by the
+applicable MIT, LGPL, or GPL licenses for each component.

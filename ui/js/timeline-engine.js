@@ -1,6 +1,7 @@
 /*
  * Timeline Engine Module for LS.Video
  * Manages playhead tracking, ticks rendering, audio canvas painting, and marker/trim shading.
+ * Supports solo clip mode and multi-segment active join-run sequence mode.
  */
 
 window.playheadAnimationId = null;
@@ -18,17 +19,70 @@ const isPlayerReady = () =>
 	window.playerReady === true ||
 	(typeof playerReady !== "undefined" && playerReady);
 
+/** Sequence mode when active join run has 2+ clips (live query, not only cached flag). */
+const isSequenceMode = () => {
+	if (window._sequenceMode?.active) return true;
+	if (typeof window.isActiveRunMulti === "function") {
+		return window.isActiveRunMulti();
+	}
+	if (typeof window.getActiveJoinRun === "function") {
+		const run = window.getActiveJoinRun();
+		return !!(run?.segments && run.segments.length > 1);
+	}
+	return false;
+};
+
+const getTimelineDuration = () => {
+	if (isSequenceMode()) {
+		if (typeof window.getActiveJoinRun === "function") {
+			const run = window.getActiveJoinRun();
+			if (run?.totalDuration > 0) return run.totalDuration;
+		}
+		return Math.max(window._sequenceMode?.totalDuration || 0, 0.001);
+	}
+	const p = getPlayer();
+	return Math.max(p?.duration || 0, 0.001);
+};
+
+const getPlayheadTime = () => {
+	if (
+		isSequenceMode() &&
+		typeof window.getSequencePlayheadTime === "function"
+	) {
+		return window.getSequencePlayheadTime();
+	}
+	const p = getPlayer();
+	return p?.currentTime || 0;
+};
+
+const seekTimelineTime = (time) => {
+	// Prefer sequence seek whenever active run is multi-clip.
+	// Omit `play` so prior play/pause state is preserved (scrub while playing continues).
+	if (isSequenceMode() && typeof window.seekSequenceTime === "function") {
+		void window.seekSequenceTime(time, { silent: true });
+		return;
+	}
+	const p = getPlayer();
+	if (p) p.currentTime = time;
+};
+
 // Cache the live HTMLCollection of playheads globally so we don't query the DOM repeatedly in the animation frame
 const timelinePlayheadsLive =
 	document.getElementsByClassName("sequencer-playhead");
 
 function syncTimelinePlayheadSmoothly() {
 	const player = getPlayer();
-	if (player && isPlayerReady() && player.duration) {
+	// Keep animating through handoff loads when possible
+	if (
+		player &&
+		isPlayerReady() &&
+		(player.duration || isSequenceMode()) &&
+		!window._sequenceHandoffInProgress
+	) {
 		const currentVideoTime = player.currentTime;
-		const duration = player.duration;
+		const duration = getTimelineDuration();
 
-		// Look-ahead intersection delta calculation for jump markers
+		// Look-ahead intersection delta calculation for jump markers (source-local)
 		if (currentVideoTime > window.lastCheckedVideoTime) {
 			if (markers && markers.length > 0) {
 				const activeVideo =
@@ -38,7 +92,7 @@ function syncTimelinePlayheadSmoothly() {
 					activeVideo.virtualEndTime !== null &&
 					activeVideo.virtualEndTime !== undefined
 						? activeVideo.virtualEndTime
-						: duration;
+						: player.duration;
 
 				for (let i = 0; i < markers.length; i += 1) {
 					const marker = markers[i];
@@ -60,12 +114,19 @@ function syncTimelinePlayheadSmoothly() {
 			}
 		}
 
-		const finalVideoTime = player.currentTime;
-		const completionPercent = (finalVideoTime / duration) * 100;
+		// Sequence time when multi-run so playhead crosses join into next segment
+		if (
+			isSequenceMode() &&
+			typeof window.syncSequenceModeState === "function"
+		) {
+			window.syncSequenceModeState();
+		}
+		const playheadTime = getPlayheadTime();
+		const completionPercent = (playheadTime / Math.max(duration, 0.001)) * 100;
 		for (let i = 0; i < timelinePlayheadsLive.length; i++) {
 			timelinePlayheadsLive[i].style.left = `${completionPercent}%`;
 		}
-		window.lastCheckedVideoTime = finalVideoTime;
+		window.lastCheckedVideoTime = player.currentTime;
 	}
 	window.playheadAnimationId = requestAnimationFrame(
 		syncTimelinePlayheadSmoothly,
@@ -86,19 +147,20 @@ const paintTimelineRuler = (duration) => {
 	const playhead = document.createElement("div");
 	playhead.className =
 		"sequencer-playhead absolute top-0 bottom-0 w-0.5 bg-blue-600 dark:bg-blue-500 pointer-events-none z-30";
-	playhead.style.left = `${((player.currentTime || 0) / duration) * 100}%`;
+	const headTime = getPlayheadTime();
+	playhead.style.left = `${(headTime / duration) * 100}%`;
 	rulerTrack.appendChild(playhead);
 
-	// Add click to seek
+	// Add click to seek (sequence-aware)
 	if (!rulerTrack.dataset.hasClickListener) {
 		rulerTrack.addEventListener("click", (e) => {
-			const p = getPlayer();
-			if (!p) return;
 			if (e.target.classList.contains("sequencer-playhead")) return;
 			const rect = rulerTrack.getBoundingClientRect();
 			const clickX = e.clientX - rect.left;
 			const pct = clickX / rect.width;
-			p.currentTime = pct * duration;
+			const dur = getTimelineDuration();
+			const time = pct * dur;
+			seekTimelineTime(time);
 			const calculatedPercent = pct * 100;
 			for (let i = 0; i < timelinePlayheadsLive.length; i++) {
 				timelinePlayheadsLive[i].style.left = `${calculatedPercent}%`;
@@ -134,17 +196,68 @@ const paintTimelineRuler = (duration) => {
 	}
 };
 
+const attachTrackSeekListener = (trackEl) => {
+	if (!trackEl || trackEl.dataset.hasClickListener) return;
+	trackEl.addEventListener("click", (e) => {
+		// Ignore clicks that are only on nested interactive UI (none today)
+		const rect = trackEl.getBoundingClientRect();
+		const clickX = e.clientX - rect.left;
+		const pct = clickX / rect.width;
+		const dur = getTimelineDuration();
+		if (!dur) return;
+		seekTimelineTime(pct * dur);
+		const calculatedPercent = pct * 100;
+		for (let i = 0; i < timelinePlayheadsLive.length; i++) {
+			timelinePlayheadsLive[i].style.left = `${calculatedPercent}%`;
+		}
+	});
+	trackEl.dataset.hasClickListener = "true";
+};
+
+const appendPlayheadToTrack = (trackEl, duration) => {
+	if (!trackEl) return;
+	const oldPlayheads = trackEl.getElementsByClassName("sequencer-playhead");
+	while (oldPlayheads.length > 0) {
+		oldPlayheads[0].remove();
+	}
+	const playhead = document.createElement("div");
+	playhead.className =
+		"sequencer-playhead absolute top-0 bottom-0 w-0.5 bg-blue-600 dark:bg-blue-500 pointer-events-none z-30";
+	const headTime = getPlayheadTime();
+	playhead.style.left = `${(headTime / Math.max(duration, 0.001)) * 100}%`;
+	trackEl.appendChild(playhead);
+};
+
 const setupVideoTrack = () => {
 	const player = getPlayer();
 	const videoTrack = document.getElementById("timeline-video-track");
 	if (!videoTrack || !player) return;
+
+	// Multi-join spine: never re-flex outer track into a full-width filmstrip —
+	// that destroys absolute segment fills on row 1 (#timeline-video-track).
+	const hasSegmentFill = !!videoTrack.querySelector(".sequence-segment-fill");
+	if (hasSegmentFill || videoTrack.dataset.sequenceSpine === "1") {
+		const oldPlayheads =
+			videoTrack.getElementsByClassName("sequencer-playhead");
+		while (oldPlayheads.length > 0) {
+			oldPlayheads[0].remove();
+		}
+		videoTrack.style.position = "relative";
+		videoTrack.style.width = "100%";
+		videoTrack.style.display = "block";
+		videoTrack.style.overflow = "hidden";
+		const duration = getTimelineDuration();
+		appendPlayheadToTrack(videoTrack, duration);
+		attachTrackSeekListener(videoTrack);
+		return;
+	}
 
 	// Clear any old playheads
 	const oldPlayheads = videoTrack.getElementsByClassName("sequencer-playhead");
 	while (oldPlayheads.length > 0) {
 		oldPlayheads[0].remove();
 	}
-	// Keep filmstrip track full-width flex so thumbs stay edge-to-edge under the ruler
+	// Solo: keep filmstrip track full-width flex so thumbs stay edge-to-edge
 	videoTrack.style.position = "relative";
 	videoTrack.style.width = "100%";
 	videoTrack.style.boxSizing = "border-box";
@@ -154,7 +267,7 @@ const setupVideoTrack = () => {
 	videoTrack.style.alignItems = "stretch";
 
 	// Re-apply equal flex on existing filmstrip tiles (no fixed pixel widths)
-	const filmstripImgs = videoTrack.querySelectorAll("img");
+	const filmstripImgs = videoTrack.querySelectorAll(":scope > img");
 	const n = filmstripImgs.length;
 	if (n > 0) {
 		const tileWidthPct = 100 / n;
@@ -168,73 +281,67 @@ const setupVideoTrack = () => {
 		}
 	}
 
-	const playhead = document.createElement("div");
-	playhead.className =
-		"sequencer-playhead absolute top-0 bottom-0 w-0.5 bg-blue-600 dark:bg-blue-500 pointer-events-none z-30";
-	const duration = player.duration || 1;
-	playhead.style.left = `${((player.currentTime || 0) / duration) * 100}%`;
-	videoTrack.appendChild(playhead);
+	const duration = isSequenceMode()
+		? getTimelineDuration()
+		: player.duration || 1;
+	appendPlayheadToTrack(videoTrack, duration);
+	attachTrackSeekListener(videoTrack);
+};
 
-	// Add click to seek
-	if (!videoTrack.dataset.hasClickListener) {
-		videoTrack.addEventListener("click", (e) => {
-			const p = getPlayer();
-			if (!p?.duration) return;
-			const rect = videoTrack.getBoundingClientRect();
-			const clickX = e.clientX - rect.left;
-			const pct = clickX / rect.width;
-			p.currentTime = pct * p.duration;
-			const calculatedPercent = pct * 100;
-			for (let i = 0; i < timelinePlayheadsLive.length; i++) {
-				timelinePlayheadsLive[i].style.left = `${calculatedPercent}%`;
-			}
-		});
-		videoTrack.dataset.hasClickListener = "true";
+/** Sequence mode: playheads + seek on every video/audio track in the host. */
+const setupSequenceTracks = (totalDuration) => {
+	const duration = totalDuration || getTimelineDuration();
+	const host = document.getElementById("timeline-tracks-host");
+	if (!host) return;
+
+	const tracks = host.querySelectorAll(
+		".sequence-video-track, .sequence-audio-track, #timeline-video-track, #timeline-audio-track",
+	);
+	for (const track of tracks) {
+		// Outer spine stays block+relative; do not convert to flex (would reflow fills)
+		track.style.position = "relative";
+		track.style.display = "block";
+		track.style.width = "100%";
+		track.style.overflow = "hidden";
+		// Re-assert each segment fill geometry if present
+		const fill = track.querySelector(".sequence-segment-fill");
+		if (fill?.dataset.leftPct != null && fill?.dataset.widthPct != null) {
+			fill.style.position = "absolute";
+			fill.style.top = "0";
+			fill.style.bottom = "0";
+			fill.style.left = `${fill.dataset.leftPct}%`;
+			fill.style.width = `${fill.dataset.widthPct}%`;
+			fill.style.maxWidth = `${fill.dataset.widthPct}%`;
+			fill.style.right = "auto";
+		}
+		appendPlayheadToTrack(track, duration);
+		attachTrackSeekListener(track);
+	}
+
+	// Also ensure ruler playhead is current
+	const rulerTrack = document.getElementById("timeline-ruler-track");
+	if (rulerTrack) {
+		appendPlayheadToTrack(rulerTrack, duration);
 	}
 };
 
-const renderAudioWaveformCanvas = () => {
-	const player = getPlayer();
-	const audioTrack = document.getElementById("timeline-audio-track");
-	if (!audioTrack || !player) return;
-	audioTrack.innerHTML = "";
-	audioTrack.style.position = "relative";
+/** Paint waveform peaks into a target element (segment fill or full audio track). */
+const renderWaveformInto = (targetEl, data) => {
+	if (!targetEl) return;
+	// Preserve absolute playhead siblings: clear only non-playhead children when re-filling a segment
+	const existingCanvas = targetEl.querySelector("canvas");
+	if (existingCanvas) existingCanvas.remove();
 
-	// Create playhead
-	const playhead = document.createElement("div");
-	playhead.className =
-		"sequencer-playhead absolute top-0 bottom-0 w-0.5 bg-blue-600 dark:bg-blue-500 pointer-events-none z-30";
-	const duration = player.duration || 1;
-	playhead.style.left = `${((player.currentTime || 0) / duration) * 100}%`;
-	audioTrack.appendChild(playhead);
-
-	// Add click to seek
-	if (!audioTrack.dataset.hasClickListener) {
-		audioTrack.addEventListener("click", (e) => {
-			const p = getPlayer();
-			if (!p?.duration) return;
-			const rect = audioTrack.getBoundingClientRect();
-			const clickX = e.clientX - rect.left;
-			const pct = clickX / rect.width;
-			p.currentTime = pct * p.duration;
-			const calculatedPercent = pct * 100;
-			for (let i = 0; i < timelinePlayheadsLive.length; i++) {
-				timelinePlayheadsLive[i].style.left = `${calculatedPercent}%`;
-			}
-		});
-		audioTrack.dataset.hasClickListener = "true";
-	}
-
-	const data = window.currentWaveformData;
 	if (!data || data.length === 0) return;
 
 	const canvas = document.createElement("canvas");
 	canvas.style.width = "100%";
 	canvas.style.height = "100%";
-	audioTrack.appendChild(canvas);
+	canvas.style.display = "block";
+	targetEl.appendChild(canvas);
 
-	const observer = new ResizeObserver(() => {
-		const rect = audioTrack.getBoundingClientRect();
+	const paint = () => {
+		const rect = targetEl.getBoundingClientRect();
 		if (rect.width === 0 || rect.height === 0) return;
 
 		const dpr = window.devicePixelRatio || 1;
@@ -243,7 +350,7 @@ const renderAudioWaveformCanvas = () => {
 
 		const ctx = canvas.getContext("2d");
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
-		ctx.scale(dpr, dpr);
+		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
 		const midY = rect.height / 2;
 		ctx.beginPath();
@@ -260,8 +367,68 @@ const renderAudioWaveformCanvas = () => {
 			ctx.lineTo(x, midY + amp);
 		}
 		ctx.stroke();
-	});
-	observer.observe(audioTrack);
+	};
+
+	const observer = new ResizeObserver(() => paint());
+	observer.observe(targetEl);
+	requestAnimationFrame(paint);
+};
+
+const renderAudioWaveformCanvas = () => {
+	const player = getPlayer();
+	const audioTrack = document.getElementById("timeline-audio-track");
+	if (!audioTrack || !player) return;
+	audioTrack.innerHTML = "";
+	audioTrack.style.position = "relative";
+
+	const duration = isSequenceMode()
+		? getTimelineDuration()
+		: player.duration || 1;
+	appendPlayheadToTrack(audioTrack, duration);
+	attachTrackSeekListener(audioTrack);
+
+	const data = window.currentWaveformData;
+	if (!data || data.length === 0) return;
+
+	renderWaveformInto(audioTrack, data);
+};
+
+/**
+ * Collect markers for timeline shading: solo = active markers (local);
+ * multi = all sources in active run, positions in sequence time.
+ */
+const getTimelineMarkerEntries = () => {
+	const duration = getTimelineDuration();
+	if (
+		isSequenceMode() &&
+		typeof window.getActiveJoinRun === "function" &&
+		typeof window.sourceTimeToSequence === "function"
+	) {
+		const run = window.getActiveJoinRun();
+		const entries = [];
+		for (const seg of run.segments) {
+			const sourceMarkers =
+				seg.queueIndex === activeQueueIndex
+					? markers || []
+					: seg.video?.appState?.markers || [];
+			for (const marker of sourceMarkers) {
+				const seqT = window.sourceTimeToSequence(
+					seg.queueIndex,
+					marker.startTime,
+					run,
+				);
+				entries.push({
+					...marker,
+					startTime: seqT,
+					_localStartTime: marker.startTime,
+					_queueIndex: seg.queueIndex,
+				});
+			}
+		}
+		entries.sort((a, b) => a.startTime - b.startTime);
+		return { entries, duration };
+	}
+	return { entries: markers || [], duration };
 };
 
 const paintTimelineMarkersAndShading = () => {
@@ -274,43 +441,62 @@ const paintTimelineMarkersAndShading = () => {
 		cachedVideoElement = document.querySelector("video");
 	}
 	const videoElement = player || cachedVideoElement;
-	if (!videoElement?.duration) return;
+	if (!videoElement?.duration && !isSequenceMode()) return;
 
-	const duration = videoElement.duration;
+	const { entries, duration } = getTimelineMarkerEntries();
+	if (!duration) return;
+
 	const fragment = document.createDocumentFragment();
 
-	// Start/End Trimming Shading
-	const startMarker = markers.find(
-		(m) => m.type === "in" || m.type === "start",
-	);
-	if (startMarker && startMarker.startTime > 0) {
-		const startPct = (startMarker.startTime / duration) * 100;
-		const startShade = document.createElement("div");
-		startShade.className =
-			"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
-		startShade.style.left = "0%";
-		startShade.style.width = `${startPct}%`;
-		fragment.appendChild(startShade);
-	}
+	// Start/End Trimming Shading (solo mode, local times)
+	if (!isSequenceMode()) {
+		const startMarker = entries.find(
+			(m) => m.type === "in" || m.type === "start",
+		);
+		if (startMarker && startMarker.startTime > 0) {
+			const startPct = (startMarker.startTime / duration) * 100;
+			const startShade = document.createElement("div");
+			startShade.className =
+				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
+			startShade.style.left = "0%";
+			startShade.style.width = `${startPct}%`;
+			fragment.appendChild(startShade);
+		}
 
-	const endMarker = markers.find((m) => m.type === "out" || m.type === "end");
-	if (endMarker && endMarker.startTime < duration) {
-		const endPct = (endMarker.startTime / duration) * 100;
-		const endShade = document.createElement("div");
-		endShade.className = "absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
-		endShade.style.left = `${endPct}%`;
-		endShade.style.width = `${100 - endPct}%`;
-		fragment.appendChild(endShade);
+		const endMarker = entries.find((m) => m.type === "out" || m.type === "end");
+		if (endMarker && endMarker.startTime < duration) {
+			const endPct = (endMarker.startTime / duration) * 100;
+			const endShade = document.createElement("div");
+			endShade.className =
+				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
+			endShade.style.left = `${endPct}%`;
+			endShade.style.width = `${100 - endPct}%`;
+			fragment.appendChild(endShade);
+		}
+	} else {
+		// Multi: shade gaps outside each segment? Skip trim shades; draw join boundaries lightly
+		const run = window.getActiveJoinRun?.();
+		if (run?.segments) {
+			for (let i = 1; i < run.segments.length; i += 1) {
+				const boundaryPct = (run.segments[i].offset / duration) * 100;
+				const joinLine = document.createElement("div");
+				joinLine.className =
+					"absolute top-0 bottom-0 w-px bg-blue-500/50 dark:bg-blue-400/40 z-10";
+				joinLine.style.left = `${boundaryPct}%`;
+				joinLine.title = "Join";
+				fragment.appendChild(joinLine);
+			}
+		}
 	}
 
 	// Loop through markers sequentially
-	for (let i = 0; i < markers.length; i += 1) {
-		const marker = markers[i];
+	for (let i = 0; i < entries.length; i += 1) {
+		const marker = entries[i];
 		const markerLeft = (marker.startTime / duration) * 100;
 
 		// Jump Skipping Shading
 		if (marker.type === "jump") {
-			const nextMarker = markers[i + 1];
+			const nextMarker = entries[i + 1];
 			const endTime = nextMarker ? nextMarker.startTime : duration;
 			const endPct = (endTime / duration) * 100;
 			const widthPct = endPct - markerLeft;
@@ -326,7 +512,7 @@ const paintTimelineMarkersAndShading = () => {
 
 		// Loop sequence highlight span
 		if (marker.type === "loop") {
-			const nextMarker = markers[i + 1];
+			const nextMarker = entries[i + 1];
 			const endTime = nextMarker ? nextMarker.startTime : duration;
 			const endPct = (endTime / duration) * 100;
 			const widthPct = endPct - markerLeft;
@@ -371,5 +557,7 @@ const paintTimelineMarkersAndShading = () => {
 window.syncTimelinePlayheadSmoothly = syncTimelinePlayheadSmoothly;
 window.paintTimelineRuler = paintTimelineRuler;
 window.setupVideoTrack = setupVideoTrack;
+window.setupSequenceTracks = setupSequenceTracks;
 window.renderAudioWaveformCanvas = renderAudioWaveformCanvas;
+window.renderWaveformInto = renderWaveformInto;
 window.paintTimelineMarkersAndShading = paintTimelineMarkersAndShading;
