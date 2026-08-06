@@ -54,6 +54,104 @@ window._sequenceContinuePlay = false;
 window._softHandoffVolumeActive = false;
 window._softHandoffAudio = null;
 window._joinTimelineRebuildTimer = null;
+
+/** Clamp transport volume to HTMLMediaElement range [0, 1]. */
+const clampVolume01 = (v, fallback = 1) => {
+	const n = Number(v);
+	if (!Number.isFinite(n)) return fallback;
+	return Math.min(1, Math.max(0, n));
+};
+
+/** True when a queue item has an explicit per-clip volume (including 0). */
+const queueItemHasOwnVolume = (video) =>
+	!!video &&
+	video.volumeLevel !== undefined &&
+	video.volumeLevel !== null &&
+	Number.isFinite(Number(video.volumeLevel));
+
+/**
+ * Resolve volume for a queue index: use that clip's remembered level if set,
+ * otherwise walk backward and inherit the nearest previous clip's volume.
+ * Falls back to current global volumeLevel.
+ */
+const resolveVolumeForQueueIndex = (index) => {
+	const fallbackVol = clampVolume01(
+		typeof volumeLevel !== "undefined" ? volumeLevel : 1,
+		1,
+	);
+	const fallbackMuted =
+		typeof player !== "undefined" && player ? !!player.muted : false;
+	if (
+		typeof videoQueue === "undefined" ||
+		!videoQueue.length ||
+		index === undefined ||
+		index === null
+	) {
+		return { volume: fallbackVol, muted: fallbackMuted, sourceIndex: -1 };
+	}
+	const i0 = Math.max(0, Math.min(index, videoQueue.length - 1));
+	for (let i = i0; i >= 0; i -= 1) {
+		const v = videoQueue[i];
+		if (queueItemHasOwnVolume(v)) {
+			return {
+				volume: clampVolume01(v.volumeLevel, fallbackVol),
+				muted:
+					v.volumeMuted !== undefined && v.volumeMuted !== null
+						? !!v.volumeMuted
+						: false,
+				sourceIndex: i,
+			};
+		}
+	}
+	return { volume: fallbackVol, muted: fallbackMuted, sourceIndex: -1 };
+};
+window.resolveVolumeForQueueIndex = resolveVolumeForQueueIndex;
+
+/** Persist volume/mute on a queue item (source-local). */
+const rememberVolumeOnQueueIndex = (index, volume, muted) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		index < 0 ||
+		index >= videoQueue.length ||
+		!videoQueue[index]
+	) {
+		return;
+	}
+	videoQueue[index].volumeLevel = clampVolume01(volume, volumeLevel);
+	if (muted !== undefined && muted !== null) {
+		videoQueue[index].volumeMuted = !!muted;
+	}
+};
+window.rememberVolumeOnQueueIndex = rememberVolumeOnQueueIndex;
+
+/**
+ * Apply volume + mute to player, global volumeLevel, and transport UI.
+ * volumeSlider is 0–1 (not percent). volumeValue text is percent 0–100.
+ */
+const applyTransportVolume = (volume, muted) => {
+	const vol = clampVolume01(volume, volumeLevel);
+	const isMuted = !!muted;
+	if (typeof player !== "undefined" && player) {
+		player.volume = vol;
+		player.muted = isMuted;
+	}
+	volumeLevel = vol;
+	if (DOM?.volumeOnIcon && DOM?.volumeOffIcon) {
+		DOM.volumeOnIcon.classList.toggle("hidden", isMuted);
+		DOM.volumeOffIcon.classList.toggle("hidden", !isMuted);
+	}
+	if (typeof volumeSlider !== "undefined" && volumeSlider) {
+		// Range input max=1 — never write percent (e.g. 10) or it clamps to 100%
+		volumeSlider.value = isMuted ? 0 : vol;
+	}
+	if (DOM?.volumeValue) {
+		DOM.volumeValue.textContent = isMuted
+			? "0"
+			: String(Math.round(vol * 100));
+	}
+	return { volume: vol, muted: isMuted };
+};
+window.applyTransportVolume = applyTransportVolume;
 window._sequenceMode = {
 	active: false,
 	totalDuration: 0,
@@ -453,18 +551,38 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 
 	const wasPlaying = typeof player !== "undefined" && player && !player.paused;
 	const shouldPlay = play === true ? true : play === false ? false : wasPlaying;
-	const seekVol =
+	const leavingIndex = activeQueueIndex;
+	const leavingVol =
 		typeof player !== "undefined" && player && Number.isFinite(player.volume)
 			? player.volume
 			: volumeLevel;
-	const seekMuted =
+	const leavingMuted =
 		typeof player !== "undefined" && player ? !!player.muted : false;
 	let switchedSource = false;
+	// Target audio: per-clip remembered volume, else inherit previous
+	let targetAudio = {
+		volume: leavingVol,
+		muted: leavingMuted,
+	};
 
 	if (mapped.queueIndex !== activeQueueIndex) {
 		switchedSource = true;
+		// Remember volume on the clip we leave
+		rememberVolumeOnQueueIndex(leavingIndex, leavingVol, leavingMuted);
+		targetAudio = resolveVolumeForQueueIndex(mapped.queueIndex);
+		// If target has no own volume, inherit the volume we just left with
+		if (!queueItemHasOwnVolume(videoQueue[mapped.queueIndex])) {
+			targetAudio = {
+				volume: clampVolume01(leavingVol),
+				muted: leavingMuted,
+				sourceIndex: leavingIndex,
+			};
+		}
 		window._softHandoffVolumeActive = true;
-		window._softHandoffAudio = { volume: seekVol, muted: seekMuted };
+		window._softHandoffAudio = {
+			volume: targetAudio.volume,
+			muted: targetAudio.muted,
+		};
 		// Silent switch into target source without toast spam
 		preserveClipBounds = true;
 		if (typeof saveLocalState === "function") saveLocalState();
@@ -498,10 +616,7 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		}
 		if (typeof player !== "undefined" && player) {
 			await waitForPlayerReadyToSeek(player);
-			// Preserve volume across soft source switch
-			player.volume = seekVol;
-			player.muted = seekMuted;
-			volumeLevel = seekVol;
+			applyTransportVolume(targetAudio.volume, targetAudio.muted);
 		}
 		if (!silent) {
 			showToast(`Switched to: ${currentVideo.videoName}`, "success");
@@ -514,9 +629,10 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		} catch (err) {
 			console.warn("[Playback] sequence seek failed:", err);
 		}
-		// Re-assert audio after seek/play in case loadedmetadata raced
-		player.volume = seekVol;
-		player.muted = seekMuted;
+		// Re-assert target audio after seek/play in case loadedmetadata raced
+		if (switchedSource) {
+			applyTransportVolume(targetAudio.volume, targetAudio.muted);
+		}
 		if (shouldPlay) {
 			void player
 				.play()
@@ -524,8 +640,9 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 					console.warn("[Playback] sequence seek play() blocked:", err),
 				)
 				.finally(() => {
-					player.volume = seekVol;
-					player.muted = seekMuted;
+					if (switchedSource) {
+						applyTransportVolume(targetAudio.volume, targetAudio.muted);
+					}
 					// Reveal after a paint so first frame is more likely present
 					requestAnimationFrame(() => hideHandoffFreezeFrame());
 				});
@@ -583,18 +700,33 @@ const handoffToNextJoinedClip = async () => {
 		(typeof player !== "undefined" && player && !player.paused);
 	window._sequenceContinuePlay = true;
 
-	// Capture audio before softHandoff loadVideo (also stashed inside loadVideo)
+	// Capture leaving-clip audio, remember it, resolve target (own or inherit previous)
+	const leavingIndex = activeQueueIndex;
 	const handoffVolume =
 		typeof player !== "undefined" && player && Number.isFinite(player.volume)
 			? player.volume
 			: volumeLevel;
 	const handoffMuted =
 		typeof player !== "undefined" && player ? !!player.muted : false;
+	rememberVolumeOnQueueIndex(leavingIndex, handoffVolume, handoffMuted);
+
+	const nextIndex = activeQueueIndex + 1;
+	let targetAudio = resolveVolumeForQueueIndex(nextIndex);
+	// Explicit inherit: if next has no remembered volume, keep leaving clip's level
+	if (!queueItemHasOwnVolume(videoQueue[nextIndex])) {
+		targetAudio = {
+			volume: clampVolume01(handoffVolume),
+			muted: handoffMuted,
+			sourceIndex: leavingIndex,
+		};
+	}
 	window._softHandoffVolumeActive = true;
-	window._softHandoffAudio = { volume: handoffVolume, muted: handoffMuted };
+	window._softHandoffAudio = {
+		volume: targetAudio.volume,
+		muted: targetAudio.muted,
+	};
 
 	try {
-		const nextIndex = activeQueueIndex + 1;
 		const next = videoQueue[nextIndex];
 
 		preserveClipBounds = true;
@@ -639,24 +771,8 @@ const handoffToNextJoinedClip = async () => {
 			} catch (err) {
 				console.warn("[Playback] join handoff seek failed:", err);
 			}
-			// Re-apply pre-handoff volume/mute after canplay/seek (unless user muted intentionally)
-			player.volume = handoffVolume;
-			player.muted = handoffMuted;
-			volumeLevel = handoffVolume;
-			if (DOM.volumeOnIcon && DOM.volumeOffIcon) {
-				DOM.volumeOnIcon.classList.toggle("hidden", handoffMuted);
-				DOM.volumeOffIcon.classList.toggle("hidden", !handoffMuted);
-			}
-			if (volumeSlider) {
-				volumeSlider.value = handoffMuted
-					? 0
-					: Math.round(handoffVolume * 100);
-			}
-			if (DOM.volumeValue) {
-				DOM.volumeValue.textContent = handoffMuted
-					? "0"
-					: Math.round(handoffVolume * 100).toString();
-			}
+			// Apply target clip volume (own or inherited) — never force 100% / mute-on-load
+			applyTransportVolume(targetAudio.volume, targetAudio.muted);
 			// Refresh sequence mode so playhead uses run duration for next segment
 			syncSequenceModeState();
 			if (resumeAfterLoad || window._sequenceContinuePlay) {
@@ -666,8 +782,7 @@ const handoffToNextJoinedClip = async () => {
 					console.warn("[Playback] join handoff play() blocked:", err);
 				}
 				// Play can race with mute-on-load; re-assert once more after play
-				player.volume = handoffVolume;
-				player.muted = handoffMuted;
+				applyTransportVolume(targetAudio.volume, targetAudio.muted);
 			}
 			// Drop freeze after paint of new source
 			requestAnimationFrame(() => {
@@ -2914,20 +3029,14 @@ const initializePlayer = () => {
 					: volumeLevel
 				: volumeLevel;
 			const muted = softAudio ? !!softAudio.muted : !!player.muted;
-			player.volume = vol;
-			player.muted = muted;
-			volumeLevel = vol;
-			if (DOM.volumeOnIcon && DOM.volumeOffIcon) {
-				DOM.volumeOnIcon.classList.toggle("hidden", muted);
-				DOM.volumeOffIcon.classList.toggle("hidden", !muted);
-			}
-			if (volumeSlider) {
-				volumeSlider.value = muted ? 0 : Math.round(vol * 100);
-			}
-			if (DOM.volumeValue) {
-				DOM.volumeValue.textContent = muted
-					? "0"
-					: Math.round(vol * 100).toString();
+			if (typeof applyTransportVolume === "function") {
+				applyTransportVolume(vol, muted);
+			} else if (typeof window.applyTransportVolume === "function") {
+				window.applyTransportVolume(vol, muted);
+			} else {
+				player.volume = clampVolume01(vol);
+				player.muted = muted;
+				volumeLevel = player.volume;
 			}
 			// Keep capture until handoff/seek finally clears the active flag
 			toConsole(
@@ -2936,20 +3045,42 @@ const initializePlayer = () => {
 				debuggin,
 			);
 		} else if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
-			player.volume = volumeLevel;
-			player.muted = false;
-			DOM.volumeOnIcon.classList.remove("hidden");
-			DOM.volumeOffIcon.classList.add("hidden");
-			volumeSlider.value = Math.round(volumeLevel * 100);
-			DOM.volumeValue.textContent = Math.round(volumeLevel * 100).toString();
+			// Prefer per-clip remembered volume when available
+			const resolved =
+				typeof resolveVolumeForQueueIndex === "function"
+					? resolveVolumeForQueueIndex(activeQueueIndex)
+					: { volume: volumeLevel, muted: false };
+			if (typeof applyTransportVolume === "function") {
+				applyTransportVolume(resolved.volume, false);
+			} else {
+				player.volume = clampVolume01(resolved.volume);
+				player.muted = false;
+				volumeLevel = player.volume;
+				if (volumeSlider) volumeSlider.value = volumeLevel;
+				if (DOM.volumeValue) {
+					DOM.volumeValue.textContent = String(Math.round(volumeLevel * 100));
+				}
+				DOM.volumeOnIcon?.classList.remove("hidden");
+				DOM.volumeOffIcon?.classList.add("hidden");
+			}
 			toConsole("Audio file unmuted on load", "Success", debuggin);
 		} else {
-			player.volume = volumeLevel;
-			player.muted = true;
-			DOM.volumeOnIcon.classList.add("hidden");
-			DOM.volumeOffIcon.classList.remove("hidden");
-			volumeSlider.value = 0;
-			DOM.volumeValue.textContent = "0";
+			// Hard load: keep existing mute-on-load UX, but volume from per-clip memory
+			const resolved =
+				typeof resolveVolumeForQueueIndex === "function"
+					? resolveVolumeForQueueIndex(activeQueueIndex)
+					: { volume: volumeLevel, muted: true };
+			if (typeof applyTransportVolume === "function") {
+				applyTransportVolume(resolved.volume, true);
+			} else {
+				player.volume = clampVolume01(resolved.volume);
+				player.muted = true;
+				volumeLevel = player.volume;
+				if (volumeSlider) volumeSlider.value = 0;
+				if (DOM.volumeValue) DOM.volumeValue.textContent = "0";
+				DOM.volumeOnIcon?.classList.add("hidden");
+				DOM.volumeOffIcon?.classList.remove("hidden");
+			}
 			toConsole("Video muted on load", "Success", debuggin);
 		}
 
@@ -3468,32 +3599,26 @@ const initializePlayer = () => {
 	if (closeHelpBtnX) closeHelpBtnX.addEventListener("click", closeModal);
 
 	muteButton.addEventListener("click", () => {
-		player.muted = !player.muted;
-		DOM.volumeOnIcon.classList.toggle("hidden", player.muted);
-		DOM.volumeOffIcon.classList.toggle("hidden", !player.muted);
-		toConsole("Mute toggled", player.muted, debuggin);
-		if (!player.muted && volumeLevel === 0) {
-			volumeLevel = 1;
-			player.volume = 1;
-			saveLocalState();
+		const nextMuted = !player.muted;
+		let vol = clampVolume01(volumeLevel);
+		if (!nextMuted && vol === 0) {
+			vol = 1;
 		}
-		volumeSlider.value = player.muted ? 0 : volumeLevel;
-		DOM.volumeValue.textContent = player.muted
-			? "0"
-			: Math.round(volumeLevel * 100);
+		applyTransportVolume(vol, nextMuted);
+		rememberVolumeOnQueueIndex(activeQueueIndex, vol, nextMuted);
+		toConsole("Mute toggled", nextMuted, debuggin);
+		saveLocalState();
 	});
 
 	volumeSlider.addEventListener(
 		"input",
 		debounce((event) => {
-			const volume = Number.parseFloat(event.target.value);
+			const volume = clampVolume01(Number.parseFloat(event.target.value));
 			if (!Number.isNaN(volume)) {
-				player.volume = volume;
-				volumeLevel = volume;
-				player.muted = volume === 0;
-				DOM.volumeOnIcon.classList.toggle("hidden", player.muted);
-				DOM.volumeOffIcon.classList.toggle("hidden", !player.muted);
-				DOM.volumeValue.textContent = Math.round(volume * 100);
+				const muted = volume === 0;
+				applyTransportVolume(volume, muted);
+				// User-set volume is remembered on this clip for later join handoffs
+				rememberVolumeOnQueueIndex(activeQueueIndex, volume, muted);
 				toConsole("Volume adjusted", volume, debuggin);
 				saveLocalState();
 			}

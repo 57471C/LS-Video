@@ -130,6 +130,8 @@ const saveLocalState = () => {
 	videoQueue[activeQueueIndex].videoFilePath = videoFilePath;
 	videoQueue[activeQueueIndex].clipInTime = clipInTime;
 	videoQueue[activeQueueIndex].clipOutTime = clipOutTime;
+	// Per-clip volume is written only via rememberVolumeOnQueueIndex (slider/mute/handoff leave)
+	// so unset clips can inherit the previous clip's level across joins.
 	videoQueue[activeQueueIndex].appState = { markers };
 	// Drop legacy field names if still present on the active slot
 	delete videoQueue[activeQueueIndex].processStartTime;
