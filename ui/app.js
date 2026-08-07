@@ -1676,19 +1676,110 @@ if (window.__TAURI__ !== undefined) {
 
 // 3. Media Initialization & Streaming Event Subsystems
 /**
+ * CC button visual states (transport chrome):
+ * - none: no VTT/tracks → dark/muted/disabled
+ * - available: VTT present, captions OFF → normal/white idle
+ * - active: VTT present, captions ON → green glow
+ *
+ * @param {"none"|"available"|"active"} state
+ */
+window.setCcButtonState = (state) => {
+	const btn = document.getElementById("ccToggleBtn");
+	const next =
+		state === "active" || state === "available" || state === "none"
+			? state
+			: "none";
+
+	window.ccAvailable = next !== "none";
+	window.isCcActive = next === "active";
+	window.captionsVisible = next === "active";
+
+	if (!btn) return;
+
+	btn.classList.remove(
+		"btn-icon-cc-none",
+		"btn-icon-cc-available",
+		"btn-icon-cc-active",
+		// legacy ad-hoc color classes
+		"text-yellow-500",
+		"dark:text-yellow-400",
+		"text-zinc-400",
+		"dark:text-zinc-600",
+		"text-green-500",
+		"dark:text-green-400",
+		"text-white",
+		"dark:text-white",
+	);
+
+	if (next === "none") {
+		btn.classList.add("btn-icon-cc-none");
+		btn.setAttribute("disabled", "true");
+		btn.setAttribute("aria-pressed", "false");
+		btn.setAttribute("aria-disabled", "true");
+		btn.title = "Closed Captions (none available)";
+	} else if (next === "available") {
+		btn.classList.add("btn-icon-cc-available");
+		btn.removeAttribute("disabled");
+		btn.setAttribute("aria-pressed", "false");
+		btn.setAttribute("aria-disabled", "false");
+		btn.title = "Show Closed Captions";
+	} else {
+		// active
+		btn.classList.add("btn-icon-cc-active");
+		btn.removeAttribute("disabled");
+		btn.setAttribute("aria-pressed", "true");
+		btn.setAttribute("aria-disabled", "false");
+		btn.title = "Hide Closed Captions";
+	}
+};
+
+/**
+ * Derive and apply CC button state from flags / player tracks.
+ * @param {{ available?: boolean, active?: boolean }} [opts]
+ */
+window.updateCcButtonState = (opts = {}) => {
+	let available =
+		typeof opts.available === "boolean" ? opts.available : !!window.ccAvailable;
+	let active =
+		typeof opts.active === "boolean" ? opts.active : !!window.isCcActive;
+
+	// Prefer live textTracks when not explicitly overridden
+	if (opts.available === undefined || opts.active === undefined) {
+		const videoEl =
+			(typeof player !== "undefined" && player) ||
+			document.getElementById("my_video") ||
+			document.querySelector("video");
+		if (videoEl?.textTracks?.length > 0) {
+			let anyTrack = false;
+			let anyShowing = false;
+			for (let i = 0; i < videoEl.textTracks.length; i++) {
+				const t = videoEl.textTracks[i];
+				if (!t) continue;
+				anyTrack = true;
+				if (t.mode === "showing") anyShowing = true;
+			}
+			if (opts.available === undefined) available = anyTrack || available;
+			if (opts.active === undefined) active = anyShowing;
+		}
+	}
+
+	if (!available) {
+		window.setCcButtonState("none");
+	} else if (active) {
+		window.setCcButtonState("active");
+	} else {
+		window.setCcButtonState("available");
+	}
+};
+
+/**
  * Remove all <track> elements and disable textTracks on the player so old
  * captions cannot stick after media replace. Does NOT clear video.src.
  */
 window.clearSubtitleTracks = () => {
 	window.currentCaptions = [];
+	window.ccAvailable = false;
 	window.isCcActive = false;
-
-	const ccToggleBtn = document.getElementById("ccToggleBtn");
-	if (ccToggleBtn) {
-		ccToggleBtn.setAttribute("disabled", "true");
-		ccToggleBtn.classList.remove("text-yellow-500", "dark:text-yellow-400");
-		ccToggleBtn.classList.add("text-zinc-400", "dark:text-zinc-600");
-	}
 
 	const videoPlayer =
 		(typeof player !== "undefined" && player) ||
@@ -1727,6 +1818,11 @@ window.clearSubtitleTracks = () => {
 	const transcriptContainer = document.getElementById("transcript-list");
 	if (transcriptContainer) {
 		transcriptContainer.innerHTML = "";
+	}
+
+	// Clear green + availability when CC is wiped on media change
+	if (typeof window.setCcButtonState === "function") {
+		window.setCcButtonState("none");
 	}
 };
 
@@ -1828,16 +1924,32 @@ window.loadSubtitleTrack = async (filePath) => {
 		(typeof player !== "undefined" && player) ||
 		document.getElementById("my_video") ||
 		document.querySelector("video");
-	if (!videoEl || !filePath) return;
+	if (!videoEl || !filePath) {
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("none");
+		}
+		return;
+	}
 
 	const isTauri = window.__TAURI__ !== undefined;
-	if (!isTauri) return;
+	if (!isTauri) {
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("none");
+		}
+		return;
+	}
 
 	try {
 		const vttPath = await window.__TAURI__.core.invoke("resolve_subtitles", {
 			videoPath: filePath,
 		});
-		if (!vttPath) return;
+		if (!vttPath) {
+			// No sidecar — keep dark/disabled
+			if (typeof window.setCcButtonState === "function") {
+				window.setCcButtonState("none");
+			}
+			return;
+		}
 
 		const ccTrack = document.createElement("track");
 		ccTrack.id = "ccTrack";
@@ -1848,8 +1960,8 @@ window.loadSubtitleTrack = async (filePath) => {
 		ccTrack.src = window.__TAURI__.core.convertFileSrc(vttPath);
 		videoEl.appendChild(ccTrack);
 
-		// Force showing so CC appears immediately after load/generate
-		setTimeout(() => {
+		// Show immediately after successful resolve so state is available+active
+		const showTracks = () => {
 			for (let i = 0; i < videoEl.textTracks.length; i++) {
 				const t = videoEl.textTracks[i];
 				t.mode =
@@ -1857,20 +1969,23 @@ window.loadSubtitleTrack = async (filePath) => {
 						? "showing"
 						: "disabled";
 			}
-		}, 50);
+			if (typeof window.setCcButtonState === "function") {
+				window.setCcButtonState("active");
+			}
+		};
+		setTimeout(showTracks, 50);
 
 		toConsole("Loaded subtitle track", vttPath, debuggin);
-		const ccToggleBtn = document.getElementById("ccToggleBtn");
-		if (ccToggleBtn) {
-			ccToggleBtn.removeAttribute("disabled");
-			ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
-			ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
+		// Available immediately; green once modes apply
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("active");
 		}
-		window.isCcActive = true;
-		window.captionsVisible = true;
 		// No Whisper auto-caption fallback — sidecars via resolve_subtitles / save_vtt_file only
 	} catch (err) {
 		toConsole("Error resolving subtitles", err, debuggin);
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("none");
+		}
 	}
 };
 
@@ -1884,7 +1999,12 @@ window.attachSubtitleTrackFromPath = (vttFilePath) => {
 		(typeof player !== "undefined" && player) ||
 		document.getElementById("my_video") ||
 		document.querySelector("video");
-	if (!videoEl || !vttFilePath) return;
+	if (!videoEl || !vttFilePath) {
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("none");
+		}
+		return;
+	}
 
 	const convertFn =
 		window.__TAURI__?.core?.convertFileSrc ||
@@ -1902,7 +2022,7 @@ window.attachSubtitleTrackFromPath = (vttFilePath) => {
 	track.src = src;
 	videoEl.appendChild(track);
 
-	setTimeout(() => {
+	const showTracks = () => {
 		for (let i = 0; i < videoEl.textTracks.length; i++) {
 			const t = videoEl.textTracks[i];
 			t.mode =
@@ -1910,16 +2030,16 @@ window.attachSubtitleTrackFromPath = (vttFilePath) => {
 					? "showing"
 					: "disabled";
 		}
-	}, 50);
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("active");
+		}
+	};
+	setTimeout(showTracks, 50);
 
-	const ccToggleBtn = document.getElementById("ccToggleBtn");
-	if (ccToggleBtn) {
-		ccToggleBtn.removeAttribute("disabled");
-		ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
-		ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
+	// Generate CC path: track present and shown → green active
+	if (typeof window.setCcButtonState === "function") {
+		window.setCcButtonState("active");
 	}
-	window.isCcActive = true;
-	window.captionsVisible = true;
 };
 
 /** Browser download fallback when the video folder is not writable. */
@@ -6629,47 +6749,65 @@ window.formatVttTimestamp = (seconds) => {
 const VTT_DEFAULT_CUE_HOLD_SEC = 3;
 
 window.toggleClosedCaptions = () => {
-	if (typeof window.isCcActive === "undefined") {
-		window.isCcActive = false;
+	// No VTT / no tracks: disabled control — click is a silent no-op
+	if (!window.ccAvailable && !window.isCcActive) {
+		const videoProbe =
+			(typeof player !== "undefined" && player) ||
+			document.getElementById("my_video");
+		const hasTracks = !!(
+			videoProbe?.textTracks && videoProbe.textTracks.length
+		);
+		if (!hasTracks) {
+			if (typeof window.setCcButtonState === "function") {
+				window.setCcButtonState("none");
+			}
+			return;
+		}
+		// Tracks exist but flag was stale — treat as available
+		window.ccAvailable = true;
 	}
 
-	window.isCcActive = !window.isCcActive;
-
-	const videoElement = player || document.getElementById("my_video");
-	const ccToggleBtn = document.getElementById("ccToggleBtn");
-
+	const videoElement =
+		(typeof player !== "undefined" && player) ||
+		document.getElementById("my_video");
 	if (!videoElement) return;
 
-	if (window.isCcActive) {
+	const turningOn = !window.isCcActive;
+
+	if (turningOn) {
 		let trackFound = false;
 		for (let i = 0; i < videoElement.textTracks.length; i++) {
 			const label = videoElement.textTracks[i].label;
-			if (label === "Generated Captions" || label === "English") {
+			if (
+				label === "Generated Captions" ||
+				label === "English" ||
+				videoElement.textTracks[i].kind === "captions" ||
+				videoElement.textTracks[i].kind === "subtitles"
+			) {
 				videoElement.textTracks[i].mode = "showing";
 				trackFound = true;
 			}
 		}
 
-		// No track loaded yet — generate from markers if available
-		if (!trackFound && typeof window.triggerVttGeneration === "function") {
-			window.triggerVttGeneration();
+		// Still nothing to show — stay dark/disabled (do not auto-generate)
+		if (!trackFound) {
+			if (typeof window.setCcButtonState === "function") {
+				window.setCcButtonState("none");
+			}
 			return;
 		}
 
-		if (ccToggleBtn) {
-			ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
-			ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("active");
 		}
 	} else {
+		// Hide cues but keep track nodes so OFF state stays available (white)
 		for (let i = 0; i < videoElement.textTracks.length; i++) {
 			videoElement.textTracks[i].mode = "disabled";
 		}
-		// Keep track nodes (so toggle-on can re-show); only hide
-		if (ccToggleBtn) {
-			ccToggleBtn.classList.remove("text-yellow-500", "dark:text-yellow-400");
-			ccToggleBtn.classList.add("text-zinc-400", "dark:text-zinc-600");
+		if (typeof window.setCcButtonState === "function") {
+			window.setCcButtonState("available");
 		}
-		showToast("Closed captions deactivated", "info");
 	}
 };
 
@@ -6834,14 +6972,13 @@ window.triggerVttGeneration = async () => {
 							? "showing"
 							: "disabled";
 				}
+				if (typeof window.setCcButtonState === "function") {
+					window.setCcButtonState("active");
+				}
 			}, 50);
-			const ccToggleBtn = document.getElementById("ccToggleBtn");
-			if (ccToggleBtn) {
-				ccToggleBtn.removeAttribute("disabled");
-				ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
-				ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
+			if (typeof window.setCcButtonState === "function") {
+				window.setCcButtonState("active");
 			}
-			window.isCcActive = true;
 		}
 	}
 };

@@ -138,6 +138,16 @@
 	.btn-icon-highlight {
 		@apply text-amber-500 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-300 transition-colors focus:outline-none disabled:opacity-50 disabled:cursor-default;
 	}
+	/* Closed captions transport control — three visual states */
+	.btn-icon-cc-none {
+		@apply text-zinc-400 dark:text-zinc-600 opacity-40 cursor-default;
+	}
+	.btn-icon-cc-available {
+		@apply text-zinc-800 dark:text-white opacity-100 hover:text-zinc-950 dark:hover:text-white cursor-pointer;
+	}
+	.btn-icon-cc-active {
+		@apply text-green-500 dark:text-green-400 opacity-100 cursor-pointer;
+	}
 
 	/* Project Name Input */
 	.project-name-input {
@@ -253,6 +263,23 @@
 
 	#mediaControlsContainer button:hover {
 		color: #ffffff !important;
+	}
+
+	/* CC state colors must win over cinema flat white (do not flatten green/dark) */
+	#mediaControlsContainer #ccToggleBtn.btn-icon-cc-none,
+	#mediaControlsContainer #ccToggleBtn.btn-icon-cc-none:hover {
+		color: #52525b !important; /* zinc-600 muted */
+		opacity: 0.4 !important;
+	}
+	#mediaControlsContainer #ccToggleBtn.btn-icon-cc-available,
+	#mediaControlsContainer #ccToggleBtn.btn-icon-cc-available:hover {
+		color: #ffffff !important;
+		opacity: 1 !important;
+	}
+	#mediaControlsContainer #ccToggleBtn.btn-icon-cc-active,
+	#mediaControlsContainer #ccToggleBtn.btn-icon-cc-active:hover {
+		color: #4ade80 !important; /* green-400 */
+		opacity: 1 !important;
 	}
 
 	#mediaControlsContainer .form-range {
