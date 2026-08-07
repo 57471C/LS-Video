@@ -5371,7 +5371,9 @@ const initializeTrimFeature = () => {
 
 		const batchExportToggle = document.getElementById("batchExportToggle");
 		const batchExportList = document.getElementById("batch-export-list");
+		const batchStripAudio = document.getElementById("batchStripAudioToggle");
 		if (batchExportToggle) batchExportToggle.checked = false;
+		if (batchStripAudio) batchStripAudio.checked = false;
 		if (batchExportList) {
 			batchExportList.classList.add("hidden");
 			batchExportList.innerHTML = "";
@@ -5412,32 +5414,39 @@ const initializeTrimFeature = () => {
 
 	const renderBatchExportList = () => {
 		if (!batchExportList) return;
+		const jobs = buildBatchJobsFromQueue();
 		batchExportList.innerHTML = `
       <div class="flex items-center justify-between mb-2 px-1">
-        <span class="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Queue</span>
-        <label class="flex items-center gap-2 cursor-pointer group" title="Merge selected videos into a single file">
-          <span class="text-xs font-medium text-zinc-700 dark:text-zinc-300 select-none group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">Join Videos</span>
-          <div class="relative">
-            <input type="checkbox" id="joinFilesToggle" class="sr-only peer">
-            <div class="w-8 h-4 bg-zinc-300 dark:bg-zinc-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-blue-600"></div>
-          </div>
-        </label>
+        <span class="text-xs font-semibold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Export jobs (from join groups)</span>
+        <span class="text-[10px] text-zinc-500 dark:text-zinc-400">${jobs.length} output${jobs.length === 1 ? "" : "s"}</span>
       </div>
     `;
 
-		videoQueue.forEach((video, index) => {
+		if (jobs.length === 0) {
+			const empty = document.createElement("p");
+			empty.className = "text-xs text-zinc-500 dark:text-zinc-400 px-1";
+			empty.textContent = "Queue is empty or has no media paths.";
+			batchExportList.appendChild(empty);
+			return;
+		}
+
+		jobs.forEach((job, jobIndex) => {
 			const row = document.createElement("div");
 			row.className =
 				"flex items-center justify-between gap-3 p-2 mb-1.5 bg-zinc-50 dark:bg-zinc-800/40 rounded border border-zinc-200 dark:border-zinc-700 text-xs sm:text-sm";
-			const safeFileName = escapeHTML(video.videoFileName || "Unknown Video");
+			row.dataset.jobId = job.id;
+			const safeLabel = escapeHTML(job.label);
+			const badge = job.multi
+				? `<span class="flex-shrink-0 text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">Join</span>`
+				: `<span class="flex-shrink-0 text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300">Solo</span>`;
 			row.innerHTML = `
         <div class="flex items-center gap-2 flex-1 min-w-0">
-          <input type="checkbox" data-index="${index}" checked class="batch-video-checkbox rounded text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-4 h-4 cursor-pointer" />
-          <span class="font-medium truncate dark:text-zinc-300" title="${safeFileName}">${safeFileName}</span>
+          ${badge}
+          <span class="font-medium truncate dark:text-zinc-300" title="${safeLabel}">${safeLabel}</span>
         </div>
         <div class="flex items-center gap-3 w-40 justify-end">
-          <progress id="batch-progress-${index}" value="0" max="100" class="w-24 h-1.5 rounded overflow-hidden bg-zinc-200 dark:bg-zinc-700 accent-blue-600"></progress>
-          <div id="batch-status-${index}" class="w-5 h-5 flex items-center justify-center text-zinc-400">
+          <progress id="batch-progress-${jobIndex}" value="0" max="100" class="w-24 h-1.5 rounded overflow-hidden bg-zinc-200 dark:bg-zinc-700 accent-blue-600"></progress>
+          <div id="batch-status-${jobIndex}" class="w-5 h-5 flex items-center justify-center text-zinc-400">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg>
           </div>
         </div>
@@ -5445,59 +5454,11 @@ const initializeTrimFeature = () => {
 			batchExportList.appendChild(row);
 		});
 
-		let joinBtn = document.getElementById("joinAndCompressBtn");
-		if (!joinBtn) {
-			joinBtn = document.createElement("button");
-			joinBtn.type = "button";
-			joinBtn.id = "joinAndCompressBtn";
-			joinBtn.className = "btn btn-primary font-bold tracking-wide";
-			joinBtn.style.display = "none";
-			joinBtn.textContent = "Join & Compress Selected";
-			if (trimCompressBtn?.parentNode) {
-				trimCompressBtn.parentNode.insertBefore(
-					joinBtn,
-					trimCompressBtn.nextSibling,
-				);
-			}
-
-			joinBtn.addEventListener("click", () => {
-				const checkedSegments = [];
-				const len = batchVideoCheckboxesLive.length;
-				for (let i = 0; i < len; i++) {
-					const cb = batchVideoCheckboxesLive[i];
-					if (cb.checked) {
-						const idx = Number.parseInt(cb.getAttribute("data-index"), 10);
-						const vid = videoQueue[idx];
-						if (vid?.videoFilePath) {
-							const activeMarkers = vid.appState?.markers || [];
-							const loopMarker = activeMarkers.find((m) => m.type === "loop");
-							checkedSegments.push({
-								path: vid.videoFilePath,
-								start_time: vid.clipInTime || 0.0,
-								end_time: vid.clipOutTime || 0.0,
-								loopCount: loopMarker ? loopMarker.loopCount || 1 : 1,
-							});
-						}
-					}
-				}
-				if (window.joinAndCompressVideos) {
-					window.joinAndCompressVideos(checkedSegments);
-				}
-			});
-		}
-
-		const joinFilesToggle = document.getElementById("joinFilesToggle");
-		joinFilesToggle.addEventListener("change", (e) => {
-			if (e.target.checked) {
-				if (joinBtn) joinBtn.style.display = "inline-flex";
-				if (trimOnlyBtn) trimOnlyBtn.style.display = "none";
-				if (trimCompressBtn) trimCompressBtn.style.display = "none";
-			} else {
-				if (joinBtn) joinBtn.style.display = "none";
-				if (trimOnlyBtn) trimOnlyBtn.style.display = "inline-flex";
-				if (trimCompressBtn) trimCompressBtn.style.display = "inline-flex";
-			}
-		});
+		// Keep legacy join button hidden (join groups drive batch exports now)
+		const joinBtn = document.getElementById("joinAndCompressBtn");
+		if (joinBtn) joinBtn.style.display = "none";
+		if (trimOnlyBtn) trimOnlyBtn.style.display = "inline-flex";
+		if (trimCompressBtn) trimCompressBtn.style.display = "inline-flex";
 	};
 
 	const handleCancelClick = async () => {
@@ -5557,6 +5518,110 @@ const initializeTrimFeature = () => {
 		});
 	}
 };
+
+/**
+ * Walk the playlist queue in order and build export jobs from join groups.
+ * - Contiguous joinedToNext run → one concat job
+ * - Unjoined item → solo trim job
+ * @returns {Array<{ id: string, label: string, indices: number[], segments: Array<{path:string,start_time:number,end_time:number,loop_count:number}>, fileName: string }>}
+ */
+const buildBatchJobsFromQueue = () => {
+	const jobs = [];
+	if (typeof videoQueue === "undefined" || !videoQueue.length) return jobs;
+
+	// Ensure clip bounds reflect in/out markers before export
+	for (let i = 0; i < videoQueue.length; i++) {
+		if (typeof syncClipBoundsFromMarkers === "function") {
+			syncClipBoundsFromMarkers(i);
+		}
+	}
+
+	let i = 0;
+	let jobNum = 0;
+	while (i < videoQueue.length) {
+		const start = i;
+		// Grow while this item joins to the next
+		while (i < videoQueue.length - 1 && videoQueue[i]?.joinedToNext) {
+			i += 1;
+		}
+		const end = i;
+		const indices = [];
+		for (let j = start; j <= end; j++) indices.push(j);
+
+		const segs = [];
+		const names = [];
+		for (const idx of indices) {
+			const v = videoQueue[idx];
+			if (!v?.videoFilePath) continue;
+			const path = v.videoFilePath;
+			const startT =
+				typeof getClipInTime === "function"
+					? getClipInTime(v)
+					: Number(v.clipInTime) || 0;
+			let endT =
+				typeof getClipOutTime === "function"
+					? getClipOutTime(v, idx)
+					: Number(v.clipOutTime) || 0;
+			// Fallback: markers or 0 (backend probes full duration)
+			if (endT <= 0) {
+				const marks = v.appState?.markers || [];
+				const outM = marks.find((m) => m.type === "out" || m.type === "end");
+				if (outM) endT = outM.startTime;
+			}
+			const loopM = (v.appState?.markers || []).find((m) => m.type === "loop");
+			segs.push({
+				path,
+				start_time: startT,
+				end_time: endT,
+				loop_count: loopM ? loopM.loopCount || 1 : 1,
+			});
+			const base = (
+				v.videoFileName ||
+				v.videoName ||
+				`clip_${idx + 1}`
+			).replace(/\.[^/.]+$/, "");
+			names.push(base);
+		}
+
+		if (segs.length === 0) {
+			i += 1;
+			continue;
+		}
+
+		jobNum += 1;
+		const multi = segs.length > 1;
+		let fileName;
+		if (multi) {
+			const first = names[0] || "clip";
+			const last = names[names.length - 1] || "clip";
+			const short =
+				first === last
+					? first
+					: `${first.slice(0, 24)}_to_${last.slice(0, 24)}`;
+			fileName = `sequence_${String(jobNum).padStart(3, "0")}_${short}.mp4`;
+		} else {
+			fileName = `${names[0] || `video_${jobNum}`}_export.mp4`;
+		}
+		// Sanitize filename
+		fileName = fileName.replace(/[<>:"/\\|?*]/g, "_");
+
+		const label = multi
+			? `Join ${indices.map((n) => n + 1).join("–")}: ${names.join(" + ")}`
+			: `${indices[0] + 1}. ${names[0]}`;
+
+		jobs.push({
+			id: `job_${jobNum}`,
+			label,
+			indices,
+			segments: segs,
+			fileName,
+			multi,
+		});
+		i += 1;
+	}
+	return jobs;
+};
+window.buildBatchJobsFromQueue = buildBatchJobsFromQueue;
 
 /** Calculates contiguous logical segments to retain based on marker states. */
 const getExportSegments = (markersList, videoDuration) => {
@@ -5630,7 +5695,10 @@ const getExportSegments = (markersList, videoDuration) => {
 	return segmentsToKeep;
 };
 
-/** Executes the FFmpeg export pipeline across all selected videos in the queue. */
+/**
+ * Batch-export the playlist as join groups:
+ * each contiguous joinedToNext run → one concat; each unjoined item → solo trim.
+ */
 async function processBatchQueue(presetType) {
 	const isTauri = window.__TAURI__ !== undefined;
 	if (!isTauri) {
@@ -5638,17 +5706,9 @@ async function processBatchQueue(presetType) {
 		return;
 	}
 
-	const checkedIndices = [];
-	const len = batchVideoCheckboxesLive.length;
-	for (let i = 0; i < len; i++) {
-		const cb = batchVideoCheckboxesLive[i];
-		if (cb.checked) {
-			checkedIndices.push(Number.parseInt(cb.getAttribute("data-index"), 10));
-		}
-	}
-
-	if (checkedIndices.length === 0) {
-		alert("Please select at least one video to export.");
+	const jobs = buildBatchJobsFromQueue();
+	if (jobs.length === 0) {
+		showToast("Queue is empty — nothing to export.", "error");
 		return;
 	}
 
@@ -5660,7 +5720,7 @@ async function processBatchQueue(presetType) {
 	const targetDir = await openDialog({
 		directory: true,
 		multiple: false,
-		title: "Select Output Folder for Batch",
+		title: "Select Output Folder for Batch Export",
 	});
 	if (!targetDir) {
 		console.log("Batch cancelled.");
@@ -5669,6 +5729,11 @@ async function processBatchQueue(presetType) {
 
 	const actualOutputDir =
 		typeof targetDir === "object" ? targetDir.path : targetDir;
+
+	const stripAudioEl = document.getElementById("batchStripAudioToggle");
+	const stripAudio = !!(stripAudioEl && stripAudioEl.checked);
+	const quality =
+		presetType === "copy" || !presetType ? "copy" : String(presetType);
 
 	const trimOnlyBtn = document.getElementById("trimOnlyBtn");
 	const trimCompressBtn = document.getElementById("trimCompressBtn");
@@ -5682,110 +5747,47 @@ async function processBatchQueue(presetType) {
 		cancelTrimBtn.textContent = "Abort Batch";
 	}
 
-	const originalMarkers = [...markers];
-	const originalVideoFileName = videoFileName;
-	const originalVideoFilePath = videoFilePath;
+	// Refresh job list UI (progress rows)
+	const batchExportList = document.getElementById("batch-export-list");
+	if (batchExportList && typeof renderBatchExportList === "function") {
+		// render is scoped inside initializeTrimFeature — rebuild rows inline
+		// by re-checking toggle path; list was already rendered when toggle on.
+	}
 
 	isAborted = false;
+	let okCount = 0;
+	let failCount = 0;
+
+	showToast(
+		`Batch export: ${jobs.length} job${jobs.length === 1 ? "" : "s"}${stripAudio ? " (video only)" : ""}…`,
+		"info",
+	);
+
+	const progressContainer = document.getElementById("trimProgressContainer");
+	const progressBar = document.getElementById("trimProgressBar");
+	const progressText = document.getElementById("trimProgressText");
+	const progressSpinner = document.getElementById("trimProgressSpinner");
+	if (progressContainer) progressContainer.classList.remove("hidden");
+	if (progressSpinner) progressSpinner.classList.remove("hidden");
 
 	try {
-		// 1. Prepare batch metadata & write temp files concurrently to avoid blocking the main queue loop with I/O waits
-		const batchPreparations = await Promise.all(
-			checkedIndices.map(async (index) => {
-				const video = videoQueue[index];
-				if (!video) return null;
-
-				let baseName = video.videoFileName || `video_${index + 1}`;
-				const lastDot = baseName.lastIndexOf(".");
-				if (lastDot !== -1) {
-					baseName = baseName.substring(0, lastDot);
-				}
-				const exportName = `${baseName}_export.mp4`;
-
-				let actualOutputPath = exportName;
-				if (joinPathFn) {
-					actualOutputPath = await joinPathFn(actualOutputDir, exportName);
-				} else {
-					actualOutputPath = `${actualOutputDir}\\${exportName}`;
-				}
-
-				let tempFilePath = null;
-				let exportDuration = 0;
-				let segments = [];
-				let prepError = null;
-
-				try {
-					const currentMarkers = video.appState?.markers || [];
-					currentMarkers.forEach((m) => {
-						if (!m.type) m.type = "standard";
-					});
-
-					segments = getExportSegments(currentMarkers, video.clipOutTime || 0);
-
-					if (segments.length === 0) {
-						throw new Error("No segments to export.");
-					}
-
-					exportDuration = segments.reduce(
-						(sum, seg) => sum + (seg.end - seg.start) * (seg.loopCount || 1),
-						0,
-					);
-
-					const safePath = (video.videoFilePath || "").replace(/\\/g, "/");
-					let listContent = "";
-					for (const seg of segments) {
-						const loopCount = seg.loopCount || 1;
-						for (let l = 0; l < loopCount; l++) {
-							listContent += `file '${safePath}'\n`;
-							listContent += `inpoint ${seg.start}\n`;
-							listContent += `outpoint ${seg.end}\n`;
-						}
-					}
-
-					tempFilePath = await resolveFfmpegConcatListPath(
-						`ffmpeg_concat_batch_${video.videoId || index}.txt`,
-						actualOutputPath,
-					);
-					await writeTextFile(tempFilePath, listContent);
-				} catch (e) {
-					prepError = e;
-				}
-
-				return {
-					index,
-					video,
-					actualOutputPath,
-					tempFilePath,
-					segments,
-					exportDuration,
-					prepError,
-				};
-			}),
-		);
-
-		for (const prep of batchPreparations) {
+		for (let jobIndex = 0; jobIndex < jobs.length; jobIndex++) {
 			if (isAborted) break;
-			if (!prep) continue;
+			const job = jobs[jobIndex];
 
-			const {
-				index,
-				video,
-				actualOutputPath,
-				tempFilePath,
-				segments,
-				exportDuration,
-				prepError,
-			} = prep;
+			const statusIconContainer = document.getElementById(
+				`batch-status-${jobIndex}`,
+			);
+			const specificProgressBar = document.getElementById(
+				`batch-progress-${jobIndex}`,
+			);
+			const rowContainer = statusIconContainer?.closest(
+				"[data-job-id], .flex.items-center.justify-between",
+			);
 
-			const rowContainer = document.getElementById(`batch-status-${index}`)
-				?.parentElement?.parentElement;
 			if (rowContainer) {
 				rowContainer.classList.add("border-blue-500", "bg-blue-50/10");
 			}
-
-			const statusIconContainer = document.getElementById(
-				`batch-status-${index}`,
-			);
 			if (statusIconContainer) {
 				statusIconContainer.innerHTML = `
           <svg class="animate-spin h-4 w-4 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -5794,165 +5796,72 @@ async function processBatchQueue(presetType) {
           </svg>
         `;
 			}
+			if (specificProgressBar) specificProgressBar.value = 10;
 
-			const specificProgressBar = document.getElementById(
-				`batch-progress-${index}`,
-			);
-			if (specificProgressBar) {
-				specificProgressBar.value = 0;
+			const pctOverall = Math.round((jobIndex / jobs.length) * 100);
+			if (progressBar) progressBar.style.width = `${pctOverall}%`;
+			if (progressText) {
+				progressText.textContent = `${jobIndex + 1}/${jobs.length}`;
 			}
 
+			let actualOutputPath = job.fileName;
 			try {
-				if (prepError) {
-					throw prepError;
-				}
-
-				// The global variables are updated so other code logic continues to use them correctly if needed
-				markers = video.appState?.markers || [];
-				markers.forEach((m) => {
-					if (!m.type) m.type = "standard";
-				});
-				videoFileName = video.videoFileName || "";
-				videoFilePath = video.videoFilePath || "";
-
-				const isCompression = presetType !== "copy";
-				const args = [
-					"-y",
-					"-nostdin",
-					"-nostats",
-					"-f",
-					"concat",
-					"-safe",
-					"0",
-					"-i",
-					tempFilePath,
-					"-progress",
-					"pipe:2",
-				];
-
-				if (!isCompression) {
-					args.push("-c", "copy");
+				if (joinPathFn) {
+					actualOutputPath = await joinPathFn(actualOutputDir, job.fileName);
 				} else {
-					const targetHeight = presetType === "low" ? 720 : 1080;
-					args.push(
-						"-vf",
-						`scale=-2:${targetHeight}`,
-						"-c:v",
-						"libx264",
-						"-pix_fmt",
-						"yuv420p",
-						"-crf",
-						presetType === "low" ? "32" : presetType === "high" ? "18" : "26",
-						"-preset",
-						presetType === "low"
-							? "veryfast"
-							: presetType === "high"
-								? "medium"
-								: "fast",
-						"-threads",
-						"4",
-					);
-					args.push("-c:a", "copy", "-max_muxing_queue_size", "4096");
-				}
-				args.push(actualOutputPath);
-
-				toConsole("Spawning FFmpeg sidecar for batch item", { args }, debuggin);
-
-				if (!Command) {
-					throw new Error("Tauri Command API is not loaded.");
+					actualOutputPath = `${actualOutputDir}\\${job.fileName}`;
 				}
 
-				const ffmpeg = Command.sidecar("binaries/ffmpeg", args);
-				let ffmpegChild = null;
-
-				activeFFmpegChild = {
-					kill: async () => {
-						isAborted = true;
-						if (ffmpegChild) {
-							await ffmpegChild.kill();
-						}
-					},
-				};
-
-				const onLine = (line) => {
-					parseFFmpegTime(line, exportDuration, specificProgressBar);
-				};
-				ffmpeg.on("line", onLine);
-				if (ffmpeg.stderr) {
-					ffmpeg.stderr.on("data", onLine);
+				// Skip job if any source path missing (continue batch)
+				const missing = job.segments.filter((s) => !s.path);
+				if (missing.length || job.segments.length === 0) {
+					throw new Error("Missing source path for one or more clips.");
 				}
 
-				ffmpegChild = await ffmpeg.spawn();
-				try {
-					await new Promise((resolve, reject) => {
-						ffmpeg.on("close", ({ code }) => {
-							if (code === 0) resolve();
-							else reject(new Error(`FFmpeg exited with code ${code}`));
-						});
-						ffmpeg.on("error", (error) => reject(error));
-					});
-				} finally {
-					if (tempFilePath && remove) {
-						try {
-							const fileExists = exists ? await exists(tempFilePath) : true;
-							if (fileExists) {
-								await remove(tempFilePath);
-							}
-						} catch (e) {
-							console.warn("Failed to delete temp file:", e);
-						}
-					}
-				}
+				toConsole(
+					"Batch export job",
+					{ job: job.label, path: actualOutputPath, quality, stripAudio },
+					debuggin,
+				);
+
+				if (specificProgressBar) specificProgressBar.value = 35;
+
+				await window.__TAURI__.core.invoke("export_queue_job", {
+					videoSegments: job.segments.map((s) => ({
+						path: s.path,
+						start_time: s.start_time,
+						end_time: s.end_time,
+						loop_count: s.loop_count || 1,
+						loopCount: s.loop_count || 1,
+					})),
+					outputPath: actualOutputPath,
+					quality,
+					stripAudio,
+				});
 
 				if (specificProgressBar) {
 					specificProgressBar.value = 100;
 					specificProgressBar.classList.add("opacity-50");
 				}
-
 				if (statusIconContainer) {
 					statusIconContainer.innerHTML = `
             <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
           `;
 				}
-
-				const remapTime = (t, segs) => {
-					let newTime = 0;
-					for (let i = 0; i < segs.length; i++) {
-						const seg = segs[i];
-						if (t < seg.start) {
-							break;
-						}
-						if (t >= seg.start && t <= seg.end) {
-							newTime += t - seg.start;
-							break;
-						}
-						newTime += seg.end - seg.start;
-					}
-					return newTime;
-				};
-
-				const currentMarkers = video.appState?.markers || [];
-				const remappedMarkers = [];
-				for (const m of currentMarkers) {
-					if (m.type === "in" || m.type === "out" || m.type === "jump")
-						continue;
-					const newStart = remapTime(m.startTime, segments);
-					remappedMarkers.push({
-						...m,
-						startTime: newStart,
-					});
-				}
-
-				video.appState.markers = remappedMarkers;
-				video.clipInTime = 0;
-				video.clipOutTime = exportDuration;
+				okCount += 1;
+				showToast(`Exported: ${job.fileName}`, "success");
 			} catch (fileErr) {
-				toConsole("Batch item processing failed", fileErr, debuggin);
+				failCount += 1;
+				toConsole("Batch job failed", fileErr, debuggin);
 				if (statusIconContainer) {
 					statusIconContainer.innerHTML = `
             <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           `;
 				}
+				showToast(
+					`Failed: ${job.label} — ${fileErr?.message || fileErr}`,
+					"error",
+				);
 			} finally {
 				if (rowContainer) {
 					rowContainer.classList.remove("border-blue-500", "bg-blue-50/10");
@@ -5960,19 +5869,19 @@ async function processBatchQueue(presetType) {
 			}
 		}
 
-		saveLocalState();
-		markers = videoQueue[activeQueueIndex]?.appState?.markers || [];
-		updateMarkersList();
+		if (progressBar) progressBar.style.width = "100%";
+		if (progressText) progressText.textContent = "100%";
 
 		if (isAborted) {
 			showToast("Batch processing aborted.", "warning");
 		} else {
-			showToast("Batch export completed!", "success");
+			showToast(
+				`Batch export done: ${okCount} ok, ${failCount} failed.`,
+				failCount ? "warning" : "success",
+			);
 		}
 	} finally {
-		markers = originalMarkers;
-		videoFileName = originalVideoFileName;
-		videoFilePath = originalVideoFilePath;
+		if (progressSpinner) progressSpinner.classList.add("hidden");
 		resetTrimModalUI();
 	}
 }
