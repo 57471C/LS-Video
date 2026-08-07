@@ -443,6 +443,8 @@ body.cinema-mode #toastContainer {
 
 #timeline-zoom-controls input[type="range"] {
 	vertical-align: middle;
+	/* Match volume/speed sliders: zinc track (not browser-default white) */
+	min-width: 5rem;
 }
 
 .sequence-av-pair {
