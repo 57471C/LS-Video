@@ -264,11 +264,15 @@ const loadLocalState = () => {
 	if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
 	// Join chips must refresh after rehydrate (do not wait for panel open/close)
-	if (typeof window.invalidateSidebarPlaylistCache === "function") {
-		window.invalidateSidebarPlaylistCache();
-	}
-	if (typeof window.renderSidebarPlaylist === "function") {
-		window.renderSidebarPlaylist();
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	} else {
+		if (typeof window.invalidateSidebarPlaylistCache === "function") {
+			window.invalidateSidebarPlaylistCache();
+		}
+		if (typeof window.renderSidebarPlaylist === "function") {
+			window.renderSidebarPlaylist();
+		}
 	}
 };
 
@@ -413,17 +417,23 @@ const importFromJSON = async (jsonText, options = {}) => {
 		if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
 		// Force playlist Join UI refresh immediately after project import
-		if (typeof window.invalidateSidebarPlaylistCache === "function") {
-			window.invalidateSidebarPlaylistCache();
-		}
-		if (typeof window.renderSidebarPlaylist === "function") {
-			window.renderSidebarPlaylist();
+		if (typeof window.refreshSidebarPlaylist === "function") {
+			window.refreshSidebarPlaylist();
+		} else {
+			if (typeof window.invalidateSidebarPlaylistCache === "function") {
+				window.invalidateSidebarPlaylistCache();
+			}
+			if (typeof window.renderSidebarPlaylist === "function") {
+				window.renderSidebarPlaylist();
+			}
 		}
 
 		if (DOM.markersList) DOM.markersList.innerHTML = "";
 
-		// Handle Video Relinking
-		if (typeof window.resetClosedCaptions === "function") {
+		// Handle Video Relinking — drop old captions before media replace
+		if (typeof window.clearSubtitleTracks === "function") {
+			window.clearSubtitleTracks();
+		} else if (typeof window.resetClosedCaptions === "function") {
 			window.resetClosedCaptions();
 		}
 		player.pause();
@@ -458,8 +468,13 @@ const importFromJSON = async (jsonText, options = {}) => {
 		if (typeof drawTable === "function") drawTable();
 		if (typeof updateLoadButtonColor === "function") updateLoadButtonColor();
 		// Second refresh after media load so join visuals stay in sync with final queue
-		if (typeof window.renderSidebarPlaylist === "function") {
+		if (typeof window.refreshSidebarPlaylist === "function") {
+			window.refreshSidebarPlaylist();
+		} else if (typeof window.renderSidebarPlaylist === "function") {
 			window.renderSidebarPlaylist();
+		}
+		if (typeof window.updateProxyInfoUi === "function") {
+			window.updateProxyInfoUi(videoQueue[activeQueueIndex]?.proxyPath || null);
 		}
 
 		toConsole(
