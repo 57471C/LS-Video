@@ -2264,65 +2264,127 @@ const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
 };
 
 /**
- * Layout a track body as full-sequence spine with content only in the segment window.
- * Geometry (exact): left% = offset/total, width% = duration/total.
- * Greys outside [clipIn, clipOut] mapped into this row's sequence slot (before fill / after fill).
- * Returns the fill element whose left/width are sequence fractions (not 100% host).
+ * Layout a join-row track on the sequence spine.
+ *
+ * Sequence playhead alignment (unchanged):
+ *   activeLeft%  = offset / total
+ *   activeWidth% = duration / total   (duration = clipOut − clipIn)
+ *
+ * Full-source visualization (solo-like tint outside clipIn/Out):
+ *   Map this clip's full mediaDuration onto the row so that the active
+ *   [clipIn, clipOut] band lines up exactly with the sequence slot above.
+ *   Head (0..clipIn) and tail (clipOut..mediaDuration) are tinted — user can
+ *   see the source is longer than the joined segment.
+ *
+ * Returns the content host for filmstrip / waveform painting.
  */
 const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	if (!trackEl || !seg || totalDuration <= 0) return trackEl;
 	const total = Math.max(totalDuration, 0.001);
-	const leftPct = (seg.offset / total) * 100;
-	const widthPct = Math.max(0, (Math.max(seg.duration, 0) / total) * 100);
-	const rightPct = Math.max(0, 100 - leftPct - widthPct);
+	const activeDur = Math.max(Number(seg.duration) || 0, 0.001);
+	const clipIn = Math.max(0, Number(seg.clipIn) || 0);
+	let clipOut = Number(seg.clipOut) || clipIn + activeDur;
+	let mediaDur =
+		typeof getMediaDurationForQueueIndex === "function"
+			? getMediaDurationForQueueIndex(seg.video, seg.queueIndex)
+			: Number(seg.video?.mediaDuration) || 0;
+	if (mediaDur <= 0) mediaDur = Math.max(clipOut, activeDur);
+	if (clipOut > mediaDur) clipOut = mediaDur;
+	if (clipOut <= clipIn) clipOut = Math.min(mediaDur, clipIn + activeDur);
+
+	// Active window on the sequence spine (flush join boundary)
+	const activeLeftPct = (seg.offset / total) * 100;
+	const activeWidthPct = (activeDur / total) * 100;
+
+	// Full media shell: scale so [clipIn, clipOut] maps onto the active slot
+	const fullWidthPct = activeWidthPct * (mediaDur / activeDur);
+	const fullLeftPct = activeLeftPct - (clipIn / mediaDur) * fullWidthPct;
+	const headFrac = mediaDur > 0 ? clipIn / mediaDur : 0;
+	const tailFrac =
+		mediaDur > 0 ? Math.max(0, (mediaDur - clipOut) / mediaDur) : 0;
 
 	// Outer track = full-width sequence spine (click target for seek)
 	trackEl.style.position = "relative";
 	trackEl.style.width = "100%";
-	trackEl.style.display = "block"; // not flex — absolute children need this box
+	trackEl.style.display = "block";
 	trackEl.style.overflow = "hidden";
 	trackEl.innerHTML = "";
 	trackEl.dataset.sequenceSpine = "1";
 	trackEl.dataset.segOffset = String(seg.offset);
 	trackEl.dataset.segDuration = String(seg.duration);
-	trackEl.dataset.leftPct = String(leftPct);
-	trackEl.dataset.widthPct = String(widthPct);
+	trackEl.dataset.leftPct = String(activeLeftPct);
+	trackEl.dataset.widthPct = String(activeWidthPct);
 
-	// Dim before this segment's active [clipIn, clipOut] window (sequence space)
-	if (leftPct > 0.001) {
+	// Soft dim for sequence time not owned by this clip (other join slots)
+	if (activeLeftPct > 0.001) {
 		const leftDim = document.createElement("div");
 		leftDim.className = "sequence-row-dim sequence-row-dim-before";
-		leftDim.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${leftPct}%;pointer-events:none;z-index:1;`;
+		leftDim.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${activeLeftPct}%;pointer-events:none;z-index:0;`;
 		trackEl.appendChild(leftDim);
 	}
-	// Dim after this segment's active window (do not affect other rows)
-	if (rightPct > 0.001) {
+	const afterActive = Math.max(0, 100 - activeLeftPct - activeWidthPct);
+	if (afterActive > 0.001) {
 		const rightDim = document.createElement("div");
 		rightDim.className = "sequence-row-dim sequence-row-dim-after";
-		rightDim.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct + widthPct}%;width:${rightPct}%;pointer-events:none;z-index:1;`;
+		rightDim.style.cssText = `position:absolute;top:0;bottom:0;left:${activeLeftPct + activeWidthPct}%;width:${afterActive}%;pointer-events:none;z-index:0;`;
 		trackEl.appendChild(rightDim);
 	}
 
-	const fill = document.createElement("div");
-	fill.className = "sequence-segment-fill";
-	fill.dataset.queueIndex = String(seg.queueIndex);
-	fill.dataset.leftPct = String(leftPct);
-	fill.dataset.widthPct = String(widthPct);
-	// Inline geometry is authoritative — CSS must not override left/width
-	fill.style.position = "absolute";
-	fill.style.top = "0";
-	fill.style.bottom = "0";
-	fill.style.left = `${leftPct}%`;
-	fill.style.width = `${widthPct}%`;
-	fill.style.maxWidth = `${widthPct}%`;
-	fill.style.right = "auto";
-	fill.style.zIndex = "2";
-	fill.style.display = "flex";
-	fill.style.alignItems = "stretch";
-	fill.style.overflow = "hidden";
-	fill.style.boxSizing = "border-box";
-	trackEl.appendChild(fill);
-	return fill;
+	// Full-source shell (may extend into dimmed neighbor sequence space on this row)
+	const shell = document.createElement("div");
+	shell.className = "sequence-segment-fill sequence-media-shell";
+	shell.dataset.queueIndex = String(seg.queueIndex);
+	shell.dataset.leftPct = String(fullLeftPct);
+	shell.dataset.widthPct = String(fullWidthPct);
+	shell.dataset.activeLeftPct = String(activeLeftPct);
+	shell.dataset.activeWidthPct = String(activeWidthPct);
+	shell.dataset.clipIn = String(clipIn);
+	shell.dataset.clipOut = String(clipOut);
+	shell.dataset.mediaDuration = String(mediaDur);
+	shell.style.position = "absolute";
+	shell.style.top = "0";
+	shell.style.bottom = "0";
+	shell.style.left = `${fullLeftPct}%`;
+	shell.style.width = `${fullWidthPct}%`;
+	shell.style.maxWidth = "none";
+	shell.style.right = "auto";
+	shell.style.zIndex = "2";
+	shell.style.display = "block";
+	shell.style.overflow = "hidden";
+	shell.style.boxSizing = "border-box";
+
+	// Content host (filmstrip / waveform) fills the full source shell
+	const content = document.createElement("div");
+	content.className = "sequence-media-content";
+	content.dataset.queueIndex = String(seg.queueIndex);
+	content.style.cssText =
+		"position:absolute;inset:0;display:flex;align-items:stretch;overflow:hidden;box-sizing:border-box;z-index:1;";
+	shell.appendChild(content);
+
+	// Solo-matching tint: outside clipIn / clipOut on this source
+	if (headFrac > 0.001) {
+		const headShade = document.createElement("div");
+		headShade.className = "sequence-clip-shade sequence-clip-shade-before";
+		headShade.title = "Before Clip In (source not used in sequence)";
+		headShade.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${headFrac * 100}%;z-index:3;pointer-events:none;`;
+		shell.appendChild(headShade);
+	}
+	if (tailFrac > 0.001) {
+		const tailShade = document.createElement("div");
+		tailShade.className = "sequence-clip-shade sequence-clip-shade-after";
+		tailShade.title = "After Clip Out (source not used in sequence)";
+		tailShade.style.cssText = `position:absolute;top:0;bottom:0;left:${(1 - tailFrac) * 100}%;width:${tailFrac * 100}%;z-index:3;pointer-events:none;`;
+		shell.appendChild(tailShade);
+	}
+
+	// Active-window outline (flush join edge) for clarity
+	const activeBand = document.createElement("div");
+	activeBand.className = "sequence-active-band";
+	activeBand.style.cssText = `position:absolute;top:0;bottom:0;left:${headFrac * 100}%;width:${Math.max(0, (1 - headFrac - tailFrac) * 100)}%;z-index:2;pointer-events:none;box-sizing:border-box;`;
+	shell.appendChild(activeBand);
+
+	trackEl.appendChild(shell);
+	return content;
 };
 
 /** Generates and loads the waveform timeline and thumbnails (solo or active join run). */
@@ -2494,25 +2556,30 @@ window.loadWaveformTimeline = async () => {
 					return;
 				}
 
-				// Waveform for this source
+				// Full source media duration (tint shows outside clipIn/Out)
+				const mediaDur = Math.max(
+					getMediaDurationForQueueIndex(seg.video, seg.queueIndex) || 0,
+					Number(seg.clipOut) || 0,
+					Number(seg.duration) || 0,
+					0.05,
+				);
+				const clipInSec = Math.max(0, Number(seg.clipIn) || 0);
+				const clipOutSec =
+					Number(seg.clipOut) > clipInSec ? Number(seg.clipOut) : mediaDur;
+
+				// Waveform for full source so head/tail outside clip bounds are visible under tint
 				try {
-					const segDur =
-						seg.duration ||
-						Number(seg.video?.mediaDuration) ||
-						seg.clipOut - seg.clipIn ||
-						0;
 					const peaks = await window.__TAURI__.core.invoke(
 						"get_waveform_data",
 						{
 							videoPath: path,
-							durationSeconds: segDur > 0 ? segDur : 1,
+							durationSeconds: mediaDur,
 						},
 					);
 					if (isStaleRequest()) return;
 					if (typeof window.renderWaveformInto === "function") {
 						window.renderWaveformInto(audioFill || row.audioTrack, peaks);
 					}
-					// Keep active clip peaks for any legacy readers
 					if (seg.queueIndex === activeQueueIndex) {
 						window.currentWaveformData = peaks || [];
 						window.currentWaveformDataPath = path;
@@ -2539,41 +2606,31 @@ window.loadWaveformTimeline = async () => {
 					videoFill.style.justifyContent = "center";
 				}
 
-				// Tile density from segment pixel width; sample only [clipIn, clipOut]
-				const segWidthPx = Math.max(
+				// Tile density from full-source shell width on the sequence spine
+				const activeWidthPx = Math.max(
 					40,
 					(seg.duration / totalDuration) * hostWidth,
 				);
-				const tileCount = Math.max(Math.floor(segWidthPx / 120), 1);
-				const startSec = Number(seg.clipIn) || 0;
-				const endSec =
-					Number(seg.clipOut) > startSec
-						? Number(seg.clipOut)
-						: startSec + Math.max(seg.duration, 0.05);
+				const fullWidthPx = Math.max(
+					activeWidthPx,
+					activeWidthPx * (mediaDur / Math.max(seg.duration, 0.001)),
+				);
+				const tileCount = Math.max(Math.floor(fullWidthPx / 120), 1);
 
 				try {
+					// Full source filmstrip; CSS shades tint outside [clipIn, clipOut]
 					const thumbnailPaths = await window.__TAURI__.core.invoke(
 						"generate_timeline_thumbnails",
 						{
 							videoPath: path,
 							tileCount: tileCount,
-							startSeconds: startSec,
-							endSeconds: endSec,
+							startSeconds: 0,
+							endSeconds: mediaDur,
 						},
 					);
 					if (isStaleRequest()) return;
 					if (videoFill && thumbnailPaths?.length) {
 						fillFilmstripTrack(videoFill, thumbnailPaths);
-						// Re-assert segment geometry after fill (defensive)
-						const lp = videoFill.dataset.leftPct;
-						const wp = videoFill.dataset.widthPct;
-						if (lp != null && wp != null) {
-							videoFill.style.left = `${lp}%`;
-							videoFill.style.width = `${wp}%`;
-							videoFill.style.maxWidth = `${wp}%`;
-							videoFill.style.position = "absolute";
-							videoFill.style.right = "auto";
-						}
 					} else if (videoFill) {
 						videoFill.textContent = "No filmstrip";
 					}

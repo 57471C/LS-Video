@@ -303,7 +303,7 @@ const setupSequenceTracks = (totalDuration) => {
 		track.style.display = "block";
 		track.style.width = "100%";
 		track.style.overflow = "hidden";
-		// Re-assert each segment fill geometry if present
+		// Re-assert each segment fill / full-source media shell geometry
 		const fill = track.querySelector(".sequence-segment-fill");
 		if (fill?.dataset.leftPct != null && fill?.dataset.widthPct != null) {
 			fill.style.position = "absolute";
@@ -311,7 +311,10 @@ const setupSequenceTracks = (totalDuration) => {
 			fill.style.bottom = "0";
 			fill.style.left = `${fill.dataset.leftPct}%`;
 			fill.style.width = `${fill.dataset.widthPct}%`;
-			fill.style.maxWidth = `${fill.dataset.widthPct}%`;
+			// Full-source shells may extend past the active slot — do not max-clamp
+			fill.style.maxWidth = fill.classList.contains("sequence-media-shell")
+				? "none"
+				: `${fill.dataset.widthPct}%`;
 			fill.style.right = "auto";
 		}
 		appendPlayheadToTrack(track, duration);
