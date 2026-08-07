@@ -2734,12 +2734,12 @@ window.joinAndCompressVideos = async (videoSegments) => {
 		const finalPath = await window.__TAURI__.core.invoke(
 			"join_and_compress_videos",
 			{
+				// One field per VideoSegment key — never both loop_count and loopCount
 				videoSegments: videoSegments.map((s) => ({
 					path: s.path,
-					start_time: s.start_time,
-					end_time: s.end_time,
-					loop_count: s.loopCount || s.loop_count || 1,
-					loopCount: s.loopCount || s.loop_count || 1,
+					start_time: Number(s.start_time) || 0,
+					end_time: Number(s.end_time) || 0,
+					loop_count: Math.max(1, Number(s.loopCount ?? s.loop_count) || 1),
 				})),
 				outputFileName: outputFileName,
 			},
@@ -5826,14 +5826,27 @@ async function processBatchQueue(presetType) {
 
 				if (specificProgressBar) specificProgressBar.value = 35;
 
+				// Flat segments: one key per Rust VideoSegment field (no loop_count + loopCount).
+				const videoSegments = job.segments.map((s) => ({
+					path: s.path,
+					start_time: Number(s.start_time) || 0,
+					end_time: Number(s.end_time) || 0,
+					// Serde field is loop_count; alias loopCount — send only one
+					loop_count: Math.max(1, Number(s.loop_count) || 1),
+				}));
+				if (window.TM_DEBUG_MODE || debuggin) {
+					console.log("[export_queue_job] segments", {
+						job: job.label,
+						count: videoSegments.length,
+						bounds: videoSegments.map((s) => ({
+							start: s.start_time,
+							end: s.end_time,
+							loop: s.loop_count,
+						})),
+					});
+				}
 				await window.__TAURI__.core.invoke("export_queue_job", {
-					videoSegments: job.segments.map((s) => ({
-						path: s.path,
-						start_time: s.start_time,
-						end_time: s.end_time,
-						loop_count: s.loop_count || 1,
-						loopCount: s.loop_count || 1,
-					})),
+					videoSegments,
 					outputPath: actualOutputPath,
 					quality,
 					stripAudio,

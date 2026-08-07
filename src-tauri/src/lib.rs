@@ -503,7 +503,8 @@ struct VideoSegment {
     path: String,
     start_time: f64,
     end_time: f64,
-    #[serde(alias = "loopCount")]
+    /// Prefer `loop_count` from JS. `loopCount` accepted as alias only — never send both.
+    #[serde(default, alias = "loopCount")]
     loop_count: Option<i32>,
 }
 
