@@ -1063,15 +1063,23 @@ document.addEventListener("DOMContentLoaded", () => {
 			const mainGrid = document.getElementById("mainLayoutGrid");
 			if (mainGrid) {
 				mainGrid.classList.toggle("timeline-expanded");
-				// Re-measure track width after expand so filmstrip tile density matches full width
-				if (
-					mainGrid.classList.contains("timeline-expanded") &&
-					typeof videoFilePath !== "undefined" &&
-					videoFilePath &&
-					typeof window.loadWaveformTimeline === "function"
-				) {
+				// Re-measure fit width after expand so zoom=1 fills the panel
+				if (mainGrid.classList.contains("timeline-expanded")) {
+					if (typeof window.initTimelineZoomControls === "function") {
+						window.initTimelineZoomControls();
+					}
 					requestAnimationFrame(() => {
-						window.loadWaveformTimeline();
+						if (typeof window.applyTimelineZoomLayout === "function") {
+							const forceFit = !window._timelineZoom?.userOverride;
+							window.applyTimelineZoomLayout({ forceFit });
+						}
+						if (
+							typeof videoFilePath !== "undefined" &&
+							videoFilePath &&
+							typeof window.loadWaveformTimeline === "function"
+						) {
+							window.loadWaveformTimeline();
+						}
 					});
 				}
 			}
@@ -2415,6 +2423,15 @@ window.loadWaveformTimeline = async () => {
 	}
 	// Visibility of #detailed-timeline-panel is driven by .timeline-expanded CSS
 
+	// Ensure zoom controls bound; recompute fit width (keep user zoom factor if set)
+	if (typeof window.initTimelineZoomControls === "function") {
+		window.initTimelineZoomControls();
+	}
+	if (typeof window.applyTimelineZoomLayout === "function") {
+		const forceFit = !window._timelineZoom?.userOverride;
+		window.applyTimelineZoomLayout({ forceFit });
+	}
+
 	const run = getActiveJoinRun();
 	const mode = syncSequenceModeState(run);
 	const multi = mode.active && run.segments.length > 1;
@@ -2425,6 +2442,10 @@ window.loadWaveformTimeline = async () => {
 			// -------- Solo path (unchanged behaviour) --------
 			const videoEl = document.querySelector("video") || player;
 			const duration = videoEl.duration || player.duration || 0;
+			// Zoom content width drives tile density (fit * factor)
+			if (typeof window.applyTimelineZoomLayout === "function") {
+				window.applyTimelineZoomLayout();
+			}
 			const peakArray = await window.__TAURI__.core.invoke(
 				"get_waveform_data",
 				{
@@ -2473,7 +2494,12 @@ window.loadWaveformTimeline = async () => {
 				window.setupVideoTrack();
 			}
 
-			const trackWidth = videoTrack?.offsetWidth || 0;
+			const trackWidth =
+				(typeof window.getTimelineContentWidth === "function"
+					? window.getTimelineContentWidth()
+					: 0) ||
+				videoTrack?.offsetWidth ||
+				0;
 			const requiredTileCount = Math.max(Math.floor(trackWidth / 120), 1);
 
 			// Solo: still bound to active clipIn/Out so full-file strip is not used
@@ -2515,6 +2541,9 @@ window.loadWaveformTimeline = async () => {
 		window.currentWaveformData = [];
 		window.currentWaveformDataPath = null;
 
+		if (typeof window.applyTimelineZoomLayout === "function") {
+			window.applyTimelineZoomLayout();
+		}
 		window.paintTimelineRuler(totalDuration);
 
 		// Wire seek listeners + playheads on each track (sequence mode)
@@ -2522,8 +2551,14 @@ window.loadWaveformTimeline = async () => {
 			window.setupSequenceTracks(totalDuration);
 		}
 
+		// Use zoomed content width so tile density scales with zoom, not only viewport
 		const hostWidth =
-			document.getElementById("timeline-tracks-host")?.offsetWidth || 600;
+			(typeof window.getTimelineContentWidth === "function"
+				? window.getTimelineContentWidth()
+				: 0) ||
+			document.getElementById("timeline-zoom-content")?.offsetWidth ||
+			document.getElementById("timeline-tracks-host")?.offsetWidth ||
+			600;
 
 		// Generate per-segment filmstrip + waveform concurrently
 		await Promise.all(

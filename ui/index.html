@@ -308,23 +308,35 @@
         </div>
         <!-- Custom detailed timeline (Rust waveform + filmstrip) -->
         <div id="detailed-timeline-panel" class="bg-zinc-100 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 p-4 rounded shadow-sm mt-6 px-4 ml-4 lg:ml-6" style="display: none;">
-          <div class="flex justify-between items-center mb-2">
-            <span class="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Detailed Timeline</span>
+          <div class="flex justify-between items-center mb-2 gap-3">
+            <span class="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider shrink-0">Detailed Timeline</span>
+            <div id="timeline-zoom-controls" class="flex items-center gap-1.5 shrink-0" title="Timeline zoom (1 = fit width)">
+              <button type="button" id="timelineZoomOutBtn" class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 p-0.5 rounded leading-none text-sm font-bold w-5 h-5 flex items-center justify-center" aria-label="Zoom out" title="Zoom out">−</button>
+              <input type="range" id="timelineZoomSlider" min="1" max="8" step="0.05" value="1" class="form-range w-24 sm:w-28 cursor-pointer" aria-label="Timeline zoom" />
+              <button type="button" id="timelineZoomInBtn" class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 p-0.5 rounded leading-none text-sm font-bold w-5 h-5 flex items-center justify-center" aria-label="Zoom in" title="Zoom in">+</button>
+              <span id="timelineZoomLabel" class="text-[10px] font-mono tabular-nums text-zinc-500 dark:text-zinc-400 w-9 text-right select-none">Fit</span>
+              <button type="button" id="timelineZoomFitBtn" class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 hover:text-blue-500 dark:hover:text-blue-400 px-1.5 py-0.5 rounded border border-transparent hover:border-zinc-300 dark:hover:border-zinc-600" title="Fit to width (double-click slider)">Fit</button>
+            </div>
           </div>
           <div id="non-linear-sequencer" class="relative min-h-0 flex flex-col">
-            <div id="timeline-marker-overlay" class="absolute inset-0 pointer-events-none z-20"></div>
-            
-            <div id="timeline-ruler-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700" style="height: 24px; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-family: monospace; border-bottom: 1px solid; margin-bottom: 8px; border-radius: 4px; flex-shrink: 0;">
-              0:00:00 / Sequence Time Tracks Placeholder
-            </div>
+            <!-- Single H-scroll parent so ruler, tracks, markers, playhead share px-per-second -->
+            <div id="timeline-h-scroll" class="timeline-h-scroll min-h-0 flex-1">
+              <div id="timeline-zoom-content" class="timeline-zoom-content relative">
+                <div id="timeline-marker-overlay" class="absolute inset-0 pointer-events-none z-20"></div>
 
-            <div id="timeline-tracks-host" class="flex flex-col gap-2 min-h-0 overflow-y-auto flex-1">
-              <div id="timeline-video-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed" style="height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;">
-                Video Filmstrip Strip Track Frame Housing
-              </div>
+                <div id="timeline-ruler-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700" style="height: 24px; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-family: monospace; border-bottom: 1px solid; margin-bottom: 8px; border-radius: 4px; flex-shrink: 0; box-sizing: border-box;">
+                  0:00:00 / Sequence Time Tracks Placeholder
+                </div>
 
-              <div id="timeline-audio-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed" style="height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;">
-                Linear Amplitude Peak Canvas Element
+                <div id="timeline-tracks-host" class="flex flex-col gap-2 min-h-0 flex-1">
+                  <div id="timeline-video-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed" style="height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;">
+                    Video Filmstrip Strip Track Frame Housing
+                  </div>
+
+                  <div id="timeline-audio-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed" style="height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;">
+                    Linear Amplitude Peak Canvas Element
+                  </div>
+                </div>
               </div>
             </div>
           </div>

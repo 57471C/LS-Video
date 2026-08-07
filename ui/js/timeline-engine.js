@@ -2,12 +2,25 @@
  * Timeline Engine Module for LS.Video
  * Manages playhead tracking, ticks rendering, audio canvas painting, and marker/trim shading.
  * Supports solo clip mode and multi-segment active join-run sequence mode.
+ * Horizontal zoom: factor 1 = fit width; factor > 1 widens content + H-scroll.
  */
 
 window.playheadAnimationId = null;
 window.lastCheckedVideoTime = 0;
 
 let cachedVideoElement = null;
+
+/** @type {{ factor: number, userOverride: boolean, fitWidth: number, contentWidth: number, pxPerSecond: number }} */
+window._timelineZoom = window._timelineZoom || {
+	factor: 1,
+	userOverride: false,
+	fitWidth: 0,
+	contentWidth: 0,
+	pxPerSecond: 0,
+};
+
+const TIMELINE_ZOOM_MIN = 1;
+const TIMELINE_ZOOM_MAX = 8;
 
 /** Resolve the video element — module-scoped `player` in app.js is not visible here. */
 const getPlayer = () =>
@@ -43,6 +56,144 @@ const getTimelineDuration = () => {
 	const p = getPlayer();
 	return Math.max(p?.duration || 0, 0.001);
 };
+
+const getTimelineScrollport = () =>
+	document.getElementById("timeline-h-scroll");
+
+const getTimelineZoomContent = () =>
+	document.getElementById("timeline-zoom-content");
+
+/** Visible scrollport width used for fit-to-width (zoom = 1). */
+const getTimelineFitWidth = () => {
+	const port = getTimelineScrollport();
+	if (port?.clientWidth > 0) return port.clientWidth;
+	const panel = document.getElementById("detailed-timeline-panel");
+	if (panel?.clientWidth > 0) return Math.max(panel.clientWidth - 32, 200);
+	return 600;
+};
+
+/**
+ * Apply content width from duration + zoom + scrollport.
+ * @param {{ forceFit?: boolean }} [opts]
+ */
+const applyTimelineZoomLayout = (opts = {}) => {
+	const z = window._timelineZoom;
+	if (opts.forceFit) {
+		z.factor = TIMELINE_ZOOM_MIN;
+		z.userOverride = false;
+	}
+	const factor = Math.min(
+		TIMELINE_ZOOM_MAX,
+		Math.max(TIMELINE_ZOOM_MIN, Number(z.factor) || 1),
+	);
+	z.factor = factor;
+
+	const fitW = getTimelineFitWidth();
+	const contentW = Math.max(fitW * factor, fitW);
+	const duration = getTimelineDuration();
+	z.fitWidth = fitW;
+	z.contentWidth = contentW;
+	z.pxPerSecond = contentW / Math.max(duration, 0.001);
+
+	const content = getTimelineZoomContent();
+	if (content) {
+		content.style.width = `${contentW}px`;
+		content.style.minWidth = `${contentW}px`;
+		content.style.maxWidth = "none";
+	}
+
+	const port = getTimelineScrollport();
+	if (port) {
+		// H-scroll only when zoomed past fit
+		port.style.overflowX = factor > 1.001 ? "auto" : "hidden";
+	}
+
+	// Keep controls in sync
+	const slider = document.getElementById("timelineZoomSlider");
+	if (slider && Number(slider.value) !== factor) {
+		slider.value = String(factor);
+	}
+	const label = document.getElementById("timelineZoomLabel");
+	if (label) {
+		label.textContent =
+			factor <= 1.001 ? "Fit" : `${factor.toFixed(factor >= 2 ? 1 : 2)}×`;
+	}
+
+	return z;
+};
+
+/**
+ * Set zoom factor from UI.
+ * @param {number} factor
+ * @param {{ fromUser?: boolean, regenerate?: boolean }} [opts]
+ */
+const setTimelineZoom = (factor, opts = {}) => {
+	const z = window._timelineZoom;
+	const next = Math.min(
+		TIMELINE_ZOOM_MAX,
+		Math.max(TIMELINE_ZOOM_MIN, Number(factor) || 1),
+	);
+	z.factor = next;
+	if (opts.fromUser !== false) {
+		z.userOverride = next > 1.001;
+	}
+	if (next <= 1.001) z.userOverride = false;
+	applyTimelineZoomLayout();
+
+	if (opts.regenerate !== false) {
+		// Debounce expensive filmstrip/waveform rebuilds
+		if (window._timelineZoomRegenTimer) {
+			clearTimeout(window._timelineZoomRegenTimer);
+		}
+		window._timelineZoomRegenTimer = setTimeout(() => {
+			window._timelineZoomRegenTimer = null;
+			if (typeof window.loadWaveformTimeline === "function") {
+				window.loadWaveformTimeline();
+			} else {
+				const dur = getTimelineDuration();
+				paintTimelineRuler(dur);
+				if (typeof window.paintTimelineMarkersAndShading === "function") {
+					window.paintTimelineMarkersAndShading();
+				}
+			}
+		}, 180);
+	}
+	return z;
+};
+
+const resetTimelineZoomToFit = () => {
+	setTimelineZoom(TIMELINE_ZOOM_MIN, { fromUser: false, regenerate: true });
+};
+
+/**
+ * Map a click on a timeline element to time, accounting for scroll + zoomed width.
+ * Uses the full content box (getBoundingClientRect of wide child already includes scroll).
+ */
+const timeFromTimelineClick = (clientX, trackEl) => {
+	const content = getTimelineZoomContent() || trackEl;
+	const el = content || trackEl;
+	if (!el) return 0;
+	const rect = el.getBoundingClientRect();
+	const width = rect.width || window._timelineZoom?.contentWidth || 1;
+	const x = clientX - rect.left;
+	const pct = Math.max(0, Math.min(1, x / Math.max(width, 1)));
+	return pct * getTimelineDuration();
+};
+
+/** Content width for filmstrip density / layout consumers. */
+const getTimelineContentWidth = () => {
+	const z = window._timelineZoom;
+	if (z?.contentWidth > 0) return z.contentWidth;
+	const content = getTimelineZoomContent();
+	if (content?.offsetWidth > 0) return content.offsetWidth;
+	return getTimelineFitWidth();
+};
+
+window.applyTimelineZoomLayout = applyTimelineZoomLayout;
+window.setTimelineZoom = setTimelineZoom;
+window.resetTimelineZoomToFit = resetTimelineZoomToFit;
+window.getTimelineContentWidth = getTimelineContentWidth;
+window.getTimelineFitWidth = getTimelineFitWidth;
 
 const getPlayheadTime = () => {
 	if (
@@ -134,14 +285,17 @@ function syncTimelinePlayheadSmoothly() {
 }
 
 const paintTimelineRuler = (duration) => {
-	const player = getPlayer();
-	if (!player || !duration) return;
+	if (!duration) return;
+	// Apply zoom layout so ruler width matches content (fit * factor)
+	applyTimelineZoomLayout();
 
 	const rulerTrack = document.getElementById("timeline-ruler-track");
 	if (!rulerTrack) return;
 	rulerTrack.innerHTML = "";
 	rulerTrack.style.position = "relative";
 	rulerTrack.style.overflow = "hidden";
+	rulerTrack.style.width = "100%";
+	rulerTrack.style.boxSizing = "border-box";
 
 	// Create playhead
 	const playhead = document.createElement("div");
@@ -151,15 +305,14 @@ const paintTimelineRuler = (duration) => {
 	playhead.style.left = `${(headTime / duration) * 100}%`;
 	rulerTrack.appendChild(playhead);
 
-	// Add click to seek (sequence-aware)
+	// Add click to seek (sequence-aware; uses zoomed content coordinates)
 	if (!rulerTrack.dataset.hasClickListener) {
 		rulerTrack.addEventListener("click", (e) => {
 			if (e.target.classList.contains("sequencer-playhead")) return;
-			const rect = rulerTrack.getBoundingClientRect();
-			const clickX = e.clientX - rect.left;
-			const pct = clickX / rect.width;
 			const dur = getTimelineDuration();
-			const time = pct * dur;
+			if (!dur) return;
+			const time = timeFromTimelineClick(e.clientX, rulerTrack);
+			const pct = time / Math.max(dur, 0.001);
 			seekTimelineTime(time);
 			const calculatedPercent = pct * 100;
 			for (let i = 0; i < timelinePlayheadsLive.length; i++) {
@@ -169,12 +322,20 @@ const paintTimelineRuler = (duration) => {
 		rulerTrack.dataset.hasClickListener = "true";
 	}
 
+	// More ticks when zoomed so labels stay useful
+	const zFactor = Math.max(1, window._timelineZoom?.factor || 1);
 	let tickInterval = 5; // seconds
 	if (duration <= 15) tickInterval = 1;
 	else if (duration <= 60) tickInterval = 5;
 	else if (duration <= 300) tickInterval = 15;
 	else if (duration <= 1200) tickInterval = 60;
 	else tickInterval = 300;
+	if (zFactor >= 2 && tickInterval > 1) {
+		tickInterval = Math.max(1, tickInterval / 2);
+	}
+	if (zFactor >= 4 && tickInterval > 1) {
+		tickInterval = Math.max(1, Math.floor(tickInterval / 2));
+	}
 
 	const numTicks = Math.floor(duration / tickInterval);
 	for (let i = 0; i <= numTicks; i += 1) {
@@ -199,13 +360,11 @@ const paintTimelineRuler = (duration) => {
 const attachTrackSeekListener = (trackEl) => {
 	if (!trackEl || trackEl.dataset.hasClickListener) return;
 	trackEl.addEventListener("click", (e) => {
-		// Ignore clicks that are only on nested interactive UI (none today)
-		const rect = trackEl.getBoundingClientRect();
-		const clickX = e.clientX - rect.left;
-		const pct = clickX / rect.width;
 		const dur = getTimelineDuration();
 		if (!dur) return;
-		seekTimelineTime(pct * dur);
+		const time = timeFromTimelineClick(e.clientX, trackEl);
+		const pct = time / Math.max(dur, 0.001);
+		seekTimelineTime(time);
 		const calculatedPercent = pct * 100;
 		for (let i = 0; i < timelinePlayheadsLive.length; i++) {
 			timelinePlayheadsLive[i].style.left = `${calculatedPercent}%`;
@@ -291,6 +450,7 @@ const setupVideoTrack = () => {
 /** Sequence mode: playheads + seek on every video/audio track in the host. */
 const setupSequenceTracks = (totalDuration) => {
 	const duration = totalDuration || getTimelineDuration();
+	applyTimelineZoomLayout();
 	const host = document.getElementById("timeline-tracks-host");
 	if (!host) return;
 
@@ -574,6 +734,115 @@ const paintTimelineMarkersAndShading = () => {
 	overlay.appendChild(fragment);
 };
 
+/**
+ * Wire zoom slider / Fit control once. Safe to call multiple times.
+ */
+const initTimelineZoomControls = () => {
+	if (window._timelineZoomControlsBound) return;
+	const slider = document.getElementById("timelineZoomSlider");
+	if (!slider) return;
+	window._timelineZoomControlsBound = true;
+
+	const applyFromSlider = (fromUser) => {
+		const v = Number.parseFloat(slider.value);
+		setTimelineZoom(v, { fromUser: !!fromUser, regenerate: true });
+	};
+
+	slider.addEventListener("input", () => {
+		// Live layout (width) without waiting for regen
+		window._timelineZoom.factor = Number.parseFloat(slider.value) || 1;
+		if (window._timelineZoom.factor > 1.001) {
+			window._timelineZoom.userOverride = true;
+		} else {
+			window._timelineZoom.userOverride = false;
+		}
+		applyTimelineZoomLayout();
+		const label = document.getElementById("timelineZoomLabel");
+		const f = window._timelineZoom.factor;
+		if (label) {
+			label.textContent = f <= 1.001 ? "Fit" : `${f.toFixed(f >= 2 ? 1 : 2)}×`;
+		}
+	});
+	slider.addEventListener("change", () => applyFromSlider(true));
+	slider.addEventListener("dblclick", (e) => {
+		e.preventDefault();
+		resetTimelineZoomToFit();
+	});
+
+	document
+		.getElementById("timelineZoomInBtn")
+		?.addEventListener("click", () => {
+			const cur = window._timelineZoom.factor || 1;
+			setTimelineZoom(Math.min(TIMELINE_ZOOM_MAX, cur + 0.25), {
+				fromUser: true,
+				regenerate: true,
+			});
+		});
+	document
+		.getElementById("timelineZoomOutBtn")
+		?.addEventListener("click", () => {
+			const cur = window._timelineZoom.factor || 1;
+			setTimelineZoom(Math.max(TIMELINE_ZOOM_MIN, cur - 0.25), {
+				fromUser: true,
+				regenerate: true,
+			});
+		});
+	document
+		.getElementById("timelineZoomFitBtn")
+		?.addEventListener("click", () => {
+			resetTimelineZoomToFit();
+		});
+
+	// Shift + wheel over timeline pans horizontally when zoomed
+	const port = getTimelineScrollport();
+	if (port && !port.dataset.shiftWheelBound) {
+		port.dataset.shiftWheelBound = "1";
+		port.addEventListener(
+			"wheel",
+			(e) => {
+				if (!e.shiftKey) return;
+				if ((window._timelineZoom?.factor || 1) <= 1.001) return;
+				e.preventDefault();
+				port.scrollLeft += e.deltaY !== 0 ? e.deltaY : e.deltaX;
+			},
+			{ passive: false },
+		);
+	}
+
+	// Window resize: recompute fit width; keep zoom factor if user zoomed
+	if (!window._timelineZoomResizeBound) {
+		window._timelineZoomResizeBound = true;
+		let resizeTimer = null;
+		window.addEventListener("resize", () => {
+			if (resizeTimer) clearTimeout(resizeTimer);
+			resizeTimer = setTimeout(() => {
+				const wasFit = !window._timelineZoom.userOverride;
+				applyTimelineZoomLayout({ forceFit: wasFit });
+				// Light re-paint of ruler/markers; debounce heavy regen
+				const dur = getTimelineDuration();
+				if (dur > 0) {
+					paintTimelineRuler(dur);
+					if (typeof window.paintTimelineMarkersAndShading === "function") {
+						window.paintTimelineMarkersAndShading();
+					}
+				}
+				if (window._timelineZoomRegenTimer) {
+					clearTimeout(window._timelineZoomRegenTimer);
+				}
+				window._timelineZoomRegenTimer = setTimeout(() => {
+					window._timelineZoomRegenTimer = null;
+					if (typeof window.loadWaveformTimeline === "function") {
+						window.loadWaveformTimeline();
+					}
+				}, 250);
+			}, 120);
+		});
+	}
+
+	applyTimelineZoomLayout();
+};
+
+window.initTimelineZoomControls = initTimelineZoomControls;
 window.syncTimelinePlayheadSmoothly = syncTimelinePlayheadSmoothly;
 window.paintTimelineRuler = paintTimelineRuler;
 window.setupVideoTrack = setupVideoTrack;
@@ -581,3 +850,12 @@ window.setupSequenceTracks = setupSequenceTracks;
 window.renderAudioWaveformCanvas = renderAudioWaveformCanvas;
 window.renderWaveformInto = renderWaveformInto;
 window.paintTimelineMarkersAndShading = paintTimelineMarkersAndShading;
+
+// Auto-bind when DOM is ready
+if (document.readyState === "loading") {
+	document.addEventListener("DOMContentLoaded", () => {
+		initTimelineZoomControls();
+	});
+} else {
+	initTimelineZoomControls();
+}
