@@ -592,7 +592,6 @@ const updateMarkersListImmediate = () => {
 			document.querySelector(".markers-table");
 
 		if (markerTableBody) {
-
 			// Attach name input change listeners (terry/tetris easter egg via updateMarkerName)
 			markerTableBody
 				.querySelectorAll(".marker-name-input")
@@ -770,7 +769,12 @@ const updateVideoTimeSummary = () => {
 		// Multi-clip join run: footer reflects SEQUENCE bounds (sum of segment lengths).
 		// Solo / unjoined: keep per-clip Clip In / Out / Duration behaviour.
 		const multi =
-			typeof window.isActiveRunMulti === "function" && window.isActiveRunMulti();
+			typeof window.isActiveRunMulti === "function" &&
+			window.isActiveRunMulti();
+		const generateCcBtnHtml = `
+        <button type="button" id="generateCcBtn" class="btn btn-xs btn-outline-secondary py-0.5 px-2 h-6 text-[11px] font-medium leading-none cursor-pointer whitespace-nowrap" title="Generate WebVTT closed captions from markers">
+          Generate CC
+        </button>`;
 		if (multi) {
 			const run =
 				typeof window.getActiveJoinRun === "function"
@@ -798,7 +802,17 @@ const updateVideoTimeSummary = () => {
           <span>Video Duration:</span>
           <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
         </span>
+        ${generateCcBtnHtml}
+      </div>
     `;
+			const genBtn = document.getElementById("generateCcBtn");
+			if (genBtn && typeof window.triggerVttGeneration === "function") {
+				genBtn.addEventListener("click", (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					window.triggerVttGeneration();
+				});
+			}
 			return;
 		}
 
@@ -854,7 +868,17 @@ const updateVideoTimeSummary = () => {
           <span>Video Duration:</span>
           <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
         </span>
+        ${generateCcBtnHtml}
+      </div>
     `;
+		const genBtnSolo = document.getElementById("generateCcBtn");
+		if (genBtnSolo && typeof window.triggerVttGeneration === "function") {
+			genBtnSolo.addEventListener("click", (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				window.triggerVttGeneration();
+			});
+		}
 	} catch (error) {
 		toConsole("updateVideoTimeSummary error", error.message, debuggin);
 	}

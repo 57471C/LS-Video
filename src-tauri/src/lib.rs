@@ -1065,13 +1065,67 @@ async fn generate_timeline_thumbnails(
 }
 
 #[tauri::command]
-fn save_vtt_file(video_path: String, vtt_text: String) -> Result<(), String> {
+fn save_vtt_file(video_path: String, vtt_text: String) -> Result<String, String> {
     use std::fs;
     use std::path::Path;
     let path = Path::new(&video_path);
     let vtt_path = path.with_extension("vtt");
-    fs::write(vtt_path, vtt_text)
-        .map_err(|err| format!("Failed to write VTT subtitle file to disk: {}", err))
+    fs::write(&vtt_path, vtt_text)
+        .map_err(|err| format!("Failed to write VTT subtitle file to disk: {}", err))?;
+    Ok(vtt_path.to_string_lossy().into_owned())
+}
+
+/// Remove the app-cache proxy file for a source path (same hash as verify_and_prepare_video).
+/// No-op if no proxy exists. Does not delete the original source media.
+#[tauri::command]
+async fn delete_proxy_for_video(
+    app_handle: tauri::AppHandle,
+    video_path: String,
+) -> Result<bool, String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::path::Path;
+
+    if video_path.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut hasher = DefaultHasher::new();
+    video_path.hash(&mut hasher);
+    let hash_value = hasher.finish();
+    let proxy_filename = format!("proxy_{:x}.mp4", hash_value);
+
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("Failed to resolve app cache dir: {}", e))?;
+    let proxy_path = cache_dir.join(&proxy_filename);
+
+    if proxy_path.exists() {
+        std::fs::remove_file(&proxy_path)
+            .map_err(|e| format!("Failed to delete proxy cache file: {}", e))?;
+        println!(
+            "[Proxy Core] Deleted proxy cache for source: {} -> {}",
+            video_path,
+            proxy_path.display()
+        );
+        return Ok(true);
+    }
+    // Also try deleting an explicit proxy path if the frontend stored one under app cache
+    let explicit = Path::new(&video_path);
+    if let Some(name) = explicit.file_name().and_then(|n| n.to_str()) {
+        if name.starts_with("proxy_") && explicit.exists() {
+            if let (Ok(cache_canon), Ok(file_canon)) =
+                (cache_dir.canonicalize(), explicit.canonicalize())
+            {
+                if file_canon.starts_with(&cache_canon) {
+                    let _ = std::fs::remove_file(&file_canon);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[tauri::command]
@@ -1431,7 +1485,8 @@ pub fn run() {
         get_waveform_data,
         generate_timeline_thumbnails,
         save_vtt_file,
-        verify_and_prepare_video
+        verify_and_prepare_video,
+        delete_proxy_for_video
         ])
     .on_window_event(|window, event| {
       if let tauri::WindowEvent::Destroyed = event {
