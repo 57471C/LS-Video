@@ -2,7 +2,7 @@
 
 Hard-won constraints. Agents: prefer reading this over rediscovering via breakage.
 
-Last oriented: v0.6.1 (join sequence, batch export, timeline zoom, CC hygiene).
+Last oriented: v0.6.2 (join sequence, batch export, timeline zoom, CC hygiene).
 
 ---
 

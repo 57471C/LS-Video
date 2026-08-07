@@ -1,6 +1,6 @@
 # LS.Video
 
-[![Version](https://img.shields.io/badge/version-0.6.1-brightgreen)](https://github.com/57471C/TMVideo/blob/main/LICENSE)
+[![Version](https://img.shields.io/badge/version-0.6.2-brightgreen)](https://github.com/57471C/TMVideo/blob/main/LICENSE)
 
 LS.Video is a premium, high-performance chapter bookmarking, timeline review, and video annotation tool. Built with a fast, frameworkless Vanilla JS/CSS frontend and a lightweight **Rust Tauri** backend, it bypasses standard browser sandbox memory limits to load and parse production-grade video assets instantly. 
 

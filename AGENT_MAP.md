@@ -5,7 +5,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 **Product:** LS.Video (Lean Studio)  
 **Repo:** https://github.com/57471C/LS-Video (legacy clone paths may still say TMVideo)  
 **Stack:** Tauri 2 + Rust backend + vanilla JS frontend (no React)  
-**Current version:** 0.6.1
+**Current version:** 0.6.2
 
 ---
 
