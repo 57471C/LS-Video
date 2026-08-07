@@ -223,29 +223,96 @@ const shouldHandoffToNextJoined = () => {
 	return !!next?.videoFilePath;
 };
 
-/** Effective clip out for a queue item (clipOut, mediaDuration, or active player). */
-const getClipOutTime = (video, queueIndex) => {
+/** Effective media duration for a queue item (cached probe or active player). */
+const getMediaDurationForQueueIndex = (video, queueIndex) => {
 	if (!video) return 0;
-	let outT = Number(video.clipOutTime) || 0;
-	if (outT <= 0) outT = Number(video.mediaDuration) || 0;
+	let d = Number(video.mediaDuration) || 0;
 	if (
-		outT <= 0 &&
+		d <= 0 &&
 		queueIndex === activeQueueIndex &&
 		typeof player !== "undefined" &&
 		player?.duration
 	) {
-		outT = player.duration;
+		d = player.duration || 0;
 	}
+	return d;
+};
+
+/** Effective clip out for a queue item (clipOut, mediaDuration, or active player). */
+const getClipOutTime = (video, queueIndex) => {
+	if (!video) return 0;
+	let outT = Number(video.clipOutTime) || 0;
+	if (outT <= 0) outT = getMediaDurationForQueueIndex(video, queueIndex);
 	return outT;
+};
+
+/** Effective clip in for a queue item (default 0). */
+const getClipInTime = (video) => {
+	if (!video) return 0;
+	return Math.max(0, Number(video.clipInTime) || 0);
 };
 
 /** Segment duration on the sequence spine: max(0, clipOut - clipIn). */
 const getClipSegmentDuration = (video, queueIndex) => {
 	if (!video) return 0;
-	const inT = Number(video.clipInTime) || 0;
+	const inT = getClipInTime(video);
 	const outT = getClipOutTime(video, queueIndex);
 	return Math.max(0, outT - inT);
 };
+
+/**
+ * Derive clipIn/clipOut on a queue item from its in/out markers (and media duration).
+ * sequenceOffset math depends on these fields staying in sync with marker types.
+ * @param {number} [queueIndex]
+ * @returns {boolean} true if clipIn or clipOut changed
+ */
+const syncClipBoundsFromMarkers = (queueIndex = activeQueueIndex) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		queueIndex < 0 ||
+		!videoQueue[queueIndex]
+	) {
+		return false;
+	}
+	const video = videoQueue[queueIndex];
+	if (!video.appState) video.appState = { markers: [] };
+	const list =
+		queueIndex === activeQueueIndex
+			? typeof markers !== "undefined"
+				? markers
+				: video.appState.markers || []
+			: video.appState.markers || [];
+
+	const mediaDur = getMediaDurationForQueueIndex(video, queueIndex);
+	const startMarker = list.find((m) => m.type === "in" || m.type === "start");
+	const endMarker = list.find((m) => m.type === "out" || m.type === "end");
+
+	const prevIn = Number(video.clipInTime) || 0;
+	const prevOut = Number(video.clipOutTime) || 0;
+
+	let newIn = startMarker ? Number(startMarker.startTime) || 0 : 0;
+	if (newIn < 0) newIn = 0;
+
+	let newOut = endMarker ? Number(endMarker.startTime) || 0 : 0;
+	if (!endMarker || newOut <= 0) {
+		// Default out = full media duration when unset
+		newOut = mediaDur > 0 ? mediaDur : prevOut > 0 ? prevOut : 0;
+	}
+	if (mediaDur > 0 && newOut > mediaDur) newOut = mediaDur;
+	if (newOut > 0 && newIn > newOut) newIn = 0;
+
+	video.clipInTime = newIn;
+	video.clipOutTime = newOut;
+	if (mediaDur > 0) video.mediaDuration = mediaDur;
+
+	if (queueIndex === activeQueueIndex) {
+		clipInTime = newIn;
+		clipOutTime = newOut;
+	}
+
+	return prevIn !== newIn || prevOut !== newOut;
+};
+window.syncClipBoundsFromMarkers = syncClipBoundsFromMarkers;
 
 /** True if this index is part of a join (its flag or previous item's flag). */
 const isQueueIndexJoined = (index) => {
@@ -287,20 +354,29 @@ const getActiveJoinRun = () => {
 		end += 1;
 	}
 
+	// Sequence spine (flush join boundaries):
+	//   sequenceOffset(0) = 0
+	//   segmentDuration(i) = max(0, clipOut_i - clipIn_i)
+	//   sequenceOffset(i+1) = sequenceOffset(i) + segmentDuration(i)
+	// clipOut_N (seq) == clipIn_{N+1} (seq) because offset(N+1) = offset(N) + duration(N).
 	const segments = [];
 	let offset = 0;
 	for (let i = start; i <= end; i += 1) {
 		const video = videoQueue[i];
-		const clipIn = Number(video.clipInTime) || 0;
-		const clipOut = getClipOutTime(video, i);
-		const duration = Math.max(0, (clipOut || 0) - clipIn);
+		const clipIn = getClipInTime(video);
+		const clipOutRaw = getClipOutTime(video, i);
+		const duration = Math.max(0, (clipOutRaw || 0) - clipIn);
+		const clipOut = clipOutRaw > 0 ? clipOutRaw : clipIn + duration;
 		segments.push({
 			queueIndex: i,
 			video,
 			offset,
 			duration,
 			clipIn,
-			clipOut: clipOut > 0 ? clipOut : clipIn + duration,
+			clipOut,
+			// Explicit sequence bounds for this segment window
+			seqIn: offset,
+			seqOut: offset + duration,
 		});
 		offset += duration;
 	}
@@ -501,6 +577,15 @@ const scheduleJoinTimelineRebuild = () => {
 	}
 	window._joinTimelineRebuildTimer = setTimeout(() => {
 		window._joinTimelineRebuildTimer = null;
+		// Re-sync all segment clip bounds from markers before measuring the spine
+		if (typeof videoQueue !== "undefined" && videoQueue.length) {
+			const run = getActiveJoinRun();
+			for (const seg of run.segments) {
+				if (typeof syncClipBoundsFromMarkers === "function") {
+					syncClipBoundsFromMarkers(seg.queueIndex);
+				}
+			}
+		}
 		syncSequenceModeState();
 		if (typeof window.loadWaveformTimeline === "function") {
 			window.loadWaveformTimeline();
@@ -510,6 +595,9 @@ const scheduleJoinTimelineRebuild = () => {
 		}
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
+		}
+		if (typeof updateSliderTicks === "function") {
+			updateSliderTicks();
 		}
 	}, 175);
 };
@@ -2176,46 +2264,127 @@ const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
 };
 
 /**
- * Layout a track body as full-sequence spine with content only in the segment window.
- * Returns the fill element whose left/width are sequence fractions (not 100% host).
+ * Layout a join-row track on the sequence spine.
+ *
+ * Sequence playhead alignment (unchanged):
+ *   activeLeft%  = offset / total
+ *   activeWidth% = duration / total   (duration = clipOut − clipIn)
+ *
+ * Full-source visualization (solo-like tint outside clipIn/Out):
+ *   Map this clip's full mediaDuration onto the row so that the active
+ *   [clipIn, clipOut] band lines up exactly with the sequence slot above.
+ *   Head (0..clipIn) and tail (clipOut..mediaDuration) are tinted — user can
+ *   see the source is longer than the joined segment.
+ *
+ * Returns the content host for filmstrip / waveform painting.
  */
 const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	if (!trackEl || !seg || totalDuration <= 0) return trackEl;
-	const leftPct = (seg.offset / Math.max(totalDuration, 0.001)) * 100;
-	const widthPct = Math.max(
-		0.05,
-		(Math.max(seg.duration, 0) / Math.max(totalDuration, 0.001)) * 100,
-	);
+	const total = Math.max(totalDuration, 0.001);
+	const activeDur = Math.max(Number(seg.duration) || 0, 0.001);
+	const clipIn = Math.max(0, Number(seg.clipIn) || 0);
+	let clipOut = Number(seg.clipOut) || clipIn + activeDur;
+	let mediaDur =
+		typeof getMediaDurationForQueueIndex === "function"
+			? getMediaDurationForQueueIndex(seg.video, seg.queueIndex)
+			: Number(seg.video?.mediaDuration) || 0;
+	if (mediaDur <= 0) mediaDur = Math.max(clipOut, activeDur);
+	if (clipOut > mediaDur) clipOut = mediaDur;
+	if (clipOut <= clipIn) clipOut = Math.min(mediaDur, clipIn + activeDur);
+
+	// Active window on the sequence spine (flush join boundary)
+	const activeLeftPct = (seg.offset / total) * 100;
+	const activeWidthPct = (activeDur / total) * 100;
+
+	// Full media shell: scale so [clipIn, clipOut] maps onto the active slot
+	const fullWidthPct = activeWidthPct * (mediaDur / activeDur);
+	const fullLeftPct = activeLeftPct - (clipIn / mediaDur) * fullWidthPct;
+	const headFrac = mediaDur > 0 ? clipIn / mediaDur : 0;
+	const tailFrac =
+		mediaDur > 0 ? Math.max(0, (mediaDur - clipOut) / mediaDur) : 0;
 
 	// Outer track = full-width sequence spine (click target for seek)
 	trackEl.style.position = "relative";
 	trackEl.style.width = "100%";
-	trackEl.style.display = "block"; // not flex — absolute children need this box
+	trackEl.style.display = "block";
 	trackEl.style.overflow = "hidden";
 	trackEl.innerHTML = "";
 	trackEl.dataset.sequenceSpine = "1";
 	trackEl.dataset.segOffset = String(seg.offset);
 	trackEl.dataset.segDuration = String(seg.duration);
+	trackEl.dataset.leftPct = String(activeLeftPct);
+	trackEl.dataset.widthPct = String(activeWidthPct);
 
-	const fill = document.createElement("div");
-	fill.className = "sequence-segment-fill";
-	fill.dataset.queueIndex = String(seg.queueIndex);
-	fill.dataset.leftPct = String(leftPct);
-	fill.dataset.widthPct = String(widthPct);
-	// Inline geometry is authoritative — CSS must not override left/width
-	fill.style.position = "absolute";
-	fill.style.top = "0";
-	fill.style.bottom = "0";
-	fill.style.left = `${leftPct}%`;
-	fill.style.width = `${widthPct}%`;
-	fill.style.maxWidth = `${widthPct}%`;
-	fill.style.right = "auto";
-	fill.style.display = "flex";
-	fill.style.alignItems = "stretch";
-	fill.style.overflow = "hidden";
-	fill.style.boxSizing = "border-box";
-	trackEl.appendChild(fill);
-	return fill;
+	// Soft dim for sequence time not owned by this clip (other join slots)
+	if (activeLeftPct > 0.001) {
+		const leftDim = document.createElement("div");
+		leftDim.className = "sequence-row-dim sequence-row-dim-before";
+		leftDim.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${activeLeftPct}%;pointer-events:none;z-index:0;`;
+		trackEl.appendChild(leftDim);
+	}
+	const afterActive = Math.max(0, 100 - activeLeftPct - activeWidthPct);
+	if (afterActive > 0.001) {
+		const rightDim = document.createElement("div");
+		rightDim.className = "sequence-row-dim sequence-row-dim-after";
+		rightDim.style.cssText = `position:absolute;top:0;bottom:0;left:${activeLeftPct + activeWidthPct}%;width:${afterActive}%;pointer-events:none;z-index:0;`;
+		trackEl.appendChild(rightDim);
+	}
+
+	// Full-source shell (may extend into dimmed neighbor sequence space on this row)
+	const shell = document.createElement("div");
+	shell.className = "sequence-segment-fill sequence-media-shell";
+	shell.dataset.queueIndex = String(seg.queueIndex);
+	shell.dataset.leftPct = String(fullLeftPct);
+	shell.dataset.widthPct = String(fullWidthPct);
+	shell.dataset.activeLeftPct = String(activeLeftPct);
+	shell.dataset.activeWidthPct = String(activeWidthPct);
+	shell.dataset.clipIn = String(clipIn);
+	shell.dataset.clipOut = String(clipOut);
+	shell.dataset.mediaDuration = String(mediaDur);
+	shell.style.position = "absolute";
+	shell.style.top = "0";
+	shell.style.bottom = "0";
+	shell.style.left = `${fullLeftPct}%`;
+	shell.style.width = `${fullWidthPct}%`;
+	shell.style.maxWidth = "none";
+	shell.style.right = "auto";
+	shell.style.zIndex = "2";
+	shell.style.display = "block";
+	shell.style.overflow = "hidden";
+	shell.style.boxSizing = "border-box";
+
+	// Content host (filmstrip / waveform) fills the full source shell
+	const content = document.createElement("div");
+	content.className = "sequence-media-content";
+	content.dataset.queueIndex = String(seg.queueIndex);
+	content.style.cssText =
+		"position:absolute;inset:0;display:flex;align-items:stretch;overflow:hidden;box-sizing:border-box;z-index:1;";
+	shell.appendChild(content);
+
+	// Solo-matching tint: outside clipIn / clipOut on this source
+	if (headFrac > 0.001) {
+		const headShade = document.createElement("div");
+		headShade.className = "sequence-clip-shade sequence-clip-shade-before";
+		headShade.title = "Before Clip In (source not used in sequence)";
+		headShade.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${headFrac * 100}%;z-index:3;pointer-events:none;`;
+		shell.appendChild(headShade);
+	}
+	if (tailFrac > 0.001) {
+		const tailShade = document.createElement("div");
+		tailShade.className = "sequence-clip-shade sequence-clip-shade-after";
+		tailShade.title = "After Clip Out (source not used in sequence)";
+		tailShade.style.cssText = `position:absolute;top:0;bottom:0;left:${(1 - tailFrac) * 100}%;width:${tailFrac * 100}%;z-index:3;pointer-events:none;`;
+		shell.appendChild(tailShade);
+	}
+
+	// Active-window outline (flush join edge) for clarity
+	const activeBand = document.createElement("div");
+	activeBand.className = "sequence-active-band";
+	activeBand.style.cssText = `position:absolute;top:0;bottom:0;left:${headFrac * 100}%;width:${Math.max(0, (1 - headFrac - tailFrac) * 100)}%;z-index:2;pointer-events:none;box-sizing:border-box;`;
+	shell.appendChild(activeBand);
+
+	trackEl.appendChild(shell);
+	return content;
 };
 
 /** Generates and loads the waveform timeline and thumbnails (solo or active join run). */
@@ -2387,25 +2556,30 @@ window.loadWaveformTimeline = async () => {
 					return;
 				}
 
-				// Waveform for this source
+				// Full source media duration (tint shows outside clipIn/Out)
+				const mediaDur = Math.max(
+					getMediaDurationForQueueIndex(seg.video, seg.queueIndex) || 0,
+					Number(seg.clipOut) || 0,
+					Number(seg.duration) || 0,
+					0.05,
+				);
+				const clipInSec = Math.max(0, Number(seg.clipIn) || 0);
+				const clipOutSec =
+					Number(seg.clipOut) > clipInSec ? Number(seg.clipOut) : mediaDur;
+
+				// Waveform for full source so head/tail outside clip bounds are visible under tint
 				try {
-					const segDur =
-						seg.duration ||
-						Number(seg.video?.mediaDuration) ||
-						seg.clipOut - seg.clipIn ||
-						0;
 					const peaks = await window.__TAURI__.core.invoke(
 						"get_waveform_data",
 						{
 							videoPath: path,
-							durationSeconds: segDur > 0 ? segDur : 1,
+							durationSeconds: mediaDur,
 						},
 					);
 					if (isStaleRequest()) return;
 					if (typeof window.renderWaveformInto === "function") {
 						window.renderWaveformInto(audioFill || row.audioTrack, peaks);
 					}
-					// Keep active clip peaks for any legacy readers
 					if (seg.queueIndex === activeQueueIndex) {
 						window.currentWaveformData = peaks || [];
 						window.currentWaveformDataPath = path;
@@ -2432,41 +2606,31 @@ window.loadWaveformTimeline = async () => {
 					videoFill.style.justifyContent = "center";
 				}
 
-				// Tile density from segment pixel width; sample only [clipIn, clipOut]
-				const segWidthPx = Math.max(
+				// Tile density from full-source shell width on the sequence spine
+				const activeWidthPx = Math.max(
 					40,
 					(seg.duration / totalDuration) * hostWidth,
 				);
-				const tileCount = Math.max(Math.floor(segWidthPx / 120), 1);
-				const startSec = Number(seg.clipIn) || 0;
-				const endSec =
-					Number(seg.clipOut) > startSec
-						? Number(seg.clipOut)
-						: startSec + Math.max(seg.duration, 0.05);
+				const fullWidthPx = Math.max(
+					activeWidthPx,
+					activeWidthPx * (mediaDur / Math.max(seg.duration, 0.001)),
+				);
+				const tileCount = Math.max(Math.floor(fullWidthPx / 120), 1);
 
 				try {
+					// Full source filmstrip; CSS shades tint outside [clipIn, clipOut]
 					const thumbnailPaths = await window.__TAURI__.core.invoke(
 						"generate_timeline_thumbnails",
 						{
 							videoPath: path,
 							tileCount: tileCount,
-							startSeconds: startSec,
-							endSeconds: endSec,
+							startSeconds: 0,
+							endSeconds: mediaDur,
 						},
 					);
 					if (isStaleRequest()) return;
 					if (videoFill && thumbnailPaths?.length) {
 						fillFilmstripTrack(videoFill, thumbnailPaths);
-						// Re-assert segment geometry after fill (defensive)
-						const lp = videoFill.dataset.leftPct;
-						const wp = videoFill.dataset.widthPct;
-						if (lp != null && wp != null) {
-							videoFill.style.left = `${lp}%`;
-							videoFill.style.width = `${wp}%`;
-							videoFill.style.maxWidth = `${wp}%`;
-							videoFill.style.position = "absolute";
-							videoFill.style.right = "auto";
-						}
 					} else if (videoFill) {
 						videoFill.textContent = "No filmstrip";
 					}
@@ -3281,33 +3445,54 @@ const initializePlayer = () => {
 	player.addEventListener("timeupdate", seektimeupdate);
 	player.addEventListener("loadedmetadata", () => {
 		const duration = player.duration;
-		if (typeof seekBar !== "undefined" && seekBar) {
-			seekBar.max = duration || 0;
-		}
 		configureTimelineTicks(duration);
-		if (preserveClipBounds) {
+
+		// Joined runs and explicit preserve: keep user clipIn/Out (do not force full file).
+		// Solo first load: default 0..duration.
+		const joined = isQueueIndexJoined(activeQueueIndex);
+		if (preserveClipBounds || joined) {
 			if (
 				clipOutTime === undefined ||
 				clipOutTime === null ||
 				clipOutTime <= 0 ||
-				clipOutTime > duration
+				(duration > 0 && clipOutTime > duration)
 			) {
 				clipOutTime = duration;
 			}
+			if (clipInTime < 0) clipInTime = 0;
 			preserveClipBounds = false;
 		} else {
 			clipInTime = 0;
 			clipOutTime = duration;
 		}
 
-		// Cache media duration on the active queue entry for sequence spine math
+		// Cache media duration + clip bounds for sequence spine math
 		if (typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) {
 			videoQueue[activeQueueIndex].mediaDuration = duration || 0;
 			videoQueue[activeQueueIndex].clipInTime = clipInTime;
 			videoQueue[activeQueueIndex].clipOutTime = clipOutTime;
 		}
 
-		updateTimeDisplay(duration, "durationTime");
+		// Prefer marker-derived bounds when in/out markers exist
+		if (typeof syncClipBoundsFromMarkers === "function") {
+			syncClipBoundsFromMarkers(activeQueueIndex);
+		}
+
+		const multi = typeof isActiveRunMulti === "function" && isActiveRunMulti();
+		const run =
+			multi && typeof getActiveJoinRun === "function"
+				? getActiveJoinRun()
+				: null;
+		if (typeof seekBar !== "undefined" && seekBar) {
+			seekBar.max = multi
+				? Math.max(run?.totalDuration || 0, 0.001)
+				: duration || 0;
+		}
+
+		const displayDur = multi
+			? Math.max(run?.totalDuration || 0, 0.001)
+			: duration || 0;
+		updateTimeDisplay(displayDur, "durationTime");
 		positionControls();
 		updateLoadButtonColor();
 		toggleVideoPlaceholder(false);
@@ -3315,6 +3500,10 @@ const initializePlayer = () => {
 		// Render markers table shell (incl. #markersTableFoot) before filling the footer
 		if (typeof updateMarkersList === "function") updateMarkersList();
 		if (typeof updateVideoTimeSummary === "function") updateVideoTimeSummary();
+		// Clip bounds may affect join segment offsets — rebuild multi layout
+		if (multi && typeof scheduleJoinTimelineRebuild === "function") {
+			scheduleJoinTimelineRebuild();
+		}
 
 		player.playbackRate = playbackSpeed;
 		speedSlider.value = playbackSpeed;
@@ -3955,15 +4144,33 @@ const initializePlayer = () => {
 	if (seekBar) {
 		seekBar.addEventListener("input", (event) => {
 			let time = Number.parseFloat(event.target.value);
-			if (!Number.isNaN(time)) {
-				if (clipInTime > 0 && time < clipInTime) time = clipInTime;
-				if (clipOutTime > 0 && time > clipOutTime) time = clipOutTime;
-				player.currentTime = time;
-				const duration = player.duration || 1;
-				const pct = (time / duration) * 100;
+			if (Number.isNaN(time)) return;
+
+			const run = getActiveJoinRun();
+			const multi = run.segments.length > 1;
+
+			if (multi) {
+				// Sequence-time scrub (0..total); no solo local clipOut clamp
+				const total = Math.max(run.totalDuration, 0.001);
+				time = Math.max(0, Math.min(total, time));
+				if (typeof seekSequenceTime === "function") {
+					void seekSequenceTime(time, { silent: true });
+				}
+				const pct = (time / total) * 100;
 				for (let i = 0; i < playheadsLiveCollection.length; i++) {
 					playheadsLiveCollection[i].style.left = `${pct}%`;
 				}
+				return;
+			}
+
+			// Solo: constrain to clipIn/Out on local media clock
+			if (clipInTime > 0 && time < clipInTime) time = clipInTime;
+			if (clipOutTime > 0 && time > clipOutTime) time = clipOutTime;
+			player.currentTime = time;
+			const duration = player.duration || 1;
+			const pct = (time / duration) * 100;
+			for (let i = 0; i < playheadsLiveCollection.length; i++) {
+				playheadsLiveCollection[i].style.left = `${pct}%`;
 			}
 		});
 		seekBar.addEventListener("mouseup", (e) => e.target.blur());
@@ -4461,18 +4668,23 @@ const seektimeupdate = () => {
 		const multi = run.segments.length > 1;
 		if (multi) syncSequenceModeState(run);
 
-		if (seekBar) {
-			seekBar.value = currentTime;
-			if (typeof seekBar !== "undefined" && seekBar) {
-				seekBar.max = duration || 0;
-			}
-		}
-
 		// Transport clock: sequence time when multi-clip run, else local
 		const displayTime = multi ? getSequencePlayheadTime() : currentTime;
 		const displayDuration = multi
 			? Math.max(run.totalDuration, 0.001)
 			: duration || 0;
+
+		if (seekBar) {
+			if (multi) {
+				// Multi: bar is SEQUENCE (0..total) — not local media
+				seekBar.max = displayDuration;
+				seekBar.value = displayTime;
+			} else {
+				seekBar.max = duration || 0;
+				seekBar.value = currentTime;
+			}
+		}
+
 		updateTimeDisplay(displayTime, "currentTime");
 		if (displayDuration) {
 			updateTimeDisplay(displayDuration, "durationTime");
@@ -4622,7 +4834,57 @@ const updateSliderTicks = () => {
 	DOM.endTick.classList.add("hidden");
 	if (DOM.endGreyOut) DOM.endGreyOut.classList.add("hidden");
 
+	const run =
+		typeof getActiveJoinRun === "function" ? getActiveJoinRun() : null;
+	const multiClipRun = !!(run?.segments && run.segments.length > 1);
+	const seqTotal = Math.max(Number(run?.totalDuration) || 0, 0);
+
+	// Multi-clip: transport bar is SEQUENCE time (0..total). Solo: local media time.
+	if (multiClipRun) {
+		if (seqTotal <= 0) return;
+		if (typeof seekBar !== "undefined" && seekBar) {
+			seekBar.max = seqTotal;
+		}
+		// Sequence starts at 0 — no leading grey. No solo local-clipOut tail shade.
+		// Optional: nothing past sequence end (max already = total).
+		if (DOM.markerTicksContainer) {
+			// All run markers in sequence time
+			for (const seg of run.segments) {
+				const list =
+					seg.queueIndex === activeQueueIndex
+						? markers || []
+						: seg.video?.appState?.markers || [];
+				for (const m of list) {
+					const seqT =
+						typeof sourceTimeToSequence === "function"
+							? sourceTimeToSequence(seg.queueIndex, m.startTime, run)
+							: m.startTime;
+					if (seqT < 0 || seqT > seqTotal) continue;
+					const pct = (seqT / seqTotal) * 100;
+					const tick = document.createElement("div");
+					tick.className =
+						"absolute h-3 w-0.5 bg-yellow-500 top-1/2 -translate-y-1/2 cursor-pointer transition-colors hover:bg-yellow-400";
+					tick.style.pointerEvents = "auto";
+					tick.style.left = `calc(${pct}% - 1px)`;
+					tick.title = m.name;
+					tick.addEventListener("click", () => {
+						if (typeof seekSequenceTime === "function") {
+							void seekSequenceTime(seqT, { silent: true });
+						}
+					});
+					DOM.markerTicksContainer.appendChild(tick);
+				}
+			}
+		}
+		return;
+	}
+
+	// -------- Solo / single-clip: local media bar + clipIn/Out grey --------
 	if (!player?.duration) return;
+
+	if (typeof seekBar !== "undefined" && seekBar) {
+		seekBar.max = player.duration || 0;
+	}
 
 	if (clipInTime > 0) {
 		const startPct = (clipInTime / player.duration) * 100;
@@ -4634,22 +4896,13 @@ const updateSliderTicks = () => {
 		}
 	}
 
-	// Past-clipOut black-out is solo / single-clip only.
-	// Multi-clip join runs hand off at local clipOut — do not grey the transport bar after it.
-	const multiClipRun =
-		typeof window.isActiveRunMulti === "function" && window.isActiveRunMulti();
-
 	if (clipOutTime > 0 && clipOutTime < player.duration) {
 		const endPct = (clipOutTime / player.duration) * 100;
 		DOM.endTick.style.left = `calc(${endPct}% - 1px)`;
 		DOM.endTick.classList.remove("hidden");
 		if (DOM.endGreyOut) {
-			if (multiClipRun) {
-				DOM.endGreyOut.classList.add("hidden");
-			} else {
-				DOM.endGreyOut.style.width = `${100 - endPct}%`;
-				DOM.endGreyOut.classList.remove("hidden");
-			}
+			DOM.endGreyOut.style.width = `${100 - endPct}%`;
+			DOM.endGreyOut.classList.remove("hidden");
 		}
 	} else {
 		DOM.endTick.classList.add("hidden");
@@ -4666,7 +4919,7 @@ const updateSliderTicks = () => {
 					"absolute h-3 w-0.5 bg-yellow-500 top-1/2 -translate-y-1/2 cursor-pointer transition-colors hover:bg-yellow-400";
 				tick.style.pointerEvents = "auto";
 				tick.style.left = `calc(${pct}% - 1px)`;
-				tick.title = m.name; // Uses browser's native alt hover text
+				tick.title = m.name;
 				tick.addEventListener("click", () => {
 					player.currentTime = m.startTime;
 				});
@@ -4885,11 +5138,29 @@ const updateMarkerType = (markerIndex, newType) => {
 	if (newType === "loop") {
 		markers[markerIndex].loopCount = markers[markerIndex].loopCount || 1;
 	}
+	// in/out types redefine segment duration on the sequence spine
+	const boundsChanged =
+		typeof syncClipBoundsFromMarkers === "function"
+			? syncClipBoundsFromMarkers(activeQueueIndex)
+			: false;
 	saveLocalState();
 	updateVideoTimeSummary();
 	updateMarkersList();
 	if (typeof window.paintTimelineMarkersAndShading === "function") {
 		window.paintTimelineMarkersAndShading();
+	}
+	if (typeof updateSliderTicks === "function") updateSliderTicks();
+	// Rebuild join row geometry so v1 clipOut shares a flush boundary with v2
+	if (
+		boundsChanged ||
+		newType === "in" ||
+		newType === "out" ||
+		newType === "start" ||
+		newType === "end"
+	) {
+		if (typeof scheduleJoinTimelineRebuild === "function") {
+			scheduleJoinTimelineRebuild();
+		}
 	}
 };
 
@@ -4907,8 +5178,15 @@ const deleteMarker = async (markerIndex) => {
 			`Total markers left: ${markers.length}`,
 			debuggin,
 		);
+		if (typeof syncClipBoundsFromMarkers === "function") {
+			syncClipBoundsFromMarkers(activeQueueIndex);
+		}
 		saveLocalState();
 		updateMarkersList();
+		if (typeof updateSliderTicks === "function") updateSliderTicks();
+		if (typeof scheduleJoinTimelineRebuild === "function") {
+			scheduleJoinTimelineRebuild();
+		}
 	}
 };
 
@@ -4978,8 +5256,15 @@ const syncMarkerToPlayhead = (markerIndex) => {
 	const time = player.currentTime;
 	markers[markerIndex].startTime = time;
 	markers.sort((a, b) => a.startTime - b.startTime);
+	if (typeof syncClipBoundsFromMarkers === "function") {
+		syncClipBoundsFromMarkers(activeQueueIndex);
+	}
 	saveLocalState();
 	updateMarkersList();
+	if (typeof updateSliderTicks === "function") updateSliderTicks();
+	if (typeof scheduleJoinTimelineRebuild === "function") {
+		scheduleJoinTimelineRebuild();
+	}
 };
 
 // Expose marker/table helpers for classic scripts (ui-components.js is not a module)

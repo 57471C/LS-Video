@@ -200,11 +200,21 @@ const writeMarkerLocalTime = (queueIndex, markerIndex, localTime) => {
 			? markers
 			: videoQueue[queueIndex].appState.markers;
 	if (!list[markerIndex]) return;
+	const mType = list[markerIndex].type;
 	list[markerIndex].startTime = localTime;
 	list.sort((a, b) => a.startTime - b.startTime);
 	if (queueIndex === activeQueueIndex) {
 		// Keep queue slot in sync
 		videoQueue[queueIndex].appState.markers = markers;
+	}
+	// in/out marker times redefine segment duration → rebuild join layout
+	const wasInOut =
+		mType === "in" || mType === "out" || mType === "start" || mType === "end";
+	if (wasInOut && typeof window.syncClipBoundsFromMarkers === "function") {
+		window.syncClipBoundsFromMarkers(queueIndex);
+	}
+	if (wasInOut && typeof window.scheduleJoinTimelineRebuild === "function") {
+		window.scheduleJoinTimelineRebuild();
 	}
 };
 
@@ -542,10 +552,16 @@ const updateMarkersListImmediate = () => {
 								: confirm(`Delete marker "${name}"?`)
 						) {
 							videoQueue[queueIndex].appState.markers.splice(markerIndex, 1);
+							if (typeof window.syncClipBoundsFromMarkers === "function") {
+								window.syncClipBoundsFromMarkers(queueIndex);
+							}
 							saveLocalState();
 							updateMarkersList();
 							if (typeof window.paintTimelineMarkersAndShading === "function") {
 								window.paintTimelineMarkersAndShading();
+							}
+							if (typeof window.scheduleJoinTimelineRebuild === "function") {
+								window.scheduleJoinTimelineRebuild();
 							}
 						}
 					}
@@ -576,10 +592,26 @@ const updateMarkersListImmediate = () => {
 						if (type === "loop") {
 							m.loopCount = m.loopCount || 1;
 						}
+						// Non-active clip in/out still reshapes the join spine
+						if (typeof window.syncClipBoundsFromMarkers === "function") {
+							window.syncClipBoundsFromMarkers(qIndex);
+						}
 						saveLocalState();
 						updateMarkersList();
 						if (typeof window.paintTimelineMarkersAndShading === "function") {
 							window.paintTimelineMarkersAndShading();
+						}
+						if (typeof window.updateSliderTicks === "function") {
+							window.updateSliderTicks();
+						}
+						if (
+							(type === "in" ||
+								type === "out" ||
+								type === "start" ||
+								type === "end") &&
+							typeof window.scheduleJoinTimelineRebuild === "function"
+						) {
+							window.scheduleJoinTimelineRebuild();
 						}
 					}
 					return;
@@ -775,6 +807,12 @@ const updateVideoTimeSummary = () => {
         <button type="button" id="generateCcBtn" class="btn btn-xs btn-outline-secondary py-0.5 px-2 h-6 text-[11px] font-medium leading-none cursor-pointer whitespace-nowrap" title="Generate WebVTT closed captions from markers">
           Generate CC
         </button>`;
+
+		// Always keep clipIn/Out in sync with in/out markers (drives join segment offsets).
+		if (typeof window.syncClipBoundsFromMarkers === "function") {
+			window.syncClipBoundsFromMarkers(activeQueueIndex);
+		}
+
 		if (multi) {
 			const run =
 				typeof window.getActiveJoinRun === "function"
@@ -791,15 +829,15 @@ const updateVideoTimeSummary = () => {
 			footer.innerHTML = `
       <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full py-1 text-sm font-medium">
         <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Clip In:</span>
+          <span>Seq In:</span>
           <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
         </span>
         <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Clip Out:</span>
+          <span>Seq Out:</span>
           <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
         </span>
         <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Video Duration:</span>
+          <span>Sequence Duration:</span>
           <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
         </span>
         ${generateCcBtnHtml}
