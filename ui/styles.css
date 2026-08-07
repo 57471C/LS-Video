@@ -405,9 +405,44 @@ body.cinema-mode #toastContainer {
 	flex: 1 1 auto !important;
 }
 
+/* Horizontal zoom scrollport: ruler + tracks share one scrollLeft */
+#timeline-h-scroll,
+.timeline-h-scroll {
+	min-height: 0;
+	flex: 1 1 auto;
+	overflow-x: hidden; /* auto when zoom > 1 via JS */
+	overflow-y: auto;
+	width: 100%;
+	position: relative;
+}
+
+#timeline-zoom-content,
+.timeline-zoom-content {
+	position: relative;
+	min-height: 100%;
+	/* width set by JS: fitWidth * zoomFactor */
+	width: 100%;
+	box-sizing: border-box;
+}
+
 #timeline-tracks-host {
 	min-height: 0;
-	overflow-y: auto;
+	/* vertical stack only; H-scroll is on #timeline-h-scroll */
+	overflow-x: visible;
+	overflow-y: visible;
+	width: 100%;
+}
+
+#timeline-ruler-track,
+#timeline-tracks-host .sequence-video-track,
+#timeline-tracks-host .sequence-audio-track,
+#timeline-video-track,
+#timeline-audio-track {
+	box-sizing: border-box;
+}
+
+#timeline-zoom-controls input[type="range"] {
+	vertical-align: middle;
 }
 
 .sequence-av-pair {
