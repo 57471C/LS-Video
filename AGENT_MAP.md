@@ -13,17 +13,17 @@ Living map for agents and humans. Read this before large refactors. Update when 
 
 | Path | Role |
 |------|------|
-| `ui/app.js` | Monolith frontend: load path, view modes, markers wiring, launch args |
+| `ui/app.js` | Monolith frontend: load path, view modes, markers, queue joins, batch export, CC |
 | `ui/state.js` | Project state, localStorage, CSV export helpers |
 | `ui/utils.js` | Logging, time format, sanitize — **no** Failsafe Proxy |
-| `ui/ui-components.js` | Markers table render / DOM |
-| `ui/js/timeline-engine.js` | Playhead, ruler, waveform track drawing |
+| `ui/ui-components.js` | Markers table, footer (Generate CC, clip summary), clip-bound sync hooks |
+| `ui/js/timeline-engine.js` | Playhead, ruler, waveform, marker shading, **timeline zoom** |
 | `ui/js/viewport-engine.js` | Zoom / pan viewport |
 | `ui/js/visualizer-engine.js` | Butterchurn / Web Audio viz |
 | `ui/vendor/butterchurn*.js` | Vendored UMD Butterchurn + presets |
-| `ui/index.html` | Shell, CSP meta, script order |
-| `ui/styles.css` | View-mode and chrome CSS |
-| `src-tauri/src/lib.rs` | Commands: proxy, thumbs, project zip, ffmpeg |
+| `ui/index.html` | Shell, CSP meta, script order, detailed timeline chrome |
+| `ui/styles.css` | View-mode, sequence rows, CC button states, timeline zoom scroll |
+| `src-tauri/src/lib.rs` | Proxy, thumbs, project zip, ffmpeg export/join, VTT, proxy cleanup |
 | `src-tauri/tauri.conf.json` | productName, identifier, associations, externalBin |
 | `src-tauri/capabilities/default.json` | Permissions (fs, shell spawn/open) |
 | `src-tauri/binaries/` | ffmpeg sidecar (gitignored; required for build) |
@@ -39,6 +39,10 @@ Living map for agents and humans. Read this before large refactors. Update when 
 - `window.loadVideo`, `window.cycleViewMode`
 - Marker handlers: `jumpToMarkerTime`, `playFromMarkerTime`, `deleteMarker`, `updateMarkerName`, …
 - `window.updateMarkersList`, `window.updateVideoTimeSummary`
+- Join / sequence: `getActiveJoinRun`, `isActiveRunMulti`, `seekSequenceTime`, `sourceTimeToSequence`, `scheduleJoinTimelineRebuild`, `syncClipBoundsFromMarkers`
+- Timeline zoom: `applyTimelineZoomLayout`, `setTimelineZoom`, `getTimelineContentWidth`, `initTimelineZoomControls`
+- CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`
+- Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`
 
 If something “does nothing” in the markers table, check window exports first.
 
@@ -94,6 +98,8 @@ Theme: respect `localStorage` darkMode / `html.dark` in **all** modes. Cinema/mi
 
 Cache under app local data (`com.leanstudio.lsvideo`). Overlay: heavy “Optimizing…” only when transcode needed.
 
+Queue items may store `proxyPath` when playback uses a cache file. On remove/replace: `delete_proxy_for_video` + clear Proxy Info UI. Do not leave stale CC tracks across media change (`clearSubtitleTracks`).
+
 ---
 
 ## Projects & formats
@@ -109,21 +115,47 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 
 ---
 
-## Markers
+## Queue, joins, sequence timeline
 
-- Types include normal + **loop** (badge, cyan region, repeat N times).
-- Table actions require window-bound handlers + event delegation after re-render.
-- Easter egg: rename marker to `terry` or `tetris` → Tetris in settings panel.
-- **Speed** marker type: planned, not done.
+- `joinedToNext` on item `i` joins `i` → `i+1` (list order).
+- **Active join run:** contiguous chain containing `activeQueueIndex`.
+- Sequence math: `offset(0)=0`, `duration(i)=max(0, clipOut−clipIn)`, `offset(i+1)=offset(i)+duration(i)` so clip N’s sequence out meets clip N+1’s in (flush boundary).
+- `syncClipBoundsFromMarkers` keeps `clipInTime`/`clipOutTime` aligned with in/out markers; join rebuild after bound changes.
+- Multi-clip detailed timeline: one row per segment; full-source filmstrip/waveform with **tint outside clipIn/Out**; playhead/ruler in sequence time.
+- Transport seek bar: multi = sequence `0..total`; solo = local media + clip grey tails.
 
 ---
 
-## Timeline / filmstrip
+## Markers & closed captions
+
+- Types include standard, jump, loop, in, out.
+- **Generate CC** (table footer): plain WebVTT from markers (solo = active source; multi = sequence-ordered run); save beside video + load track.
+- CC transport button states (`setCcButtonState`): **none** (dark/disabled), **available** (white/idle), **active** (green glow).
+
+---
+
+## Timeline / filmstrip / zoom
 
 - Custom canvas waveform + filmstrip (Peaks.js / Whisper **removed** — do not re-add).
 - Stale-job guard: `window._timelineGenId` + request path check on async completion.
 - Per-video thumbnail cache dir in Rust.
 - **Skip** filmstrip/thumb generation for audio-only files.
+- **Detailed timeline zoom** (`#timelineZoomSlider`): factor `1` = fit width; `>1` = `fitWidth * zoom` + horizontal scroll on `#timeline-h-scroll` (ruler + tracks share scrollLeft). Debounce filmstrip regen on slider change.
+
+---
+
+## Batch export (queue)
+
+Entry: settings panel → Batch export queue (**checked by default**) + optional Strip audio.
+
+| Job type | Output |
+|----------|--------|
+| Contiguous `joinedToNext` run | One concat MP4 (each segment `[clipIn, clipOut]`) |
+| Unjoined item | Solo trim/export |
+
+- Folder pick once; names like `sequence_001_…mp4` / `basename_export.mp4`.
+- Rust: `export_queue_job` (trim → concat → quality). **IPC:** each `VideoSegment` must send **one** of `loop_count` / `loopCount`, never both (serde duplicate field).
+- Also: `join_and_compress_videos` (legacy single-shot join UI path).
 
 ---
 
@@ -158,6 +190,7 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 - Peaks.js, Whisper, Failsafe Proxy
 - VLC / libmpv experimental branches (orphaned; proxy is the supported H.265 path)
 - Shipping without ffmpeg sidecar in the NSIS bundle
+- Batch export: fades/titles, fancy re-encode UI beyond quality presets
 
 ---
 

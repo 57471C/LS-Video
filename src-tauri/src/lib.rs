@@ -503,7 +503,8 @@ struct VideoSegment {
     path: String,
     start_time: f64,
     end_time: f64,
-    #[serde(alias = "loopCount")]
+    /// Prefer `loop_count` from JS. `loopCount` accepted as alias only — never send both.
+    #[serde(default, alias = "loopCount")]
     loop_count: Option<i32>,
 }
 
@@ -827,6 +828,465 @@ async fn join_and_compress_videos(
         });
 
         Ok(final_path_str.to_string())
+    })
+    .await
+    .map_err(|e| format!("Task panicked: {}", e))?
+}
+
+/// Batch-export one job: one or more segments (solo trim or joined concat).
+/// Writes `output_path` (absolute). Sources are never deleted.
+/// `quality`: "copy" | "low" | "medium" | "high"
+/// `strip_audio`: omit audio track (-an)
+#[tauri::command]
+async fn export_queue_job(
+    app_handle: tauri::AppHandle,
+    video_segments: Vec<VideoSegment>,
+    output_path: String,
+    quality: String,
+    strip_audio: bool,
+) -> Result<String, String> {
+    let app = app_handle.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::env;
+        use std::path::Path;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        if video_segments.is_empty() {
+            return Err("No video segments provided.".to_string());
+        }
+        if output_path.trim().is_empty() {
+            return Err("Output path is empty.".to_string());
+        }
+
+        let get_duration = |path: &str| -> Option<f64> {
+            if let Ok(sidecar) = app.shell().sidecar("ffmpeg") {
+                let sidecar = sidecar.args(["-i", path]);
+                if let Ok(output) = tauri::async_runtime::block_on(sidecar.output()) {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if let Some(pos) = stderr.find("Duration: ") {
+                        let sub = &stderr[pos + 10..];
+                        if sub.len() >= 11 {
+                            let parts: Vec<&str> = sub[..11].split(':').collect();
+                            if parts.len() == 3 {
+                                let hours: f64 = parts[0].parse().unwrap_or(0.0);
+                                let minutes: f64 = parts[1].parse().unwrap_or(0.0);
+                                let seconds: f64 = parts[2].parse().unwrap_or(0.0);
+                                return Some(hours * 3600.0 + minutes * 60.0 + seconds);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        };
+
+        let unique_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis();
+        let temp_dir = env::temp_dir();
+        let mut temp_clips: Vec<std::path::PathBuf> = Vec::new();
+        let mut cleaned_paths: Vec<String> = Vec::new();
+
+        let quality_l = quality.to_lowercase();
+        let prefer_copy = quality_l == "copy";
+        let crf = match quality_l.as_str() {
+            "low" => "32",
+            "high" => "18",
+            _ => "23",
+        };
+        let preset = match quality_l.as_str() {
+            "low" => "veryfast",
+            "high" => "medium",
+            _ => "fast",
+        };
+
+        // --- Step 1: per-segment trim into temp (reliable reencode; copy attempt first when quality=copy) ---
+        for (i, segment) in video_segments.iter().enumerate() {
+            let path = Path::new(&segment.path);
+            if !path.exists() {
+                return Err(format!("Source not found: {}", segment.path));
+            }
+
+            let start = segment.start_time.max(0.0);
+            let mut end = segment.end_time;
+            if end <= 0.0 {
+                end = get_duration(&segment.path).unwrap_or(0.0);
+            }
+            if end > 0.0 && end <= start {
+                return Err(format!(
+                    "Invalid clip bounds for segment {} (start={}, end={})",
+                    i, start, end
+                ));
+            }
+
+            let is_full = start <= 0.001
+                && (end <= 0.0
+                    || get_duration(&segment.path)
+                        .map(|d| (end - d).abs() < 0.15)
+                        .unwrap_or(false));
+
+            let temp_out = temp_dir.join(format!("batch_seg_{}_{}.mp4", i, unique_id));
+            let temp_out_str = temp_out.to_string_lossy().to_string();
+
+            let mut made = false;
+
+            // Try stream copy when full file and copy quality (no trim)
+            if is_full && prefer_copy && !strip_audio {
+                cleaned_paths.push(segment.path.clone());
+                made = true;
+            } else if is_full && prefer_copy && strip_audio {
+                // Full file, strip audio only
+                let args = vec![
+                    "-y".into(),
+                    "-i".into(),
+                    segment.path.clone(),
+                    "-c:v".into(),
+                    "copy".into(),
+                    "-an".into(),
+                    temp_out_str.clone(),
+                ];
+                let out = tauri::async_runtime::block_on(
+                    app.shell()
+                        .sidecar("ffmpeg")
+                        .map_err(|e| e.to_string())?
+                        .args(args)
+                        .output(),
+                )
+                .map_err(|e| e.to_string())?;
+                if out.status.success() {
+                    temp_clips.push(temp_out.clone());
+                    cleaned_paths.push(temp_out_str.clone());
+                    made = true;
+                }
+            }
+
+            if !made {
+                // Trim (and optionally reencode). Prefer reencode for HEVC/proxy safety.
+                let mut args: Vec<String> = vec!["-y".into()];
+                if start > 0.001 {
+                    args.push("-ss".into());
+                    args.push(start.to_string());
+                }
+                args.push("-i".into());
+                args.push(segment.path.clone());
+                if end > 0.0 {
+                    // duration-based -t is more reliable after -ss input seek than -to
+                    let dur = (end - start).max(0.01);
+                    args.push("-t".into());
+                    args.push(dur.to_string());
+                }
+
+                if prefer_copy {
+                    args.push("-c".into());
+                    args.push("copy".into());
+                    if strip_audio {
+                        args.push("-an".into());
+                    }
+                    args.push(temp_out_str.clone());
+                    let out = tauri::async_runtime::block_on(
+                        app.shell()
+                            .sidecar("ffmpeg")
+                            .map_err(|e| e.to_string())?
+                            .args(args.clone())
+                            .output(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if out.status.success() {
+                        temp_clips.push(temp_out.clone());
+                        cleaned_paths.push(temp_out_str.clone());
+                        made = true;
+                    }
+                }
+
+                if !made {
+                    // Reencode fallback (HEVC / keyframe / mixed containers)
+                    let mut rargs: Vec<String> = vec!["-y".into()];
+                    if start > 0.001 {
+                        rargs.push("-ss".into());
+                        rargs.push(start.to_string());
+                    }
+                    rargs.push("-i".into());
+                    rargs.push(segment.path.clone());
+                    if end > 0.0 {
+                        let dur = (end - start).max(0.01);
+                        rargs.push("-t".into());
+                        rargs.push(dur.to_string());
+                    }
+                    rargs.extend([
+                        "-c:v".into(),
+                        "libx264".into(),
+                        "-pix_fmt".into(),
+                        "yuv420p".into(),
+                        "-crf".into(),
+                        crf.into(),
+                        "-preset".into(),
+                        preset.into(),
+                    ]);
+                    if strip_audio {
+                        rargs.push("-an".into());
+                    } else {
+                        rargs.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+                    }
+                    rargs.push(temp_out_str.clone());
+                    let out = tauri::async_runtime::block_on(
+                        app.shell()
+                            .sidecar("ffmpeg")
+                            .map_err(|e| e.to_string())?
+                            .args(rargs)
+                            .output(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if !out.status.success() {
+                        for c in &temp_clips {
+                            let _ = std::fs::remove_file(c);
+                        }
+                        return Err(format_ffmpeg_output_error(
+                            &format!("Failed to process segment {}", i),
+                            &out,
+                        ));
+                    }
+                    temp_clips.push(temp_out.clone());
+                    cleaned_paths.push(temp_out_str);
+                }
+            }
+        }
+
+        if cleaned_paths.is_empty() {
+            return Err("No processed segments to export.".to_string());
+        }
+
+        let out_path = Path::new(&output_path);
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create output directory: {}", e))?;
+            }
+        }
+
+        // --- Step 2: single clip → copy/move to output; multi → concat ---
+        if cleaned_paths.len() == 1 {
+            let src = &cleaned_paths[0];
+            // If source is original full file, re-mux/copy to output path
+            if Path::new(src) == Path::new(&video_segments[0].path)
+                || !prefer_copy
+                || strip_audio
+            {
+                // Ensure final quality at destination
+                let mut args: Vec<String> = vec![
+                    "-y".into(),
+                    "-i".into(),
+                    src.clone(),
+                ];
+                if prefer_copy && !strip_audio {
+                    args.extend(["-c".into(), "copy".into()]);
+                } else if prefer_copy && strip_audio {
+                    args.extend(["-c:v".into(), "copy".into(), "-an".into()]);
+                } else {
+                    args.extend([
+                        "-c:v".into(),
+                        "libx264".into(),
+                        "-pix_fmt".into(),
+                        "yuv420p".into(),
+                        "-crf".into(),
+                        crf.into(),
+                        "-preset".into(),
+                        preset.into(),
+                    ]);
+                    if strip_audio {
+                        args.push("-an".into());
+                    } else {
+                        args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+                    }
+                }
+                args.push(output_path.clone());
+                let out = tauri::async_runtime::block_on(
+                    app.shell()
+                        .sidecar("ffmpeg")
+                        .map_err(|e| e.to_string())?
+                        .args(args)
+                        .output(),
+                )
+                .map_err(|e| e.to_string())?;
+                if !out.status.success() {
+                    // Fallback: raw copy of temp file if it is already processed mp4
+                    if Path::new(src) != Path::new(&video_segments[0].path) {
+                        std::fs::copy(src, &output_path).map_err(|e| {
+                            format!(
+                                "Export failed and copy fallback failed: {}",
+                                e
+                            )
+                        })?;
+                    } else {
+                        for c in &temp_clips {
+                            let _ = std::fs::remove_file(c);
+                        }
+                        return Err(format_ffmpeg_output_error("Final export failed", &out));
+                    }
+                }
+            } else {
+                std::fs::copy(src, &output_path)
+                    .map_err(|e| format!("Failed to write output: {}", e))?;
+            }
+        } else {
+            // Concat multiple processed segments
+            let list_path = temp_dir.join(format!("batch_concat_{}.txt", unique_id));
+            let intermediate = temp_dir.join(format!("batch_inter_{}.mp4", unique_id));
+            {
+                use std::io::Write;
+                let mut list_file =
+                    std::fs::File::create(&list_path).map_err(|e| e.to_string())?;
+                for p in &cleaned_paths {
+                    let formatted = p.replace('\\', "/");
+                    writeln!(list_file, "file '{}'", formatted).map_err(|e| e.to_string())?;
+                }
+                list_file.flush().map_err(|e| e.to_string())?;
+                list_file.sync_all().map_err(|e| e.to_string())?;
+            }
+
+            let list_str = list_path.to_string_lossy().to_string();
+            let inter_str = intermediate.to_string_lossy().to_string();
+
+            // Try concat demuxer copy
+            let mut lossless_ok = false;
+            {
+                let args = vec![
+                    "-y".into(),
+                    "-f".into(),
+                    "concat".into(),
+                    "-safe".into(),
+                    "0".into(),
+                    "-i".into(),
+                    list_str.clone(),
+                    "-c".into(),
+                    "copy".into(),
+                    inter_str.clone(),
+                ];
+                if let Ok(out) = tauri::async_runtime::block_on(
+                    app.shell()
+                        .sidecar("ffmpeg")
+                        .map_err(|e| e.to_string())?
+                        .args(args)
+                        .output(),
+                ) {
+                    if out.status.success() {
+                        lossless_ok = true;
+                    }
+                }
+            }
+
+            if !lossless_ok {
+                // filter_complex concat with reencode
+                let mut args = vec!["-y".to_string()];
+                let mut fc = String::new();
+                let n = cleaned_paths.len();
+                for (i, p) in cleaned_paths.iter().enumerate() {
+                    args.push("-i".into());
+                    args.push(p.clone());
+                    if strip_audio {
+                        fc.push_str(&format!("[{}:v]", i));
+                    } else {
+                        fc.push_str(&format!("[{}:v][{}:a]", i, i));
+                    }
+                }
+                if strip_audio {
+                    fc.push_str(&format!("concat=n={}:v=1:a=0[v]", n));
+                } else {
+                    fc.push_str(&format!("concat=n={}:v=1:a=1[v][a]", n));
+                }
+                args.push("-filter_complex".into());
+                args.push(fc);
+                args.push("-map".into());
+                args.push("[v]".into());
+                if !strip_audio {
+                    args.push("-map".into());
+                    args.push("[a]".into());
+                }
+                args.extend([
+                    "-c:v".into(),
+                    "libx264".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                    "-crf".into(),
+                    crf.into(),
+                    "-preset".into(),
+                    preset.into(),
+                ]);
+                if !strip_audio {
+                    args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+                } else {
+                    args.push("-an".into());
+                }
+                args.push(inter_str.clone());
+                let out = tauri::async_runtime::block_on(
+                    app.shell()
+                        .sidecar("ffmpeg")
+                        .map_err(|e| e.to_string())?
+                        .args(args)
+                        .output(),
+                )
+                .map_err(|e| e.to_string())?;
+                if !out.status.success() {
+                    let _ = std::fs::remove_file(&list_path);
+                    for c in &temp_clips {
+                        let _ = std::fs::remove_file(c);
+                    }
+                    return Err(format_ffmpeg_output_error("Concat failed", &out));
+                }
+            }
+
+            // Final pass: quality + strip_audio to destination
+            let mut fargs: Vec<String> = vec![
+                "-y".into(),
+                "-i".into(),
+                inter_str.clone(),
+            ];
+            if prefer_copy && !strip_audio {
+                fargs.extend(["-c".into(), "copy".into()]);
+            } else {
+                fargs.extend([
+                    "-c:v".into(),
+                    "libx264".into(),
+                    "-pix_fmt".into(),
+                    "yuv420p".into(),
+                    "-crf".into(),
+                    crf.into(),
+                    "-preset".into(),
+                    preset.into(),
+                ]);
+                if strip_audio {
+                    fargs.push("-an".into());
+                } else {
+                    fargs.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+                }
+            }
+            fargs.push(output_path.clone());
+            let out = tauri::async_runtime::block_on(
+                app.shell()
+                    .sidecar("ffmpeg")
+                    .map_err(|e| e.to_string())?
+                    .args(fargs)
+                    .output(),
+            )
+            .map_err(|e| e.to_string())?;
+
+            let _ = std::fs::remove_file(&list_path);
+            let _ = std::fs::remove_file(&intermediate);
+
+            if !out.status.success() {
+                // intermediate may have been consumed; try copy intermediate if still there
+                for c in &temp_clips {
+                    let _ = std::fs::remove_file(c);
+                }
+                return Err(format_ffmpeg_output_error("Final mux failed", &out));
+            }
+        }
+
+        for c in &temp_clips {
+            let _ = std::fs::remove_file(c);
+        }
+
+        Ok(output_path)
     })
     .await
     .map_err(|e| format!("Task panicked: {}", e))?
@@ -1482,6 +1942,7 @@ pub fn run() {
         load_tspz_bundle,
         resolve_subtitles,
         join_and_compress_videos,
+        export_queue_job,
         get_waveform_data,
         generate_timeline_thumbnails,
         save_vtt_file,
