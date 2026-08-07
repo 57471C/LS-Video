@@ -448,13 +448,29 @@ const paintTimelineMarkersAndShading = () => {
 
 	const fragment = document.createDocumentFragment();
 
-	// Start/End Trimming Shading (solo mode, local times)
+	// Start/End Trimming Shading (solo mode, local times from markers or clip bounds)
 	if (!isSequenceMode()) {
 		const startMarker = entries.find(
 			(m) => m.type === "in" || m.type === "start",
 		);
-		if (startMarker && startMarker.startTime > 0) {
-			const startPct = (startMarker.startTime / duration) * 100;
+		const endMarker = entries.find((m) => m.type === "out" || m.type === "end");
+		const soloIn =
+			startMarker && startMarker.startTime > 0
+				? startMarker.startTime
+				: typeof clipInTime !== "undefined" && clipInTime > 0
+					? clipInTime
+					: 0;
+		const soloOut =
+			endMarker && endMarker.startTime > 0 && endMarker.startTime < duration
+				? endMarker.startTime
+				: typeof clipOutTime !== "undefined" &&
+						clipOutTime > 0 &&
+						clipOutTime < duration
+					? clipOutTime
+					: 0;
+
+		if (soloIn > 0) {
+			const startPct = (soloIn / duration) * 100;
 			const startShade = document.createElement("div");
 			startShade.className =
 				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
@@ -463,9 +479,8 @@ const paintTimelineMarkersAndShading = () => {
 			fragment.appendChild(startShade);
 		}
 
-		const endMarker = entries.find((m) => m.type === "out" || m.type === "end");
-		if (endMarker && endMarker.startTime < duration) {
-			const endPct = (endMarker.startTime / duration) * 100;
+		if (soloOut > 0 && soloOut < duration) {
+			const endPct = (soloOut / duration) * 100;
 			const endShade = document.createElement("div");
 			endShade.className =
 				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
@@ -474,16 +489,18 @@ const paintTimelineMarkersAndShading = () => {
 			fragment.appendChild(endShade);
 		}
 	} else {
-		// Multi: shade gaps outside each segment? Skip trim shades; draw join boundaries lightly
+		// Multi: per-row grey outside [clipIn, clipOut] lives on each track via
+		// applySegmentWindow (.sequence-row-dim). Overlay only draws flush join cuts.
 		const run = window.getActiveJoinRun?.();
-		if (run?.segments) {
+		if (run?.segments && duration > 0) {
 			for (let i = 1; i < run.segments.length; i += 1) {
+				// Shared boundary: sequenceOffset(i) == end of segment i-1
 				const boundaryPct = (run.segments[i].offset / duration) * 100;
 				const joinLine = document.createElement("div");
 				joinLine.className =
-					"absolute top-0 bottom-0 w-px bg-blue-500/50 dark:bg-blue-400/40 z-10";
+					"absolute top-0 bottom-0 w-0.5 bg-blue-500/70 dark:bg-blue-400/60 z-10";
 				joinLine.style.left = `${boundaryPct}%`;
-				joinLine.title = "Join";
+				joinLine.title = "Join boundary";
 				fragment.appendChild(joinLine);
 			}
 		}

@@ -223,29 +223,96 @@ const shouldHandoffToNextJoined = () => {
 	return !!next?.videoFilePath;
 };
 
-/** Effective clip out for a queue item (clipOut, mediaDuration, or active player). */
-const getClipOutTime = (video, queueIndex) => {
+/** Effective media duration for a queue item (cached probe or active player). */
+const getMediaDurationForQueueIndex = (video, queueIndex) => {
 	if (!video) return 0;
-	let outT = Number(video.clipOutTime) || 0;
-	if (outT <= 0) outT = Number(video.mediaDuration) || 0;
+	let d = Number(video.mediaDuration) || 0;
 	if (
-		outT <= 0 &&
+		d <= 0 &&
 		queueIndex === activeQueueIndex &&
 		typeof player !== "undefined" &&
 		player?.duration
 	) {
-		outT = player.duration;
+		d = player.duration || 0;
 	}
+	return d;
+};
+
+/** Effective clip out for a queue item (clipOut, mediaDuration, or active player). */
+const getClipOutTime = (video, queueIndex) => {
+	if (!video) return 0;
+	let outT = Number(video.clipOutTime) || 0;
+	if (outT <= 0) outT = getMediaDurationForQueueIndex(video, queueIndex);
 	return outT;
+};
+
+/** Effective clip in for a queue item (default 0). */
+const getClipInTime = (video) => {
+	if (!video) return 0;
+	return Math.max(0, Number(video.clipInTime) || 0);
 };
 
 /** Segment duration on the sequence spine: max(0, clipOut - clipIn). */
 const getClipSegmentDuration = (video, queueIndex) => {
 	if (!video) return 0;
-	const inT = Number(video.clipInTime) || 0;
+	const inT = getClipInTime(video);
 	const outT = getClipOutTime(video, queueIndex);
 	return Math.max(0, outT - inT);
 };
+
+/**
+ * Derive clipIn/clipOut on a queue item from its in/out markers (and media duration).
+ * sequenceOffset math depends on these fields staying in sync with marker types.
+ * @param {number} [queueIndex]
+ * @returns {boolean} true if clipIn or clipOut changed
+ */
+const syncClipBoundsFromMarkers = (queueIndex = activeQueueIndex) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		queueIndex < 0 ||
+		!videoQueue[queueIndex]
+	) {
+		return false;
+	}
+	const video = videoQueue[queueIndex];
+	if (!video.appState) video.appState = { markers: [] };
+	const list =
+		queueIndex === activeQueueIndex
+			? typeof markers !== "undefined"
+				? markers
+				: video.appState.markers || []
+			: video.appState.markers || [];
+
+	const mediaDur = getMediaDurationForQueueIndex(video, queueIndex);
+	const startMarker = list.find((m) => m.type === "in" || m.type === "start");
+	const endMarker = list.find((m) => m.type === "out" || m.type === "end");
+
+	const prevIn = Number(video.clipInTime) || 0;
+	const prevOut = Number(video.clipOutTime) || 0;
+
+	let newIn = startMarker ? Number(startMarker.startTime) || 0 : 0;
+	if (newIn < 0) newIn = 0;
+
+	let newOut = endMarker ? Number(endMarker.startTime) || 0 : 0;
+	if (!endMarker || newOut <= 0) {
+		// Default out = full media duration when unset
+		newOut = mediaDur > 0 ? mediaDur : prevOut > 0 ? prevOut : 0;
+	}
+	if (mediaDur > 0 && newOut > mediaDur) newOut = mediaDur;
+	if (newOut > 0 && newIn > newOut) newIn = 0;
+
+	video.clipInTime = newIn;
+	video.clipOutTime = newOut;
+	if (mediaDur > 0) video.mediaDuration = mediaDur;
+
+	if (queueIndex === activeQueueIndex) {
+		clipInTime = newIn;
+		clipOutTime = newOut;
+	}
+
+	return prevIn !== newIn || prevOut !== newOut;
+};
+window.syncClipBoundsFromMarkers = syncClipBoundsFromMarkers;
 
 /** True if this index is part of a join (its flag or previous item's flag). */
 const isQueueIndexJoined = (index) => {
@@ -287,20 +354,29 @@ const getActiveJoinRun = () => {
 		end += 1;
 	}
 
+	// Sequence spine (flush join boundaries):
+	//   sequenceOffset(0) = 0
+	//   segmentDuration(i) = max(0, clipOut_i - clipIn_i)
+	//   sequenceOffset(i+1) = sequenceOffset(i) + segmentDuration(i)
+	// clipOut_N (seq) == clipIn_{N+1} (seq) because offset(N+1) = offset(N) + duration(N).
 	const segments = [];
 	let offset = 0;
 	for (let i = start; i <= end; i += 1) {
 		const video = videoQueue[i];
-		const clipIn = Number(video.clipInTime) || 0;
-		const clipOut = getClipOutTime(video, i);
-		const duration = Math.max(0, (clipOut || 0) - clipIn);
+		const clipIn = getClipInTime(video);
+		const clipOutRaw = getClipOutTime(video, i);
+		const duration = Math.max(0, (clipOutRaw || 0) - clipIn);
+		const clipOut = clipOutRaw > 0 ? clipOutRaw : clipIn + duration;
 		segments.push({
 			queueIndex: i,
 			video,
 			offset,
 			duration,
 			clipIn,
-			clipOut: clipOut > 0 ? clipOut : clipIn + duration,
+			clipOut,
+			// Explicit sequence bounds for this segment window
+			seqIn: offset,
+			seqOut: offset + duration,
 		});
 		offset += duration;
 	}
@@ -501,6 +577,15 @@ const scheduleJoinTimelineRebuild = () => {
 	}
 	window._joinTimelineRebuildTimer = setTimeout(() => {
 		window._joinTimelineRebuildTimer = null;
+		// Re-sync all segment clip bounds from markers before measuring the spine
+		if (typeof videoQueue !== "undefined" && videoQueue.length) {
+			const run = getActiveJoinRun();
+			for (const seg of run.segments) {
+				if (typeof syncClipBoundsFromMarkers === "function") {
+					syncClipBoundsFromMarkers(seg.queueIndex);
+				}
+			}
+		}
 		syncSequenceModeState();
 		if (typeof window.loadWaveformTimeline === "function") {
 			window.loadWaveformTimeline();
@@ -510,6 +595,9 @@ const scheduleJoinTimelineRebuild = () => {
 		}
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
+		}
+		if (typeof updateSliderTicks === "function") {
+			updateSliderTicks();
 		}
 	}, 175);
 };
@@ -2177,15 +2265,16 @@ const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
 
 /**
  * Layout a track body as full-sequence spine with content only in the segment window.
+ * Geometry (exact): left% = offset/total, width% = duration/total.
+ * Greys outside [clipIn, clipOut] mapped into this row's sequence slot (before fill / after fill).
  * Returns the fill element whose left/width are sequence fractions (not 100% host).
  */
 const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	if (!trackEl || !seg || totalDuration <= 0) return trackEl;
-	const leftPct = (seg.offset / Math.max(totalDuration, 0.001)) * 100;
-	const widthPct = Math.max(
-		0.05,
-		(Math.max(seg.duration, 0) / Math.max(totalDuration, 0.001)) * 100,
-	);
+	const total = Math.max(totalDuration, 0.001);
+	const leftPct = (seg.offset / total) * 100;
+	const widthPct = Math.max(0, (Math.max(seg.duration, 0) / total) * 100);
+	const rightPct = Math.max(0, 100 - leftPct - widthPct);
 
 	// Outer track = full-width sequence spine (click target for seek)
 	trackEl.style.position = "relative";
@@ -2196,6 +2285,23 @@ const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	trackEl.dataset.sequenceSpine = "1";
 	trackEl.dataset.segOffset = String(seg.offset);
 	trackEl.dataset.segDuration = String(seg.duration);
+	trackEl.dataset.leftPct = String(leftPct);
+	trackEl.dataset.widthPct = String(widthPct);
+
+	// Dim before this segment's active [clipIn, clipOut] window (sequence space)
+	if (leftPct > 0.001) {
+		const leftDim = document.createElement("div");
+		leftDim.className = "sequence-row-dim sequence-row-dim-before";
+		leftDim.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${leftPct}%;pointer-events:none;z-index:1;`;
+		trackEl.appendChild(leftDim);
+	}
+	// Dim after this segment's active window (do not affect other rows)
+	if (rightPct > 0.001) {
+		const rightDim = document.createElement("div");
+		rightDim.className = "sequence-row-dim sequence-row-dim-after";
+		rightDim.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct + widthPct}%;width:${rightPct}%;pointer-events:none;z-index:1;`;
+		trackEl.appendChild(rightDim);
+	}
 
 	const fill = document.createElement("div");
 	fill.className = "sequence-segment-fill";
@@ -2210,6 +2316,7 @@ const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	fill.style.width = `${widthPct}%`;
 	fill.style.maxWidth = `${widthPct}%`;
 	fill.style.right = "auto";
+	fill.style.zIndex = "2";
 	fill.style.display = "flex";
 	fill.style.alignItems = "stretch";
 	fill.style.overflow = "hidden";
@@ -3281,33 +3388,54 @@ const initializePlayer = () => {
 	player.addEventListener("timeupdate", seektimeupdate);
 	player.addEventListener("loadedmetadata", () => {
 		const duration = player.duration;
-		if (typeof seekBar !== "undefined" && seekBar) {
-			seekBar.max = duration || 0;
-		}
 		configureTimelineTicks(duration);
-		if (preserveClipBounds) {
+
+		// Joined runs and explicit preserve: keep user clipIn/Out (do not force full file).
+		// Solo first load: default 0..duration.
+		const joined = isQueueIndexJoined(activeQueueIndex);
+		if (preserveClipBounds || joined) {
 			if (
 				clipOutTime === undefined ||
 				clipOutTime === null ||
 				clipOutTime <= 0 ||
-				clipOutTime > duration
+				(duration > 0 && clipOutTime > duration)
 			) {
 				clipOutTime = duration;
 			}
+			if (clipInTime < 0) clipInTime = 0;
 			preserveClipBounds = false;
 		} else {
 			clipInTime = 0;
 			clipOutTime = duration;
 		}
 
-		// Cache media duration on the active queue entry for sequence spine math
+		// Cache media duration + clip bounds for sequence spine math
 		if (typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) {
 			videoQueue[activeQueueIndex].mediaDuration = duration || 0;
 			videoQueue[activeQueueIndex].clipInTime = clipInTime;
 			videoQueue[activeQueueIndex].clipOutTime = clipOutTime;
 		}
 
-		updateTimeDisplay(duration, "durationTime");
+		// Prefer marker-derived bounds when in/out markers exist
+		if (typeof syncClipBoundsFromMarkers === "function") {
+			syncClipBoundsFromMarkers(activeQueueIndex);
+		}
+
+		const multi = typeof isActiveRunMulti === "function" && isActiveRunMulti();
+		const run =
+			multi && typeof getActiveJoinRun === "function"
+				? getActiveJoinRun()
+				: null;
+		if (typeof seekBar !== "undefined" && seekBar) {
+			seekBar.max = multi
+				? Math.max(run?.totalDuration || 0, 0.001)
+				: duration || 0;
+		}
+
+		const displayDur = multi
+			? Math.max(run?.totalDuration || 0, 0.001)
+			: duration || 0;
+		updateTimeDisplay(displayDur, "durationTime");
 		positionControls();
 		updateLoadButtonColor();
 		toggleVideoPlaceholder(false);
@@ -3315,6 +3443,10 @@ const initializePlayer = () => {
 		// Render markers table shell (incl. #markersTableFoot) before filling the footer
 		if (typeof updateMarkersList === "function") updateMarkersList();
 		if (typeof updateVideoTimeSummary === "function") updateVideoTimeSummary();
+		// Clip bounds may affect join segment offsets — rebuild multi layout
+		if (multi && typeof scheduleJoinTimelineRebuild === "function") {
+			scheduleJoinTimelineRebuild();
+		}
 
 		player.playbackRate = playbackSpeed;
 		speedSlider.value = playbackSpeed;
@@ -3955,15 +4087,33 @@ const initializePlayer = () => {
 	if (seekBar) {
 		seekBar.addEventListener("input", (event) => {
 			let time = Number.parseFloat(event.target.value);
-			if (!Number.isNaN(time)) {
-				if (clipInTime > 0 && time < clipInTime) time = clipInTime;
-				if (clipOutTime > 0 && time > clipOutTime) time = clipOutTime;
-				player.currentTime = time;
-				const duration = player.duration || 1;
-				const pct = (time / duration) * 100;
+			if (Number.isNaN(time)) return;
+
+			const run = getActiveJoinRun();
+			const multi = run.segments.length > 1;
+
+			if (multi) {
+				// Sequence-time scrub (0..total); no solo local clipOut clamp
+				const total = Math.max(run.totalDuration, 0.001);
+				time = Math.max(0, Math.min(total, time));
+				if (typeof seekSequenceTime === "function") {
+					void seekSequenceTime(time, { silent: true });
+				}
+				const pct = (time / total) * 100;
 				for (let i = 0; i < playheadsLiveCollection.length; i++) {
 					playheadsLiveCollection[i].style.left = `${pct}%`;
 				}
+				return;
+			}
+
+			// Solo: constrain to clipIn/Out on local media clock
+			if (clipInTime > 0 && time < clipInTime) time = clipInTime;
+			if (clipOutTime > 0 && time > clipOutTime) time = clipOutTime;
+			player.currentTime = time;
+			const duration = player.duration || 1;
+			const pct = (time / duration) * 100;
+			for (let i = 0; i < playheadsLiveCollection.length; i++) {
+				playheadsLiveCollection[i].style.left = `${pct}%`;
 			}
 		});
 		seekBar.addEventListener("mouseup", (e) => e.target.blur());
@@ -4461,18 +4611,23 @@ const seektimeupdate = () => {
 		const multi = run.segments.length > 1;
 		if (multi) syncSequenceModeState(run);
 
-		if (seekBar) {
-			seekBar.value = currentTime;
-			if (typeof seekBar !== "undefined" && seekBar) {
-				seekBar.max = duration || 0;
-			}
-		}
-
 		// Transport clock: sequence time when multi-clip run, else local
 		const displayTime = multi ? getSequencePlayheadTime() : currentTime;
 		const displayDuration = multi
 			? Math.max(run.totalDuration, 0.001)
 			: duration || 0;
+
+		if (seekBar) {
+			if (multi) {
+				// Multi: bar is SEQUENCE (0..total) — not local media
+				seekBar.max = displayDuration;
+				seekBar.value = displayTime;
+			} else {
+				seekBar.max = duration || 0;
+				seekBar.value = currentTime;
+			}
+		}
+
 		updateTimeDisplay(displayTime, "currentTime");
 		if (displayDuration) {
 			updateTimeDisplay(displayDuration, "durationTime");
@@ -4622,7 +4777,57 @@ const updateSliderTicks = () => {
 	DOM.endTick.classList.add("hidden");
 	if (DOM.endGreyOut) DOM.endGreyOut.classList.add("hidden");
 
+	const run =
+		typeof getActiveJoinRun === "function" ? getActiveJoinRun() : null;
+	const multiClipRun = !!(run?.segments && run.segments.length > 1);
+	const seqTotal = Math.max(Number(run?.totalDuration) || 0, 0);
+
+	// Multi-clip: transport bar is SEQUENCE time (0..total). Solo: local media time.
+	if (multiClipRun) {
+		if (seqTotal <= 0) return;
+		if (typeof seekBar !== "undefined" && seekBar) {
+			seekBar.max = seqTotal;
+		}
+		// Sequence starts at 0 — no leading grey. No solo local-clipOut tail shade.
+		// Optional: nothing past sequence end (max already = total).
+		if (DOM.markerTicksContainer) {
+			// All run markers in sequence time
+			for (const seg of run.segments) {
+				const list =
+					seg.queueIndex === activeQueueIndex
+						? markers || []
+						: seg.video?.appState?.markers || [];
+				for (const m of list) {
+					const seqT =
+						typeof sourceTimeToSequence === "function"
+							? sourceTimeToSequence(seg.queueIndex, m.startTime, run)
+							: m.startTime;
+					if (seqT < 0 || seqT > seqTotal) continue;
+					const pct = (seqT / seqTotal) * 100;
+					const tick = document.createElement("div");
+					tick.className =
+						"absolute h-3 w-0.5 bg-yellow-500 top-1/2 -translate-y-1/2 cursor-pointer transition-colors hover:bg-yellow-400";
+					tick.style.pointerEvents = "auto";
+					tick.style.left = `calc(${pct}% - 1px)`;
+					tick.title = m.name;
+					tick.addEventListener("click", () => {
+						if (typeof seekSequenceTime === "function") {
+							void seekSequenceTime(seqT, { silent: true });
+						}
+					});
+					DOM.markerTicksContainer.appendChild(tick);
+				}
+			}
+		}
+		return;
+	}
+
+	// -------- Solo / single-clip: local media bar + clipIn/Out grey --------
 	if (!player?.duration) return;
+
+	if (typeof seekBar !== "undefined" && seekBar) {
+		seekBar.max = player.duration || 0;
+	}
 
 	if (clipInTime > 0) {
 		const startPct = (clipInTime / player.duration) * 100;
@@ -4634,22 +4839,13 @@ const updateSliderTicks = () => {
 		}
 	}
 
-	// Past-clipOut black-out is solo / single-clip only.
-	// Multi-clip join runs hand off at local clipOut — do not grey the transport bar after it.
-	const multiClipRun =
-		typeof window.isActiveRunMulti === "function" && window.isActiveRunMulti();
-
 	if (clipOutTime > 0 && clipOutTime < player.duration) {
 		const endPct = (clipOutTime / player.duration) * 100;
 		DOM.endTick.style.left = `calc(${endPct}% - 1px)`;
 		DOM.endTick.classList.remove("hidden");
 		if (DOM.endGreyOut) {
-			if (multiClipRun) {
-				DOM.endGreyOut.classList.add("hidden");
-			} else {
-				DOM.endGreyOut.style.width = `${100 - endPct}%`;
-				DOM.endGreyOut.classList.remove("hidden");
-			}
+			DOM.endGreyOut.style.width = `${100 - endPct}%`;
+			DOM.endGreyOut.classList.remove("hidden");
 		}
 	} else {
 		DOM.endTick.classList.add("hidden");
@@ -4666,7 +4862,7 @@ const updateSliderTicks = () => {
 					"absolute h-3 w-0.5 bg-yellow-500 top-1/2 -translate-y-1/2 cursor-pointer transition-colors hover:bg-yellow-400";
 				tick.style.pointerEvents = "auto";
 				tick.style.left = `calc(${pct}% - 1px)`;
-				tick.title = m.name; // Uses browser's native alt hover text
+				tick.title = m.name;
 				tick.addEventListener("click", () => {
 					player.currentTime = m.startTime;
 				});
@@ -4885,11 +5081,29 @@ const updateMarkerType = (markerIndex, newType) => {
 	if (newType === "loop") {
 		markers[markerIndex].loopCount = markers[markerIndex].loopCount || 1;
 	}
+	// in/out types redefine segment duration on the sequence spine
+	const boundsChanged =
+		typeof syncClipBoundsFromMarkers === "function"
+			? syncClipBoundsFromMarkers(activeQueueIndex)
+			: false;
 	saveLocalState();
 	updateVideoTimeSummary();
 	updateMarkersList();
 	if (typeof window.paintTimelineMarkersAndShading === "function") {
 		window.paintTimelineMarkersAndShading();
+	}
+	if (typeof updateSliderTicks === "function") updateSliderTicks();
+	// Rebuild join row geometry so v1 clipOut shares a flush boundary with v2
+	if (
+		boundsChanged ||
+		newType === "in" ||
+		newType === "out" ||
+		newType === "start" ||
+		newType === "end"
+	) {
+		if (typeof scheduleJoinTimelineRebuild === "function") {
+			scheduleJoinTimelineRebuild();
+		}
 	}
 };
 
@@ -4907,8 +5121,15 @@ const deleteMarker = async (markerIndex) => {
 			`Total markers left: ${markers.length}`,
 			debuggin,
 		);
+		if (typeof syncClipBoundsFromMarkers === "function") {
+			syncClipBoundsFromMarkers(activeQueueIndex);
+		}
 		saveLocalState();
 		updateMarkersList();
+		if (typeof updateSliderTicks === "function") updateSliderTicks();
+		if (typeof scheduleJoinTimelineRebuild === "function") {
+			scheduleJoinTimelineRebuild();
+		}
 	}
 };
 
@@ -4978,8 +5199,15 @@ const syncMarkerToPlayhead = (markerIndex) => {
 	const time = player.currentTime;
 	markers[markerIndex].startTime = time;
 	markers.sort((a, b) => a.startTime - b.startTime);
+	if (typeof syncClipBoundsFromMarkers === "function") {
+		syncClipBoundsFromMarkers(activeQueueIndex);
+	}
 	saveLocalState();
 	updateMarkersList();
+	if (typeof updateSliderTicks === "function") updateSliderTicks();
+	if (typeof scheduleJoinTimelineRebuild === "function") {
+		scheduleJoinTimelineRebuild();
+	}
 };
 
 // Expose marker/table helpers for classic scripts (ui-components.js is not a module)

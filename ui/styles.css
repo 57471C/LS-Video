@@ -834,6 +834,16 @@ body.miniplayer-mode #volume-control-group {
 	/* left + width come from inline styles (dataset-backed) */
 }
 
+/* Per-row dim outside this clip's [clipIn, clipOut] sequence window (join multi) */
+.sequence-row-dim {
+	background: rgba(0, 0, 0, 0.35);
+	pointer-events: none;
+}
+.dark .sequence-row-dim,
+html.dark .sequence-row-dim {
+	background: rgba(0, 0, 0, 0.55);
+}
+
 .sequence-segment-fill img {
 	object-fit: cover;
 	object-position: center;
