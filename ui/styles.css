@@ -800,6 +800,20 @@ body.miniplayer-mode #volume-control-group {
 	background: #000;
 }
 
+/* CC transport icon states (pairs with .btn-icon-cc-* in input.css / tailwind) */
+#ccToggleBtn.btn-icon-cc-none {
+	pointer-events: none;
+}
+#ccToggleBtn.btn-icon-cc-active {
+	/* Green glow only when captions are showing */
+	filter: drop-shadow(0 0 5px rgba(34, 197, 94, 0.75))
+		drop-shadow(0 0 10px rgba(34, 197, 94, 0.45));
+}
+#ccToggleBtn.btn-icon-cc-available,
+#ccToggleBtn.btn-icon-cc-none {
+	filter: none;
+}
+
 /* Segment filmstrip: geometry is set inline (left/width % of sequence spine).
    Do NOT force width:100% here — that was expanding fills to the full host. */
 .sequence-video-track,
