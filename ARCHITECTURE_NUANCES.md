@@ -2,7 +2,7 @@
 
 Hard-won constraints. Agents: prefer reading this over rediscovering via breakage.
 
-Last oriented: v0.6.1 (Butterchurn + UNC path fix era).
+Last oriented: v0.6.1 (join sequence, batch export, timeline zoom, CC hygiene).
 
 ---
 
@@ -59,6 +59,8 @@ Audio extensions must **short-circuit** before the “not web-safe” branch.
 
 mpeg4/mp4v in MP4 is also not web-safe for WebView2 → proxy (seen on mislabeled “H265-Test” files that were actually mpeg4).
 
+On queue delete/replace: purge hash-keyed proxy under app cache (`delete_proxy_for_video`) and clear CC tracks so captions/proxy paths do not stick to the next source.
+
 ---
 
 ## 5. ES modules vs window
@@ -90,7 +92,60 @@ Skip entire filmstrip pipeline for audio-only (ffmpeg “no video stream”).
 
 ---
 
-## 8. Butterchurn / CSP
+## 8. Join sequence spine (flush boundaries)
+
+Playback and export both assume:
+
+```text
+sequenceOffset(0) = 0
+segmentDuration(i) = max(0, clipOut_i − clipIn_i)
+sequenceOffset(i+1) = sequenceOffset(i) + segmentDuration(i)
+```
+
+So clip N’s sequence out **equals** clip N+1’s sequence in (one vertical cut on multi-row timeline).
+
+`clipIn`/`clipOut` must stay in sync with in/out markers (`syncClipBoundsFromMarkers`). Multi-clip footer used to skip that sync → wrong segment widths until fixed.
+
+Joined rows show **full source** filmstrip/waveform mapped so the active `[clipIn, clipOut]` band aligns with the sequence slot; head/tail are tinted (solo-like) so users see the file is longer than the joined segment.
+
+Transport bar: multi-clip = **sequence** clock; do not apply solo “black after local clipOut” to the whole bar.
+
+---
+
+## 9. Timeline zoom (detailed panel only)
+
+- `zoom = 1`: content width = scrollport clientWidth (fit); no H-scroll.
+- `zoom > 1`: content width = fit × factor; overflow-x on `#timeline-h-scroll` wrapping **ruler + tracks + marker overlay** so one `scrollLeft` keeps alignment.
+- Click-to-seek must use the **content** box (wide element rect), not the viewport-only width.
+- Debounce filmstrip/waveform regen on slider; live CSS width updates are fine every tick.
+- User zoom factor survives resize; force fit when `userOverride` is false (including Fit button / double-click slider).
+
+---
+
+## 10. Batch export IPC (`export_queue_job`)
+
+Jobs come from `buildBatchJobsFromQueue()` (walk `joinedToNext`).
+
+**Serde trap:** Rust `VideoSegment` has `loop_count` with `alias = "loopCount"`. Sending **both** keys in one JSON object →  
+`invalid args … duplicate field loop_count`.
+
+**Law:** flat segment objects, **one** key per field. Prefer `loop_count` only (or only `loopCount`, not both). Same for join_and_compress payloads.
+
+Export uses ffmpeg sidecar decode (works for HEVC/proxy sources). Never delete source media. Fail one job → continue batch.
+
+Batch export toggle is **checked by default** in the trim/export settings panel.
+
+---
+
+## 11. Closed captions hygiene
+
+- `clearSubtitleTracks` removes `<track>` / cues **without** necessarily clearing `video.src`.
+- Media replace / queue switch / delete must clear CC so captions from A do not show on B.
+- Button visuals: none / available-off / active-on via `setCcButtonState` (not ad-hoc yellow classes).
+
+---
+
+## 12. Butterchurn / CSP
 
 Milkdrop presets compile via `new Function()` → CSP must include **`unsafe-eval`** or init throws `EvalError` forever.
 
@@ -102,7 +157,7 @@ Do not offer viz toggle on video media (users assume exportable “effect”).
 
 ---
 
-## 9. Tokio / Tauri runtime
+## 13. Tokio / Tauri runtime
 
 In `setup`, use `tauri::async_runtime::spawn`, not a bare `tokio::spawn` that assumes an external runtime — caused:
 
@@ -110,28 +165,29 @@ In `setup`, use `tauri::async_runtime::spawn`, not a bare `tokio::spawn` that as
 
 ---
 
-## 10. ffmpeg sidecar
+## 14. ffmpeg sidecar
 
 - `externalBin: ["binaries/ffmpeg"]` → platform-triple-named binary under `src-tauri/binaries/`
 - Not in git (too large). Local/CI must supply before `tauri build`
 - Full builds that link **libx264** are **GPL** — see root `LICENSE` §2 (bundled FFmpeg). App source stays MIT; do not call the whole installer MIT-only
 - Custom minimal ffmpeg is optional size work, not required for correctness
+- Batch/join export and proxy share this sidecar
 
 ---
 
-## 11. Fonts
+## 15. Fonts
 
 Self-host Inter under `ui/fonts`. Broken `@font-face` URLs → OTS `invalid sfntVersion` spam. No CDN for a local-first app.
 
 ---
 
-## 12. tailwind.css noise
+## 16. tailwind.css noise
 
 `watch:css` rewrites `ui/tailwind.css` constantly. Treat as build artifact noise in git status unless you intentionally commit a production minify. Prefer `git restore ui/tailwind.css` before commits.
 
 ---
 
-## 13. Signing & distribution
+## 17. Signing & distribution
 
 - Windows SmartScreen: unsigned NSIS warns; OV/EV cert is **per publisher/year**, not per app
 - R2 (Cloudflare) fine for large installers; GH Releases has size limits
@@ -139,7 +195,7 @@ Self-host Inter under `ui/fonts`. Broken `@font-face` URLs → OTS `invalid sfnt
 
 ---
 
-## 14. Legacy names still present (intentional)
+## 18. Legacy names still present (intentional)
 
 | Name | Why |
 |------|-----|
@@ -151,13 +207,14 @@ Do not reintroduce time-study **features**. Migrating away residual names is fin
 
 ---
 
-## 15. Known product backlog (not blockers)
+## 19. Known product backlog (not blockers)
 
 - Marker type: **Speed** (playbackRate segments)
 - Butterchurn preset UX polish / optional viz on video (explicitly rejected for now)
 - Installer/R2 public pipeline
 - Mac target
 - Rename Rust tspz commands + drop legacy localStorage key after a grace release
+- Batch: VTT merge across joins (optional; must not block video export)
 
 ---
 
@@ -170,3 +227,5 @@ Do not reintroduce time-study **features**. Migrating away residual names is fin
 5. Don’t branch fixes off unmerged feature branches without rebasing onto main  
 6. Don’t commit tailwind watch churn by accident  
 7. Don’t map Cinema Esc → Normal  
+8. Don’t send both `loop_count` and `loopCount` on the same `VideoSegment` JSON  
+9. Don’t stretch sequence filmstrip fills to 100% width (destroys join geometry)  

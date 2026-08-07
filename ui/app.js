@@ -5353,6 +5353,10 @@ const initializeTrimFeature = () => {
 				clipOutTime || player.duration,
 			);
 			resetTrimModalUI();
+			// Batch is on by default — refresh join-group job list
+			if (typeof window.renderBatchExportList === "function") {
+				window.renderBatchExportList();
+			}
 			toggleSettings(true);
 		});
 	}
@@ -5372,11 +5376,15 @@ const initializeTrimFeature = () => {
 		const batchExportToggle = document.getElementById("batchExportToggle");
 		const batchExportList = document.getElementById("batch-export-list");
 		const batchStripAudio = document.getElementById("batchStripAudioToggle");
-		if (batchExportToggle) batchExportToggle.checked = false;
+		// Batch export is the default path for the trim/export panel
+		if (batchExportToggle) batchExportToggle.checked = true;
 		if (batchStripAudio) batchStripAudio.checked = false;
 		if (batchExportList) {
-			batchExportList.classList.add("hidden");
-			batchExportList.innerHTML = "";
+			batchExportList.classList.remove("hidden");
+			// Job list filled when initializeTrimFeature's renderBatchExportList is available
+			if (typeof window.renderBatchExportList === "function") {
+				window.renderBatchExportList();
+			}
 		}
 
 		if (trimOnlyBtn) trimOnlyBtn.style.display = "inline-flex";
@@ -5460,6 +5468,13 @@ const initializeTrimFeature = () => {
 		if (trimOnlyBtn) trimOnlyBtn.style.display = "inline-flex";
 		if (trimCompressBtn) trimCompressBtn.style.display = "inline-flex";
 	};
+	window.renderBatchExportList = renderBatchExportList;
+
+	// Default-checked: show job list on first paint
+	if (batchExportToggle?.checked && batchExportList) {
+		batchExportList.classList.remove("hidden");
+		renderBatchExportList();
+	}
 
 	const handleCancelClick = async () => {
 		if (activeFFmpegChild) {
