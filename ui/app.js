@@ -145,9 +145,7 @@ const applyTransportVolume = (volume, muted) => {
 		volumeSlider.value = isMuted ? 0 : vol;
 	}
 	if (DOM?.volumeValue) {
-		DOM.volumeValue.textContent = isMuted
-			? "0"
-			: String(Math.round(vol * 100));
+		DOM.volumeValue.textContent = isMuted ? "0" : String(Math.round(vol * 100));
 	}
 	return { volume: vol, muted: isMuted };
 };
@@ -530,7 +528,9 @@ const toggleJoinedToNext = (upperIndex) => {
 	item.joinedToNext = !item.joinedToNext;
 	// Join does not change which clip is current
 	if (typeof saveLocalState === "function") saveLocalState();
-	if (typeof window.renderSidebarPlaylist === "function") {
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	} else if (typeof window.renderSidebarPlaylist === "function") {
 		window.renderSidebarPlaylist();
 	}
 	scheduleJoinTimelineRebuild();
@@ -747,8 +747,9 @@ const handoffToNextJoinedClip = async () => {
 			window.renderSidebarPlaylist();
 		}
 		if (typeof updateMarkersList === "function") updateMarkersList();
-		if (typeof window.resetClosedCaptions === "function") {
-			window.resetClosedCaptions();
+		// Drop prior captions; loadVideo will attach this source's VTT if present
+		if (typeof window.clearSubtitleTracks === "function") {
+			window.clearSubtitleTracks();
 		}
 
 		// Capture last frame before pause/src swap to hide black flash
@@ -1068,8 +1069,17 @@ window.clearAllPreviousProjectData = () => {
 
 	// Single project-reset path: keep queue UI and sliders in sync
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
-	if (typeof window.renderSidebarPlaylist === "function") {
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	} else if (typeof window.renderSidebarPlaylist === "function") {
 		window.renderSidebarPlaylist();
+	}
+	window.currentProxyPath = null;
+	if (typeof window.updateProxyInfoUi === "function") {
+		window.updateProxyInfoUi(null);
+	}
+	if (typeof window.clearSubtitleTracks === "function") {
+		window.clearSubtitleTracks();
 	}
 	saveLocalState();
 	if (typeof updateSliderTicks === "function") updateSliderTicks();
@@ -1205,6 +1215,12 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 	let settleViaTimeout = false;
 
 	try {
+		// Drop prior captions before media replace so source A cues never stick on B.
+		// Soft handoff still clears tracks; loadSubtitleTrack reloads this source's VTT.
+		if (typeof window.clearSubtitleTracks === "function") {
+			window.clearSubtitleTracks();
+		}
+
 		// Hard visual reset of timeline graphics panels (skip during join soft-handoff)
 		if (!softHandoff) {
 			const tracksHost = document.getElementById("timeline-tracks-host");
@@ -1351,6 +1367,20 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 		if (videoQueue[activeQueueIndex]) {
 			videoQueue[activeQueueIndex].videoFilePath = videoFilePath;
 			videoQueue[activeQueueIndex].videoFileName = videoFileName;
+			// Track proxy path when verify_and_prepare returned a different file (H.265/AVI)
+			const isProxy =
+				resolvedFilePath &&
+				normalizePath(resolvedFilePath) !== normalizedPath &&
+				/proxy_[0-9a-f]+\.mp4$/i.test(
+					String(resolvedFilePath).split(/[/\\]/).pop() || "",
+				);
+			videoQueue[activeQueueIndex].proxyPath = isProxy
+				? normalizePath(resolvedFilePath)
+				: null;
+			window.currentProxyPath = videoQueue[activeQueueIndex].proxyPath;
+			if (typeof window.updateProxyInfoUi === "function") {
+				window.updateProxyInfoUi(videoQueue[activeQueueIndex].proxyPath);
+			}
 		}
 
 		// Attach error tracking only after we have a real stream URL.
@@ -1645,9 +1675,63 @@ if (window.__TAURI__ !== undefined) {
 }
 
 // 3. Media Initialization & Streaming Event Subsystems
-/** Resets closed captions state and related local caches. */
-window.resetClosedCaptions = () => {
+/**
+ * Remove all <track> elements and disable textTracks on the player so old
+ * captions cannot stick after media replace. Does NOT clear video.src.
+ */
+window.clearSubtitleTracks = () => {
 	window.currentCaptions = [];
+	window.isCcActive = false;
+
+	const ccToggleBtn = document.getElementById("ccToggleBtn");
+	if (ccToggleBtn) {
+		ccToggleBtn.setAttribute("disabled", "true");
+		ccToggleBtn.classList.remove("text-yellow-500", "dark:text-yellow-400");
+		ccToggleBtn.classList.add("text-zinc-400", "dark:text-zinc-600");
+	}
+
+	const videoPlayer =
+		(typeof player !== "undefined" && player) ||
+		document.querySelector("video") ||
+		document.getElementById("my_video");
+	if (videoPlayer) {
+		// Disable first so the browser drops active cues immediately
+		try {
+			const tracks = videoPlayer.textTracks;
+			for (let i = 0; i < tracks.length; i++) {
+				tracks[i].mode = "disabled";
+				// Clear cues when the browser exposes a mutable cue list
+				const cueList = tracks[i].cues;
+				if (cueList && typeof tracks[i].removeCue === "function") {
+					while (cueList.length > 0) {
+						try {
+							tracks[i].removeCue(cueList[0]);
+						} catch {
+							break;
+						}
+					}
+				}
+			}
+		} catch {
+			/* ignore textTrack access races */
+		}
+		videoPlayer.querySelectorAll("track").forEach((trackNode) => {
+			trackNode.remove();
+		});
+	}
+
+	const ccDisplay = document.getElementById("cc-output");
+	if (ccDisplay) {
+		ccDisplay.innerHTML = "";
+	}
+	const transcriptContainer = document.getElementById("transcript-list");
+	if (transcriptContainer) {
+		transcriptContainer.innerHTML = "";
+	}
+};
+
+/** Resets closed captions state and related local caches (also clears player src). */
+window.resetClosedCaptions = () => {
 	window.captionsVisible = true;
 
 	// Clear waveform path so timeline reloads against the next media source
@@ -1656,13 +1740,6 @@ window.resetClosedCaptions = () => {
 	const seekBarContainer = document.getElementById("seekBarContainer");
 	if (seekBarContainer) {
 		seekBarContainer.style.display = "block";
-	}
-
-	const ccToggleBtn = document.getElementById("ccToggleBtn");
-	if (ccToggleBtn) {
-		ccToggleBtn.setAttribute("disabled", "true");
-		ccToggleBtn.classList.remove("text-yellow-500", "dark:text-yellow-400");
-		ccToggleBtn.classList.add("text-zinc-400", "dark:text-zinc-600");
 	}
 
 	if (window.captionInterval) {
@@ -1726,17 +1803,13 @@ window.resetClosedCaptions = () => {
 		}
 	}
 
-	const videoPlayer = document.querySelector("video") || player;
+	window.clearSubtitleTracks();
+
+	const videoPlayer =
+		(typeof player !== "undefined" && player) ||
+		document.querySelector("video");
 	if (videoPlayer) {
 		videoPlayer.pause();
-		const existingTracks = videoPlayer.querySelectorAll("track");
-		existingTracks.forEach((track) => {
-			track.remove();
-		});
-
-		while (videoPlayer.textTracks.length > 0) {
-			videoPlayer.textTracks[0].mode = "disabled";
-		}
 		videoPlayer.src = "";
 		try {
 			videoPlayer.load(); // Forces the browser to flush the active buffer completely
@@ -1744,54 +1817,138 @@ window.resetClosedCaptions = () => {
 			// Ignore load error on empty src
 		}
 	}
-
-	const ccDisplay = document.getElementById("cc-output");
-	if (ccDisplay) {
-		ccDisplay.innerHTML = "";
-	}
-
-	const transcriptContainer = document.getElementById("transcript-list");
-	if (transcriptContainer) {
-		transcriptContainer.innerHTML = "";
-	}
 };
 
-/** Loads a subtitle track for the provided video path. */
+/** Loads a subtitle track for the provided video path (sidecar .vtt / .srt). */
 window.loadSubtitleTrack = async (filePath) => {
-	let ccTrack = document.getElementById("ccTrack");
-	if (!ccTrack) {
-		ccTrack = document.createElement("track");
+	// Always strip prior tracks so captions from the previous media cannot stick
+	window.clearSubtitleTracks();
+
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		document.getElementById("my_video") ||
+		document.querySelector("video");
+	if (!videoEl || !filePath) return;
+
+	const isTauri = window.__TAURI__ !== undefined;
+	if (!isTauri) return;
+
+	try {
+		const vttPath = await window.__TAURI__.core.invoke("resolve_subtitles", {
+			videoPath: filePath,
+		});
+		if (!vttPath) return;
+
+		const ccTrack = document.createElement("track");
 		ccTrack.id = "ccTrack";
 		ccTrack.kind = "captions";
 		ccTrack.srclang = "en";
 		ccTrack.label = "English";
 		ccTrack.default = true;
-		if (player) {
-			player.appendChild(ccTrack);
-		}
-	}
-	ccTrack.src = "";
+		ccTrack.src = window.__TAURI__.core.convertFileSrc(vttPath);
+		videoEl.appendChild(ccTrack);
 
-	const isTauri = window.__TAURI__ !== undefined;
-	if (!isTauri || !filePath) return;
-	try {
-		const vttPath = await window.__TAURI__.core.invoke("resolve_subtitles", {
-			videoPath: filePath,
-		});
-		if (vttPath) {
-			ccTrack.src = window.__TAURI__.core.convertFileSrc(vttPath);
-			toConsole("Loaded subtitle track", vttPath, debuggin);
-			const ccToggleBtn = document.getElementById("ccToggleBtn");
-			if (ccToggleBtn) {
-				ccToggleBtn.removeAttribute("disabled");
-				ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
-				ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
+		// Force showing so CC appears immediately after load/generate
+		setTimeout(() => {
+			for (let i = 0; i < videoEl.textTracks.length; i++) {
+				const t = videoEl.textTracks[i];
+				t.mode =
+					t.label === "English" || t.label === "Generated Captions"
+						? "showing"
+						: "disabled";
 			}
+		}, 50);
+
+		toConsole("Loaded subtitle track", vttPath, debuggin);
+		const ccToggleBtn = document.getElementById("ccToggleBtn");
+		if (ccToggleBtn) {
+			ccToggleBtn.removeAttribute("disabled");
+			ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
+			ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
 		}
+		window.isCcActive = true;
+		window.captionsVisible = true;
 		// No Whisper auto-caption fallback — sidecars via resolve_subtitles / save_vtt_file only
 	} catch (err) {
 		toConsole("Error resolving subtitles", err, debuggin);
 	}
+};
+
+/**
+ * Attach a known VTT file path to the player (after Generate CC write).
+ * @param {string} vttFilePath absolute path to .vtt
+ */
+window.attachSubtitleTrackFromPath = (vttFilePath) => {
+	window.clearSubtitleTracks();
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		document.getElementById("my_video") ||
+		document.querySelector("video");
+	if (!videoEl || !vttFilePath) return;
+
+	const convertFn =
+		window.__TAURI__?.core?.convertFileSrc ||
+		window.__TAURI__?.tauri?.convertFileSrc;
+	const src = convertFn
+		? convertFn(vttFilePath)
+		: `https://asset.localhost/${encodeURIComponent(vttFilePath)}`;
+
+	const track = document.createElement("track");
+	track.id = "ccTrack";
+	track.kind = "captions";
+	track.label = "Generated Captions";
+	track.srclang = "en";
+	track.default = true;
+	track.src = src;
+	videoEl.appendChild(track);
+
+	setTimeout(() => {
+		for (let i = 0; i < videoEl.textTracks.length; i++) {
+			const t = videoEl.textTracks[i];
+			t.mode =
+				t.label === "Generated Captions" || t.label === "English"
+					? "showing"
+					: "disabled";
+		}
+	}, 50);
+
+	const ccToggleBtn = document.getElementById("ccToggleBtn");
+	if (ccToggleBtn) {
+		ccToggleBtn.removeAttribute("disabled");
+		ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
+		ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
+	}
+	window.isCcActive = true;
+	window.captionsVisible = true;
+};
+
+/** Browser download fallback when the video folder is not writable. */
+window.downloadVttFallback = (vttContent, basename = "captions.vtt") => {
+	try {
+		const blob = new Blob([vttContent], { type: "text/vtt;charset=utf-8" });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = basename.endsWith(".vtt") ? basename : `${basename}.vtt`;
+		a.style.visibility = "hidden";
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+		URL.revokeObjectURL(url);
+		return true;
+	} catch (e) {
+		console.error("[CC] Download fallback failed:", e);
+		return false;
+	}
+};
+
+/** Escape cue text for plain WebVTT (& < >). */
+window.escapeVttText = (text) => {
+	return String(text ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/\r\n|\r|\n/g, " ");
 };
 
 /**
@@ -2328,12 +2485,25 @@ const processNewVideoFile = async (fileOrPath, isTauriPath = false) => {
 	const isRelinking =
 		!hasExistingVideo && (markers.length > 0 || projectName !== "");
 
-	window.resetClosedCaptions();
+	// Media replace: drop captions; purge proxy for the path we are leaving
+	const previousItem = videoQueue[activeQueueIndex]
+		? { ...videoQueue[activeQueueIndex] }
+		: null;
+	if (typeof window.clearSubtitleTracks === "function") {
+		window.clearSubtitleTracks();
+	}
 
 	if (isTauriPath) {
 		// Tauri dialog path: route through loadVideo (verify_and_prepare_video proxy)
 		const filePath =
 			typeof fileOrPath === "object" ? fileOrPath.path : fileOrPath;
+		if (
+			previousItem?.videoFilePath &&
+			previousItem.videoFilePath !== filePath &&
+			typeof window.deleteProxyForQueueItem === "function"
+		) {
+			await window.deleteProxyForQueueItem(previousItem);
+		}
 		videoFileName =
 			typeof fileOrPath === "object" && fileOrPath.name
 				? fileOrPath.name
@@ -2343,8 +2513,17 @@ const processNewVideoFile = async (fileOrPath, isTauriPath = false) => {
 		await window.loadVideo(filePath);
 	} else {
 		const file = fileOrPath;
+		const nextPath = file.path || "";
+		if (
+			previousItem?.videoFilePath &&
+			nextPath &&
+			previousItem.videoFilePath !== nextPath &&
+			typeof window.deleteProxyForQueueItem === "function"
+		) {
+			await window.deleteProxyForQueueItem(previousItem);
+		}
 		videoFileName = file.name;
-		videoFilePath = file.path || ""; // Tauri may inject absolute path on drop/input
+		videoFilePath = nextPath; // Tauri may inject absolute path on drop/input
 		saveLocalState();
 
 		const isTauri = window.__TAURI__ !== undefined;
@@ -2358,10 +2537,14 @@ const processNewVideoFile = async (fileOrPath, isTauriPath = false) => {
 			player.src = fileURL;
 			player.preload = "metadata";
 			player.load();
-			const ccTrack = document.getElementById("ccTrack");
-			if (ccTrack) ccTrack.src = "";
+			if (typeof window.clearSubtitleTracks === "function") {
+				window.clearSubtitleTracks();
+			}
 			toggleVideoPlaceholder(false);
 			updateLoadButtonColor();
+			if (typeof window.updateProxyInfoUi === "function") {
+				window.updateProxyInfoUi(null);
+			}
 		}
 	}
 
@@ -2380,6 +2563,9 @@ const processNewVideoFile = async (fileOrPath, isTauriPath = false) => {
 	DOM.videoPlaceholder.textContent = "Load a video to get started";
 	saveLocalState();
 	renderVideoQueueSelect();
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	}
 	updateSliderTicks();
 };
 
@@ -3180,7 +3366,9 @@ const initializePlayer = () => {
 	// Ensure Playlist Queue Join chips match restored joinedToNext without
 	// requiring the user to open/close the sidebar (bug 6).
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
-	if (typeof window.renderSidebarPlaylist === "function") {
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	} else if (typeof window.renderSidebarPlaylist === "function") {
 		// Invalidate cache so join state is not sticky from a pre-load shell
 		if (typeof window.invalidateSidebarPlaylistCache === "function") {
 			window.invalidateSidebarPlaylistCache();
@@ -5806,7 +5994,10 @@ const switchVideoInQueue = async (index) => {
 	updateMarkersList();
 
 	player.pause();
-	window.resetClosedCaptions();
+	// Full media replace: clear tracks so previous source captions cannot stick
+	if (typeof window.clearSubtitleTracks === "function") {
+		window.clearSubtitleTracks();
+	}
 	const isTauri = window.__TAURI__ !== undefined;
 
 	if (isTauri && videoFilePath) {
@@ -5816,8 +6007,6 @@ const switchVideoInQueue = async (index) => {
 		player.src = videoBlobCache[videoFileName];
 		player.preload = "metadata";
 		toggleVideoPlaceholder(false);
-		const ccTrack = document.getElementById("ccTrack");
-		if (ccTrack) ccTrack.src = "";
 		updateLoadButtonColor();
 	} else {
 		player.src = "";
@@ -5827,6 +6016,9 @@ const switchVideoInQueue = async (index) => {
 			: "Load a video to get started";
 		toggleVideoPlaceholder(true);
 		updateLoadButtonColor();
+		if (typeof window.updateProxyInfoUi === "function") {
+			window.updateProxyInfoUi(null);
+		}
 	}
 
 	if (!DOM.settingsPanel.classList.contains("translate-x-full")) {
@@ -5837,8 +6029,13 @@ const switchVideoInQueue = async (index) => {
 	updateSliderTicks();
 	// Active join run may change with selection — rebuild sequence timeline
 	syncSequenceModeState();
-	if (typeof window.renderSidebarPlaylist === "function") {
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	} else if (typeof window.renderSidebarPlaylist === "function") {
 		window.renderSidebarPlaylist();
+	}
+	if (typeof window.updateProxyInfoUi === "function") {
+		window.updateProxyInfoUi(currentVideo.proxyPath || null);
 	}
 };
 
@@ -5859,6 +6056,20 @@ const removeCurrentVideo = async () => {
 	);
 	if (!confirmRemove) return;
 
+	// Capture removed item for proxy cleanup before splice
+	const removed = videoQueue[activeQueueIndex];
+	if (typeof window.deleteProxyForQueueItem === "function") {
+		await window.deleteProxyForQueueItem(removed);
+	}
+
+	// Clear CC immediately for the deleted current video
+	if (typeof window.clearSubtitleTracks === "function") {
+		window.clearSubtitleTracks();
+	}
+	if (typeof window.updateProxyInfoUi === "function") {
+		window.updateProxyInfoUi(null);
+	}
+
 	videoQueue.splice(activeQueueIndex, 1);
 	if (videoQueue.length > 0) {
 		videoQueue[videoQueue.length - 1].joinedToNext = false;
@@ -5878,6 +6089,9 @@ const removeCurrentVideo = async () => {
 		DOM.videoPlaceholder.textContent = "Load a video to get started";
 
 		renderVideoQueueSelect();
+		if (typeof window.refreshSidebarPlaylist === "function") {
+			window.refreshSidebarPlaylist();
+		}
 		updateMarkersList();
 		updateSliderTicks();
 		saveLocalState();
@@ -5898,10 +6112,16 @@ const removeCurrentVideo = async () => {
 		}
 
 		renderVideoQueueSelect();
+		if (typeof window.refreshSidebarPlaylist === "function") {
+			window.refreshSidebarPlaylist();
+		}
 		updateMarkersList();
 
 		player.pause();
-		window.resetClosedCaptions();
+		// Full media replace: clear captions before loading the next source
+		if (typeof window.clearSubtitleTracks === "function") {
+			window.clearSubtitleTracks();
+		}
 		const isTauri = window.__TAURI__ !== undefined;
 		if (isTauri && videoFilePath) {
 			await window.loadVideo(videoFilePath);
@@ -5910,9 +6130,10 @@ const removeCurrentVideo = async () => {
 			player.src = videoBlobCache[videoFileName];
 			player.preload = "metadata";
 			toggleVideoPlaceholder(false);
-			const ccTrack = document.getElementById("ccTrack");
-			if (ccTrack) ccTrack.src = "";
 			updateLoadButtonColor();
+			if (typeof window.updateProxyInfoUi === "function") {
+				window.updateProxyInfoUi(currentVideo.proxyPath || null);
+			}
 		} else {
 			player.src = "";
 			player.removeAttribute("src");
@@ -5921,6 +6142,9 @@ const removeCurrentVideo = async () => {
 				: "Load a video to get started";
 			toggleVideoPlaceholder(true);
 			updateLoadButtonColor();
+			if (typeof window.updateProxyInfoUi === "function") {
+				window.updateProxyInfoUi(null);
+			}
 		}
 		updateSliderTicks();
 		saveLocalState();
@@ -5970,7 +6194,13 @@ const addVideoToQueue = async () => {
 	// Previous last item may keep joinedToNext; new last must not join past end
 	videoQueue.push(newVideo);
 	videoQueue[videoQueue.length - 1].joinedToNext = false;
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	}
 	await switchVideoInQueue(videoQueue.length - 1);
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	}
 };
 
 async function addNewVideoToQueue(event) {
@@ -6043,7 +6273,15 @@ async function addNewVideoToQueue(event) {
 		}
 
 		renderVideoQueueSelect();
+		// Always refresh left playlist (open or closed) — do not wait for panel toggle
+		if (typeof window.refreshSidebarPlaylist === "function") {
+			window.refreshSidebarPlaylist();
+		}
 		await switchVideoInQueue(videoQueue.length - 1);
+		// switchVideoInQueue no-ops when already on the new index; refresh again after load
+		if (typeof window.refreshSidebarPlaylist === "function") {
+			window.refreshSidebarPlaylist();
+		}
 	} catch (dialogProcessException) {
 		console.error(
 			"[Queue Subsystem] Dialog process interaction channel failed:",
@@ -6065,6 +6303,9 @@ const editVideoInQueue = async () => {
 	videoQueue[activeQueueIndex].videoName = newName.trim();
 	saveLocalState();
 	renderVideoQueueSelect();
+	if (typeof window.refreshSidebarPlaylist === "function") {
+		window.refreshSidebarPlaylist();
+	}
 	showToast("Video renamed successfully.", "success");
 };
 
@@ -6075,6 +6316,65 @@ window.invalidateSidebarPlaylistCache = () => {
 	_sidebarPlaylistElements = [];
 	const container = document.getElementById("sidebar-queue-list");
 	if (container) container.innerHTML = "";
+};
+
+/**
+ * Invalidate cache + re-render left playlist. Call on every queue mutation
+ * (add/remove/reorder/join/clear) so the open panel updates without toggle.
+ */
+window.refreshSidebarPlaylist = () => {
+	if (typeof window.invalidateSidebarPlaylistCache === "function") {
+		window.invalidateSidebarPlaylistCache();
+	}
+	if (typeof window.renderSidebarPlaylist === "function") {
+		window.renderSidebarPlaylist();
+	}
+};
+
+/** Update optional Proxy Info UI (settings / debug) for the active item. */
+window.updateProxyInfoUi = (proxyPath) => {
+	const el = document.getElementById("proxyInfoPath");
+	const wrap = document.getElementById("proxyInfoSection");
+	if (el) {
+		el.textContent = proxyPath || "None";
+	}
+	if (wrap) {
+		wrap.classList.toggle("hidden", !proxyPath);
+	}
+	window.currentProxyPath = proxyPath || null;
+};
+
+/**
+ * Delete app-cache proxy for a source path (and clear tracked proxyPath).
+ * @param {{ videoFilePath?: string, proxyPath?: string|null }} video
+ */
+window.deleteProxyForQueueItem = async (video) => {
+	if (!video) return;
+	const sourcePath = video.videoFilePath || "";
+	const trackedProxy = video.proxyPath || null;
+	const invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+	if (invokeFn && sourcePath) {
+		try {
+			await invokeFn("delete_proxy_for_video", { videoPath: sourcePath });
+		} catch (err) {
+			console.warn("[Proxy] delete_proxy_for_video failed:", err);
+		}
+	}
+	// If UI/queue stored an explicit proxy path under cache, try that key too
+	if (invokeFn && trackedProxy && trackedProxy !== sourcePath) {
+		try {
+			await invokeFn("delete_proxy_for_video", { videoPath: trackedProxy });
+		} catch {
+			/* ignore */
+		}
+	}
+	video.proxyPath = null;
+	if (window.currentProxyPath === trackedProxy) {
+		window.currentProxyPath = null;
+	}
+	if (typeof window.updateProxyInfoUi === "function") {
+		window.updateProxyInfoUi(null);
+	}
 };
 
 const JOIN_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
@@ -6143,7 +6443,11 @@ window.renderSidebarPlaylist = () => {
 
 				saveLocalState();
 				renderVideoQueueSelect();
-				window.renderSidebarPlaylist();
+				if (typeof window.refreshSidebarPlaylist === "function") {
+					window.refreshSidebarPlaylist();
+				} else {
+					window.renderSidebarPlaylist();
+				}
 				scheduleJoinTimelineRebuild();
 			});
 			actionWrapper.appendChild(moveUpBtn);
@@ -6178,7 +6482,11 @@ window.renderSidebarPlaylist = () => {
 
 				saveLocalState();
 				renderVideoQueueSelect();
-				window.renderSidebarPlaylist();
+				if (typeof window.refreshSidebarPlaylist === "function") {
+					window.refreshSidebarPlaylist();
+				} else {
+					window.renderSidebarPlaylist();
+				}
 				scheduleJoinTimelineRebuild();
 			});
 			actionWrapper.appendChild(moveDownBtn);
@@ -6301,28 +6609,30 @@ window.renderSidebarPlaylist = () => {
 
 // Helper to transform raw seconds into valid WebVTT time syntax (HH:MM:SS.mmm)
 window.formatVttTimestamp = (seconds) => {
-	const h = Math.floor(seconds / 3600)
+	const safe = Math.max(0, Number(seconds) || 0);
+	const h = Math.floor(safe / 3600)
 		.toString()
 		.padStart(2, "0");
-	const m = Math.floor((seconds % 3600) / 60)
+	const m = Math.floor((safe % 3600) / 60)
 		.toString()
 		.padStart(2, "0");
-	const s = Math.floor(seconds % 60)
+	const s = Math.floor(safe % 60)
 		.toString()
 		.padStart(2, "0");
-	const ms = Math.floor((seconds % 1) * 1000)
+	const ms = Math.floor((safe % 1) * 1000)
 		.toString()
 		.padStart(3, "0");
 	return `${h}:${m}:${s}.${ms}`;
 };
 
+/** Last-cue hold (seconds) when no next marker; clamped to clipOut/duration. */
+const VTT_DEFAULT_CUE_HOLD_SEC = 3;
+
 window.toggleClosedCaptions = () => {
-	// 1. Establish or default your tracking toggle state variable
 	if (typeof window.isCcActive === "undefined") {
 		window.isCcActive = false;
 	}
 
-	// Flip the operational toggle switch
 	window.isCcActive = !window.isCcActive;
 
 	const videoElement = player || document.getElementById("my_video");
@@ -6331,212 +6641,208 @@ window.toggleClosedCaptions = () => {
 	if (!videoElement) return;
 
 	if (window.isCcActive) {
-		console.log("[CC System] Turning subtitles ON...");
-
-		// If tracks exist, force them into showing mode
 		let trackFound = false;
 		for (let i = 0; i < videoElement.textTracks.length; i++) {
-			if (videoElement.textTracks[i].label === "Generated Captions") {
+			const label = videoElement.textTracks[i].label;
+			if (label === "Generated Captions" || label === "English") {
 				videoElement.textTracks[i].mode = "showing";
 				trackFound = true;
 			}
 		}
 
-		// If no active track is loaded in the DOM container yet, fall back to compiling fresh ones
+		// No track loaded yet — generate from markers if available
 		if (!trackFound && typeof window.triggerVttGeneration === "function") {
 			window.triggerVttGeneration();
-			return; // The generator function will handle illuminating the button state
+			return;
 		}
 
-		// Illuminate the toggle button badge with active theme colors
 		if (ccToggleBtn) {
 			ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
 			ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
 		}
 	} else {
-		console.log(
-			"[CC System] Nuking subtitles from active player memory (ON -> OFF)...",
-		);
-
-		// 2. Disable browser level tracks immediately to clear rendering buffers
 		for (let i = 0; i < videoElement.textTracks.length; i++) {
 			videoElement.textTracks[i].mode = "disabled";
 		}
-
-		// 3. Surgically extract all track elements entirely from the DOM tree
-		const activeTrackElements = videoElement.querySelectorAll("track");
-		activeTrackElements.forEach((trackNode) => {
-			trackNode.remove();
-			console.log("[CC System] Track node purged from DOM.");
-		});
-
-		// 4. Strip out active highlights from the toolbar widget button container
+		// Keep track nodes (so toggle-on can re-show); only hide
 		if (ccToggleBtn) {
 			ccToggleBtn.classList.remove("text-yellow-500", "dark:text-yellow-400");
 			ccToggleBtn.classList.add("text-zinc-400", "dark:text-zinc-600");
 		}
-
 		showToast("Closed captions deactivated", "info");
 	}
 };
 
-// Main script generator sequence
+/**
+ * Build plain WebVTT from markers for the current context and load onto the player.
+ * Solo: active video markers, source-local times.
+ * Joined multi-clip run: all markers in the run ordered by sequence time (one VTT).
+ */
 window.triggerVttGeneration = async () => {
-	// Grab current video tracking data from active target queue
 	const currentVideo = videoQueue[activeQueueIndex];
-	if (!currentVideo?.videoFilePath) {
+	if (!currentVideo?.videoFilePath && !currentVideo?.videoFileName) {
 		showToast("No active video found to generate subtitles for", "error");
 		return;
 	}
 
-	// Confirm markers data cache is populated (adjust array variable name to match your system state)
-	const targetMarkers = typeof markers !== "undefined" ? markers : [];
-	if (targetMarkers.length === 0) {
+	const multi =
+		typeof window.isActiveRunMulti === "function" && window.isActiveRunMulti();
+	const run =
+		typeof window.getActiveJoinRun === "function"
+			? window.getActiveJoinRun()
+			: null;
+
+	// Collect cues in table order (sequence time when multi)
+	let cueStarts = [];
+	let cueNames = [];
+	let endLimit = 0;
+
+	if (multi && run?.segments?.length > 1) {
+		// One VTT on the sequence clock the joined review uses for ordering
+		const entries = [];
+		for (const seg of run.segments) {
+			const sourceMarkers =
+				seg.queueIndex === activeQueueIndex
+					? markers || []
+					: seg.video?.appState?.markers || [];
+			for (const m of sourceMarkers) {
+				const seqT =
+					typeof window.sourceTimeToSequence === "function"
+						? window.sourceTimeToSequence(seg.queueIndex, m.startTime, run)
+						: m.startTime;
+				entries.push({ start: seqT, name: m.name || "" });
+			}
+		}
+		entries.sort((a, b) => a.start - b.start);
+		cueStarts = entries.map((e) => e.start);
+		cueNames = entries.map((e) => e.name);
+		endLimit = Math.max(0, Number(run.totalDuration) || 0);
+	} else {
+		const list = [...(markers || [])].sort((a, b) => a.startTime - b.startTime);
+		cueStarts = list.map((m) => m.startTime);
+		cueNames = list.map((m) => m.name || "");
+		const playerEl = player || document.getElementById("my_video");
+		const clipOut =
+			typeof clipOutTime !== "undefined" && clipOutTime > 0
+				? clipOutTime
+				: playerEl?.duration || 0;
+		endLimit = clipOut;
+	}
+
+	if (cueStarts.length === 0) {
 		showToast("Please add at least one marker to compile captions", "error");
 		return;
 	}
 
-	// Sort chronologically to maintain caption reading order flow
-	const sortedMarkers = [...targetMarkers].sort(
-		(a, b) => a.startTime - b.startTime,
-	);
-
-	// Initialize standard WebVTT syntax header string block
+	// Plain WebVTT only — no REGION/STYLE/titles
 	let vttContent = "WEBVTT\n\n";
-
-	// Loop segments to assemble sequential tracking boxes
-	sortedMarkers.forEach((marker, idx) => {
-		const startTime = window.formatVttTimestamp(marker.startTime);
-		let endTime;
-
-		if (idx < sortedMarkers.length - 1) {
-			// End caption text right when the next sequential marker begins
-			endTime = window.formatVttTimestamp(sortedMarkers[idx + 1].startTime);
+	for (let idx = 0; idx < cueStarts.length; idx++) {
+		const startSec = Math.max(0, Number(cueStarts[idx]) || 0);
+		let endSec;
+		if (idx < cueStarts.length - 1) {
+			endSec = Math.max(startSec, Number(cueStarts[idx + 1]) || startSec);
 		} else {
-			// Terminal marker hold rule: last default screen duration is set to +4 seconds
-			endTime = window.formatVttTimestamp(marker.startTime + 4);
+			// Last cue: min(start+3, clipOut/duration) when known, else start+3
+			const holdEnd = startSec + VTT_DEFAULT_CUE_HOLD_SEC;
+			endSec = endLimit > startSec ? Math.min(holdEnd, endLimit) : holdEnd;
+			if (endSec <= startSec) {
+				endSec = startSec + VTT_DEFAULT_CUE_HOLD_SEC;
+			}
 		}
+		const startTs = window.formatVttTimestamp(startSec);
+		const endTs = window.formatVttTimestamp(endSec);
+		const cueText = window.escapeVttText(cueNames[idx] || `Marker ${idx + 1}`);
+		vttContent += `${startTs} --> ${endTs}\n${cueText}\n\n`;
+	}
 
-		const cueText = marker.name || `Marker Segment ${idx + 1}`;
-		vttContent += `${startTime} --> ${endTime}\n${cueText}\n\n`;
-	});
+	const sourcePath = currentVideo.videoFilePath || "";
+	const baseName = (
+		currentVideo.videoFileName ||
+		sourcePath.split(/[/\\]/).pop() ||
+		"captions"
+	).replace(/\.[^/.]+$/, "");
+	const fallbackName = `${baseName || "captions"}.vtt`;
+
+	let vttFilePath = sourcePath
+		? sourcePath.replace(/\.[^/.]+$/, "") + ".vtt"
+		: "";
+	let savedToDisk = false;
 
 	try {
-		// Fire string buffer to Rust backend command processor to handle absolute filesystem overwrite execution
-		if (window.__TAURI__) {
-			await window.__TAURI__.core.invoke("save_vtt_file", {
-				videoPath: currentVideo.videoFilePath,
+		if (window.__TAURI__?.core?.invoke && sourcePath) {
+			const written = await window.__TAURI__.core.invoke("save_vtt_file", {
+				videoPath: sourcePath,
 				vttText: vttContent,
 			});
-			showToast("Closed captions generated and saved successfully!", "success");
+			if (typeof written === "string" && written) {
+				vttFilePath = written;
+			}
+			savedToDisk = true;
+			showToast("Closed captions saved next to video.", "success");
 		} else {
-			console.log("Mock VTT Engine Payload:\n", vttContent);
+			// Browser / no path: download only
+			window.downloadVttFallback(vttContent, fallbackName);
+			showToast("Closed captions downloaded (no disk path).", "info");
 		}
-
-		// 1. Compute and print absolute VTT destination path
-		const vttFilePath = `${currentVideo.videoFilePath.replace(/\.[^/.]+$/, "")}.vtt`;
-		console.log("[CC Debug] Target VTT file absolute path:", vttFilePath);
-
-		// 2. Select and verify core video container element
-		const videoElement = player || document.getElementById("my_video");
-		if (!videoElement) {
-			console.error(
-				"[CC Debug] CRITICAL: Video element container not found in the DOM!",
+	} catch (writeErr) {
+		console.warn("[CC] save_vtt_file failed, offering download:", writeErr);
+		const ok = window.downloadVttFallback(vttContent, fallbackName);
+		if (ok) {
+			showToast(
+				"Could not write next to video; downloaded .vtt instead.",
+				"warning",
 			);
-			showToast("Video player element missing", "error");
+		} else {
+			showToast("Failed to write or download subtitle file.", "error");
 			return;
 		}
+	}
 
-		// Purge any pre-existing caption tracks to prevent subtitle overlap ghosts
-		const oldTrack = videoElement.querySelector(
-			"track[label='Generated Captions']",
-		);
-		if (oldTrack) {
-			console.log("[CC Debug] Removing stale caption track node.");
-			oldTrack.remove();
-		}
-
-		// 3. Build the new track node with explicit asynchronous error catching
-		const track = document.createElement("track");
-		track.kind = "subtitles";
-		track.label = "Generated Captions";
-		track.srclang = "en";
-
-		// Hook into the native DOM error event to catch hidden browser protocol rejections
-		track.onerror = (e) => {
-			console.error(
-				"[CC Debug] DOM Track Element failed to load source URL cleanly:",
-				track.src,
-				e,
+	// Load track onto player so CC shows immediately
+	if (
+		savedToDisk &&
+		vttFilePath &&
+		typeof window.attachSubtitleTrackFromPath === "function"
+	) {
+		window.attachSubtitleTrackFromPath(vttFilePath);
+	} else if (
+		savedToDisk &&
+		sourcePath &&
+		typeof window.loadSubtitleTrack === "function"
+	) {
+		await window.loadSubtitleTrack(sourcePath);
+	} else if (!savedToDisk && typeof window.clearSubtitleTracks === "function") {
+		// Blob fallback: inject via object URL so captions still show without disk
+		window.clearSubtitleTracks();
+		const videoElement = player || document.getElementById("my_video");
+		if (videoElement) {
+			const blobUrl = URL.createObjectURL(
+				new Blob([vttContent], { type: "text/vtt" }),
 			);
-			showToast("Browser blocked subtitle resource stream path", "error");
-		};
-
-		track.onload = () => {
-			console.log(
-				"[CC Debug] Success! HTML5 Video Track successfully loaded and parsed WebVTT resource.",
-			);
-		};
-
-		// Resolve the Tauri asset stream path using multiple validation fallbacks
-		let resolvedSrc = "";
-		if (window.__TAURI__?.core?.convertFileSrc) {
-			resolvedSrc = window.__TAURI__.core.convertFileSrc(vttFilePath);
-		} else if (window.__TAURI__?.tauri?.convertFileSrc) {
-			resolvedSrc = window.__TAURI__.tauri.convertFileSrc(vttFilePath);
-		} else {
-			resolvedSrc = `https://asset.localhost/${encodeURIComponent(vttFilePath)}`;
-		}
-
-		console.log(
-			"[CC Debug] Tauri convertFileSrc converted protocol path to:",
-			resolvedSrc,
-		);
-		track.src = resolvedSrc;
-		track.default = true;
-
-		// Append track to the live viewport container stream
-		videoElement.appendChild(track);
-
-		// 4. Force browser track state selection layout sync
-		setTimeout(() => {
-			console.log(
-				"[CC Debug] Syncing player textTracks list states. Total tracks available:",
-				videoElement.textTracks.length,
-			);
-			let syncSuccess = false;
-			for (let i = 0; i < videoElement.textTracks.length; i++) {
-				const currentTrack = videoElement.textTracks[i];
-				if (currentTrack.label === "Generated Captions") {
-					currentTrack.mode = "showing";
-					syncSuccess = true;
-					console.log(
-						"[CC Debug] Successfully forced 'Generated Captions' track mode to 'showing'.",
-					);
-				} else {
-					currentTrack.mode = "disabled";
+			const track = document.createElement("track");
+			track.id = "ccTrack";
+			track.kind = "captions";
+			track.label = "Generated Captions";
+			track.srclang = "en";
+			track.default = true;
+			track.src = blobUrl;
+			videoElement.appendChild(track);
+			setTimeout(() => {
+				for (let i = 0; i < videoElement.textTracks.length; i++) {
+					videoElement.textTracks[i].mode =
+						videoElement.textTracks[i].label === "Generated Captions"
+							? "showing"
+							: "disabled";
 				}
+			}, 50);
+			const ccToggleBtn = document.getElementById("ccToggleBtn");
+			if (ccToggleBtn) {
+				ccToggleBtn.removeAttribute("disabled");
+				ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
+				ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
 			}
-			if (!syncSuccess) {
-				console.warn(
-					"[CC Debug] Warning: Could not find 'Generated Captions' inside the active video textTracks array.",
-				);
-			}
-		}, 100);
-
-		// 5. Illuminate your player's CC toggle switch icon badge
-		const ccToggleBtn = document.getElementById("ccToggleBtn");
-		if (ccToggleBtn) {
-			ccToggleBtn.removeAttribute("disabled");
-			ccToggleBtn.classList.remove("text-zinc-400", "dark:text-zinc-600");
-			ccToggleBtn.classList.add("text-yellow-500", "dark:text-yellow-400");
-			console.log("[CC Debug] Visual CC dashboard button illuminated.");
-			window.captionsVisible = true;
 			window.isCcActive = true;
 		}
-	} catch (error) {
-		console.error("VTT Export Failed:", error);
-		showToast("Failed to write subtitle track file to disk", "error");
 	}
 };
 
