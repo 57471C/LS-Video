@@ -4634,13 +4634,22 @@ const updateSliderTicks = () => {
 		}
 	}
 
+	// Past-clipOut black-out is solo / single-clip only.
+	// Multi-clip join runs hand off at local clipOut — do not grey the transport bar after it.
+	const multiClipRun =
+		typeof window.isActiveRunMulti === "function" && window.isActiveRunMulti();
+
 	if (clipOutTime > 0 && clipOutTime < player.duration) {
 		const endPct = (clipOutTime / player.duration) * 100;
 		DOM.endTick.style.left = `calc(${endPct}% - 1px)`;
 		DOM.endTick.classList.remove("hidden");
 		if (DOM.endGreyOut) {
-			DOM.endGreyOut.style.width = `${100 - endPct}%`;
-			DOM.endGreyOut.classList.remove("hidden");
+			if (multiClipRun) {
+				DOM.endGreyOut.classList.add("hidden");
+			} else {
+				DOM.endGreyOut.style.width = `${100 - endPct}%`;
+				DOM.endGreyOut.classList.remove("hidden");
+			}
 		}
 	} else {
 		DOM.endTick.classList.add("hidden");
