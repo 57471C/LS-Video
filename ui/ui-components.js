@@ -39,10 +39,16 @@ const toggleTypeDropdown = (e, index) => {
 	}
 };
 
-document.addEventListener("click", () => {
+document.addEventListener("click", (e) => {
 	const menus = document.querySelectorAll('[id^="type-menu-"]');
 	for (const menu of menus) {
 		menu.classList.add("hidden");
+	}
+	// Clip-edge fade menus (footer Clip In / Clip Out) — close unless click is inside one
+	if (!e.target.closest?.(".clip-fade-control")) {
+		for (const menu of document.querySelectorAll(".clip-fade-menu")) {
+			menu.classList.add("hidden");
+		}
 	}
 });
 
@@ -308,6 +314,25 @@ const updateMarkersListImmediate = () => {
 					? `<span class="flex-shrink-0 text-[10px] font-bold text-zinc-400 dark:text-zinc-500" title="Clip ${entry.queueIndex + 1}">${entry.queueIndex + 1}</span>`
 					: "";
 
+			// Clip-edge fade badge on in/out bound markers (queue item fade, not playlist)
+			const boundVideo =
+				typeof videoQueue !== "undefined" ? videoQueue[entry.queueIndex] : null;
+			const boundFades =
+				typeof window.getVideoFadeSeconds === "function"
+					? window.getVideoFadeSeconds(boundVideo, entry.queueIndex)
+					: {
+							fadeInSec: Number(boundVideo?.fadeInSec) || 0,
+							fadeOutSec: Number(boundVideo?.fadeOutSec) || 0,
+						};
+			const isInBound = marker.type === "in" || marker.type === "start";
+			const isOutBound = marker.type === "out" || marker.type === "end";
+			const boundFadeBadge =
+				isInBound && boundFades.fadeInSec > 0
+					? fadeBadgeHtml(boundFades.fadeInSec)
+					: isOutBound && boundFades.fadeOutSec > 0
+						? fadeBadgeHtml(boundFades.fadeOutSec)
+						: "";
+
 			rows.push(`
         <tr class="marker-row ${rowBgClass} border-b border-zinc-200 dark:border-zinc-700" data-view-index="${i}" data-queue-index="${entry.queueIndex}" data-marker-index="${entry.markerIndex}" data-sequence="${entry.isSequence ? "1" : "0"}">
           <td class="pl-1 sm:pl-2 py-2">
@@ -328,7 +353,8 @@ const updateMarkersListImmediate = () => {
               <div class="relative inline-block text-left marker-type-dropdown">
                 <button type="button" class="inline-flex items-center justify-center p-1 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer gap-1 marker-context-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-view-index="${i}" id="type-btn-${i}">
                   ${marker.type === "loop" ? `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none">${marker.loopCount || 1}</span>` : ""}
-                  ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "in" ? ICONS.inType : ICONS.outType}
+                  ${boundFadeBadge}
+                  ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "in" || marker.type === "start" ? ICONS.inType : marker.type === "out" || marker.type === "end" ? ICONS.outType : ICONS.standard}
                 </button>
                 <div id="type-menu-${i}" class="hidden absolute left-0 mt-1 w-40 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
                   <div class="py-1">
@@ -778,6 +804,175 @@ const updateMarkersList = () => {
 // Classic-script globals + window aliases for module consumers
 window.updateMarkersList = updateMarkersList;
 
+/**
+ * Badge HTML for clip-edge fade (same visual language as loop ## badge).
+ * @param {number} fadeSec
+ * @returns {string}
+ */
+const fadeBadgeHtml = (fadeSec) => {
+	const label =
+		typeof window.formatFadeBadge === "function"
+			? window.formatFadeBadge(fadeSec)
+			: fadeSec > 0
+				? `${Number(fadeSec).toFixed(1)}s`
+				: "";
+	if (!label) return "";
+	return `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none" title="Clip-edge fade">${label}</span>`;
+};
+
+/**
+ * Footer Clip In / Clip Out control with fade context menu (not playlist).
+ * @param {"in"|"out"} edge
+ * @param {string} label
+ * @param {string} timeStr
+ * @param {number} fadeSec
+ * @param {string} timeId
+ * @returns {string}
+ */
+const renderClipBoundFadeControl = (edge, label, timeStr, fadeSec, timeId) => {
+	const defaultSec =
+		fadeSec > 0
+			? Number(fadeSec).toFixed(1)
+			: String(
+					typeof window.FADE_DEFAULT_SEC === "number"
+						? window.FADE_DEFAULT_SEC.toFixed(1)
+						: "1.0",
+				);
+	const badge = fadeBadgeHtml(fadeSec);
+	const menuTitle = edge === "out" ? "Fade Out" : "Fade In";
+	return `
+    <span class="relative inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400 clip-fade-control" data-fade-edge="${edge}">
+      <button type="button" class="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer clip-fade-trigger" data-fade-edge="${edge}" title="${menuTitle} (export filter)">
+        <span>${label}:</span>
+        <span id="${timeId}" class="font-mono font-bold text-zinc-900 dark:text-white">${timeStr}</span>
+        ${badge}
+      </button>
+      <div id="clip-fade-menu-${edge}" class="clip-fade-menu hidden absolute left-0 bottom-full mb-1 w-44 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
+        <div class="py-1">
+          <div class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">${menuTitle}</div>
+          <div class="px-3 py-1.5 flex items-center gap-1.5">
+            <input type="text" inputmode="decimal"
+              class="w-12 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-input"
+              value="${defaultSec}" maxlength="5" data-fade-edge="${edge}"
+              title="Seconds (e.g. 0.5, 1.0, 1.5)">
+            <span class="text-xs text-zinc-500">s</span>
+            <button type="button" class="btn btn-xs btn-outline-secondary py-0.5 px-2 h-6 text-[11px] clip-fade-apply" data-fade-edge="${edge}">Set</button>
+          </div>
+          <button type="button" class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 cursor-pointer font-semibold clip-fade-clear" data-fade-edge="${edge}">
+            Clear fade
+          </button>
+        </div>
+      </div>
+    </span>`;
+};
+
+/** Wire footer Clip In/Out fade menus after footer.innerHTML. */
+const bindClipFadeFooterControls = () => {
+	const closeAllFadeMenus = () => {
+		for (const menu of document.querySelectorAll(".clip-fade-menu")) {
+			menu.classList.add("hidden");
+		}
+	};
+
+	const applyFade = (edge, rawValue) => {
+		const def =
+			typeof window.FADE_DEFAULT_SEC === "number"
+				? window.FADE_DEFAULT_SEC
+				: 1.0;
+		let parsed = Number.parseFloat(String(rawValue ?? "").replace(",", "."));
+		if (!Number.isFinite(parsed) || parsed <= 0) parsed = def;
+		if (typeof window.setVideoFadeSec === "function") {
+			window.setVideoFadeSec(edge, parsed, activeQueueIndex);
+		} else if (
+			typeof videoQueue !== "undefined" &&
+			videoQueue[activeQueueIndex]
+		) {
+			const key = edge === "out" ? "fadeOutSec" : "fadeInSec";
+			videoQueue[activeQueueIndex][key] = parsed;
+			if (typeof saveLocalState === "function") saveLocalState();
+		}
+		if (typeof window.updateVideoTimeSummary === "function") {
+			window.updateVideoTimeSummary();
+		}
+	};
+
+	const clearFade = (edge) => {
+		if (typeof window.setVideoFadeSec === "function") {
+			window.setVideoFadeSec(edge, 0, activeQueueIndex);
+		} else if (
+			typeof videoQueue !== "undefined" &&
+			videoQueue[activeQueueIndex]
+		) {
+			const key = edge === "out" ? "fadeOutSec" : "fadeInSec";
+			videoQueue[activeQueueIndex][key] = 0;
+			if (typeof saveLocalState === "function") saveLocalState();
+		}
+		if (typeof window.updateVideoTimeSummary === "function") {
+			window.updateVideoTimeSummary();
+		}
+	};
+
+	for (const trigger of document.querySelectorAll(".clip-fade-trigger")) {
+		trigger.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const edge = trigger.getAttribute("data-fade-edge");
+			const menu = document.getElementById(`clip-fade-menu-${edge}`);
+			if (!menu) return;
+			const wasHidden = menu.classList.contains("hidden");
+			closeAllFadeMenus();
+			// Also close marker type menus
+			for (const m of document.querySelectorAll('[id^="type-menu-"]')) {
+				m.classList.add("hidden");
+			}
+			if (wasHidden) {
+				menu.classList.remove("hidden");
+				const input = menu.querySelector(".clip-fade-input");
+				if (input) {
+					// First-time set: input already prefills 1.0 when fade is 0
+					input.focus();
+					input.select();
+				}
+			}
+		});
+	}
+
+	for (const input of document.querySelectorAll(".clip-fade-input")) {
+		input.addEventListener("click", (e) => e.stopPropagation());
+		input.addEventListener("mousedown", (e) => e.stopPropagation());
+		input.addEventListener("keydown", (e) => {
+			e.stopPropagation();
+			if (e.key === "Enter") {
+				e.preventDefault();
+				const edge = input.getAttribute("data-fade-edge");
+				applyFade(edge, input.value);
+			} else if (e.key === "Escape") {
+				closeAllFadeMenus();
+			}
+		});
+	}
+
+	for (const btn of document.querySelectorAll(".clip-fade-apply")) {
+		btn.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const edge = btn.getAttribute("data-fade-edge");
+			const menu = document.getElementById(`clip-fade-menu-${edge}`);
+			const input = menu?.querySelector(".clip-fade-input");
+			applyFade(edge, input?.value);
+		});
+	}
+
+	for (const btn of document.querySelectorAll(".clip-fade-clear")) {
+		btn.addEventListener("click", (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const edge = btn.getAttribute("data-fade-edge");
+			clearFade(edge);
+		});
+	}
+};
+
 const updateVideoTimeSummary = () => {
 	try {
 		let footer = document.getElementById("markersTableFoot");
@@ -813,6 +1008,14 @@ const updateVideoTimeSummary = () => {
 			window.syncClipBoundsFromMarkers(activeQueueIndex);
 		}
 
+		const fades =
+			typeof window.getVideoFadeSeconds === "function"
+				? window.getVideoFadeSeconds(activeVideo, activeQueueIndex)
+				: {
+						fadeInSec: Number(activeVideo.fadeInSec) || 0,
+						fadeOutSec: Number(activeVideo.fadeOutSec) || 0,
+					};
+
 		if (multi) {
 			const run =
 				typeof window.getActiveJoinRun === "function"
@@ -826,21 +1029,37 @@ const updateVideoTimeSummary = () => {
 			const formattedEndTime = formatTimeToHHMMSSMS(seqOut);
 			const formattedDuration = formatTimeToHHMMSSMS(seqDur);
 
+			// Active clip bounds for fade editing (not playlist-level)
+			const activeIn =
+				typeof clipInTime !== "undefined" ? clipInTime : activeVideo.clipInTime || 0;
+			const activeOut =
+				typeof clipOutTime !== "undefined"
+					? clipOutTime
+					: activeVideo.clipOutTime || 0;
+			const activeInStr = formatTimeToHHMMSSMS(activeIn);
+			const activeOutStr = formatTimeToHHMMSSMS(activeOut);
+
 			footer.innerHTML = `
-      <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full py-1 text-sm font-medium">
-        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Seq In:</span>
-          <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
-        </span>
-        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Seq Out:</span>
-          <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
-        </span>
-        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Sequence Duration:</span>
-          <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
-        </span>
-        ${generateCcBtnHtml}
+      <div class="flex flex-col items-center gap-1 w-full py-1 text-sm font-medium">
+        <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full">
+          <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+            <span>Seq In:</span>
+            <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
+          </span>
+          <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+            <span>Seq Out:</span>
+            <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
+          </span>
+          <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+            <span>Sequence Duration:</span>
+            <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
+          </span>
+          ${generateCcBtnHtml}
+        </div>
+        <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full text-xs">
+          ${renderClipBoundFadeControl("in", "Clip In", activeInStr, fades.fadeInSec, "activeClipInTimeDisplay")}
+          ${renderClipBoundFadeControl("out", "Clip Out", activeOutStr, fades.fadeOutSec, "activeClipOutTimeDisplay")}
+        </div>
       </div>
     `;
 			const genBtn = document.getElementById("generateCcBtn");
@@ -851,6 +1070,7 @@ const updateVideoTimeSummary = () => {
 					window.triggerVttGeneration();
 				});
 			}
+			bindClipFadeFooterControls();
 			return;
 		}
 
@@ -894,14 +1114,8 @@ const updateVideoTimeSummary = () => {
 
 		footer.innerHTML = `
       <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full py-1 text-sm font-medium">
-        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Clip In:</span>
-          <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
-        </span>
-        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-          <span>Clip Out:</span>
-          <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
-        </span>
+        ${renderClipBoundFadeControl("in", "Clip In", formattedStartTime, fades.fadeInSec, "videoStartTimeDisplay")}
+        ${renderClipBoundFadeControl("out", "Clip Out", formattedEndTime, fades.fadeOutSec, "videoEndTimeDisplay")}
         <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
           <span>Video Duration:</span>
           <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
@@ -917,6 +1131,7 @@ const updateVideoTimeSummary = () => {
 				window.triggerVttGeneration();
 			});
 		}
+		bindClipFadeFooterControls();
 	} catch (error) {
 		toConsole("updateVideoTimeSummary error", error.message, debuggin);
 	}

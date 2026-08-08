@@ -260,6 +260,98 @@ const getClipSegmentDuration = (video, queueIndex) => {
 	return Math.max(0, outT - inT);
 };
 
+/** Default fade duration when the user first enables a fade via the menu. */
+export const FADE_DEFAULT_SEC = 1.0;
+/** Hard ceiling so fades cannot swallow a long clip. */
+export const FADE_HARD_MAX_SEC = 10;
+
+/**
+ * Normalize a fade duration to one decimal place; non-positive → 0.
+ * @param {unknown} value
+ * @returns {number}
+ */
+export function normalizeFadeSec(value) {
+	const v = Number(value);
+	if (!Number.isFinite(v) || v <= 0) return 0;
+	return Math.round(v * 10) / 10;
+}
+
+/**
+ * Clamp fade seconds: min 0, max min(10, half of clip duration).
+ * @param {unknown} value
+ * @param {number} [clipDurationSec=0]
+ * @returns {number}
+ */
+export function clampFadeSec(value, clipDurationSec = 0) {
+	let v = normalizeFadeSec(value);
+	if (v <= 0) return 0;
+	const dur = Math.max(0, Number(clipDurationSec) || 0);
+	const maxByHalf = dur > 0 ? dur / 2 : FADE_HARD_MAX_SEC;
+	const max = Math.min(FADE_HARD_MAX_SEC, maxByHalf);
+	if (v > max) v = Math.round(max * 10) / 10;
+	return v;
+}
+
+/**
+ * Format fade badge text (e.g. "1.0s", "0.5s"). Empty when no fade.
+ * @param {unknown} sec
+ * @returns {string}
+ */
+export function formatFadeBadge(sec) {
+	const v = normalizeFadeSec(sec);
+	if (v <= 0) return "";
+	return `${v.toFixed(1)}s`;
+}
+
+/**
+ * Read / clamp fade pair for a queue item given its export duration.
+ * @param {object|null|undefined} video
+ * @param {number} [queueIndex]
+ * @returns {{ fadeInSec: number, fadeOutSec: number }}
+ */
+export function getVideoFadeSeconds(video, queueIndex) {
+	const dur =
+		typeof getClipSegmentDuration === "function"
+			? getClipSegmentDuration(video, queueIndex)
+			: 0;
+	return {
+		fadeInSec: clampFadeSec(video?.fadeInSec, dur),
+		fadeOutSec: clampFadeSec(video?.fadeOutSec, dur),
+	};
+}
+
+/**
+ * Set fade on the active (or given) queue item and persist.
+ * @param {"in"|"out"} edge
+ * @param {number|string} seconds
+ * @param {number} [queueIndex]
+ * @returns {number} Clamped value written
+ */
+export function setVideoFadeSec(edge, seconds, queueIndex = activeQueueIndex) {
+	if (
+		typeof videoQueue === "undefined" ||
+		queueIndex < 0 ||
+		!videoQueue[queueIndex]
+	) {
+		return 0;
+	}
+	const video = videoQueue[queueIndex];
+	const dur = getClipSegmentDuration(video, queueIndex);
+	const clamped = clampFadeSec(seconds, dur);
+	if (edge === "out") {
+		video.fadeOutSec = clamped;
+	} else {
+		video.fadeInSec = clamped;
+	}
+	if (typeof saveLocalState === "function") saveLocalState();
+	return clamped;
+}
+window.setVideoFadeSec = setVideoFadeSec;
+window.formatFadeBadge = formatFadeBadge;
+window.clampFadeSec = clampFadeSec;
+window.getVideoFadeSeconds = getVideoFadeSeconds;
+window.FADE_DEFAULT_SEC = FADE_DEFAULT_SEC;
+
 /**
  * Derive clipIn/clipOut on a queue item from its in/out markers (and media duration).
  * sequenceOffset math depends on these fields staying in sync with marker types.
@@ -304,6 +396,11 @@ const syncClipBoundsFromMarkers = (queueIndex = activeQueueIndex) => {
 	video.clipInTime = newIn;
 	video.clipOutTime = newOut;
 	if (mediaDur > 0) video.mediaDuration = mediaDur;
+
+	// Keep fades within half-duration / 10s after bound changes
+	const segDur = Math.max(0, newOut > newIn ? newOut - newIn : 0);
+	video.fadeInSec = clampFadeSec(video.fadeInSec, segDur);
+	video.fadeOutSec = clampFadeSec(video.fadeOutSec, segDur);
 
 	if (queueIndex === activeQueueIndex) {
 		clipInTime = newIn;
@@ -1127,6 +1224,8 @@ window.clearAllPreviousProjectData = () => {
 			videoFilePath: "",
 			clipInTime: 0,
 			clipOutTime: 0,
+			fadeInSec: 0,
+			fadeOutSec: 0,
 			joinedToNext: false,
 			appState: { markers: [] },
 		},
@@ -5575,12 +5674,21 @@ const buildBatchJobsFromQueue = () => {
 				if (outM) endT = outM.startTime;
 			}
 			const loopM = (v.appState?.markers || []).find((m) => m.type === "loop");
+			const fades =
+				typeof getVideoFadeSeconds === "function"
+					? getVideoFadeSeconds(v, idx)
+					: {
+							fadeInSec: Number(v.fadeInSec) || 0,
+							fadeOutSec: Number(v.fadeOutSec) || 0,
+						};
 			segs.push({
 				path,
 				start_time: startT,
 				end_time: endT,
 				loop_count: loopM ? loopM.loopCount || 1 : 1,
 				queueIndex: idx,
+				fade_in_sec: fades.fadeInSec,
+				fade_out_sec: fades.fadeOutSec,
 			});
 			const base = (
 				v.videoFileName ||
@@ -5840,6 +5948,9 @@ async function processBatchQueue(presetType) {
 					end_time: Number(s.end_time) || 0,
 					// Serde field is loop_count; alias loopCount — send only one
 					loop_count: Math.max(1, Number(s.loop_count) || 1),
+					// Soft export fades only (no burn-in); 0 omitted as 0.0
+					fade_in_sec: Math.max(0, Number(s.fade_in_sec) || 0),
+					fade_out_sec: Math.max(0, Number(s.fade_out_sec) || 0),
 				}));
 				if (window.TM_DEBUG_MODE || debuggin) {
 					console.log("[export_queue_job] segments", {
@@ -6034,8 +6145,27 @@ async function executeExport(presetType) {
 		);
 		await writeTextFile(tempFilePath, listContent);
 
-		// Build FFmpeg args
-		const isCompression = presetType !== "copy";
+		// Clip-edge fades on the active source (export timeline t=0 / end)
+		const activeFades =
+			typeof getVideoFadeSeconds === "function"
+				? getVideoFadeSeconds(
+						typeof videoQueue !== "undefined"
+							? videoQueue[activeQueueIndex]
+							: null,
+						activeQueueIndex,
+					)
+				: { fadeInSec: 0, fadeOutSec: 0 };
+		const fadeInSec = activeFades.fadeInSec || 0;
+		const fadeOutSec = activeFades.fadeOutSec || 0;
+		const hasFades = fadeInSec > 0 || fadeOutSec > 0;
+
+		const duration = segments.reduce(
+			(sum, seg) => sum + (seg.end - seg.start) * (seg.loopCount || 1),
+			0,
+		);
+
+		// Build FFmpeg args — fades force reencode (cannot stream-copy through fade filters)
+		const isCompression = presetType !== "copy" || hasFades;
 		const args = [
 			"-y",
 			"-nostdin",
@@ -6062,53 +6192,67 @@ async function executeExport(presetType) {
 				targetHeight = inputHeight;
 			}
 
-			if (presetType === "low") {
-				args.push(
-					"-vf",
-					`scale=-2:${targetHeight}`,
-					"-c:v",
-					"libx264",
-					"-pix_fmt",
-					"yuv420p",
-					"-crf",
-					"32",
-					"-preset",
-					"veryfast",
-					"-threads",
-					"4",
-				);
-			} else if (presetType === "high") {
-				args.push(
-					"-vf",
-					`scale=-2:${targetHeight}`,
-					"-c:v",
-					"libx264",
-					"-pix_fmt",
-					"yuv420p",
-					"-crf",
-					"18",
-					"-preset",
-					"medium",
-					"-threads",
-					"4",
-				);
-			} else {
-				args.push(
-					"-vf",
-					`scale=-2:${targetHeight}`,
-					"-c:v",
-					"libx264",
-					"-pix_fmt",
-					"yuv420p",
-					"-crf",
-					"26",
-					"-preset",
-					"fast",
-					"-threads",
-					"4",
-				);
+			const vfParts = [];
+			// Copy quality with fades only: no scale; compress presets keep scale
+			if (presetType !== "copy") {
+				vfParts.push(`scale=-2:${targetHeight}`);
 			}
-			args.push("-c:a", "copy", "-max_muxing_queue_size", "4096");
+			if (fadeInSec > 0) {
+				const d = Math.min(fadeInSec, Math.max(0.01, duration));
+				vfParts.push(`fade=t=in:st=0:d=${d}`);
+			}
+			if (fadeOutSec > 0) {
+				const d = Math.min(fadeOutSec, Math.max(0.01, duration));
+				const st = Math.max(0, duration - d);
+				vfParts.push(`fade=t=out:st=${st}:d=${d}`);
+			}
+
+			let crf = "26";
+			let preset = "fast";
+			if (presetType === "low") {
+				crf = "32";
+				preset = "veryfast";
+			} else if (presetType === "high") {
+				crf = "18";
+				preset = "medium";
+			} else if (presetType === "copy" && hasFades) {
+				// Light reencode just for soft fade filters
+				crf = "18";
+				preset = "fast";
+			}
+
+			if (vfParts.length) {
+				args.push("-vf", vfParts.join(","));
+			}
+			args.push(
+				"-c:v",
+				"libx264",
+				"-pix_fmt",
+				"yuv420p",
+				"-crf",
+				crf,
+				"-preset",
+				preset,
+				"-threads",
+				"4",
+			);
+
+			const afParts = [];
+			if (fadeInSec > 0) {
+				const d = Math.min(fadeInSec, Math.max(0.01, duration));
+				afParts.push(`afade=t=in:st=0:d=${d}`);
+			}
+			if (fadeOutSec > 0) {
+				const d = Math.min(fadeOutSec, Math.max(0.01, duration));
+				const st = Math.max(0, duration - d);
+				afParts.push(`afade=t=out:st=${st}:d=${d}`);
+			}
+			if (afParts.length) {
+				args.push("-af", afParts.join(","), "-c:a", "aac", "-b:a", "128k");
+			} else {
+				args.push("-c:a", "copy");
+			}
+			args.push("-max_muxing_queue_size", "4096");
 		}
 
 		args.push(actualOutputPath);
@@ -6124,10 +6268,6 @@ async function executeExport(presetType) {
 		progressBar.style.width = "0%";
 		progressText.textContent = "0%";
 
-		const duration = segments.reduce(
-			(sum, seg) => sum + (seg.end - seg.start) * (seg.loopCount || 1),
-			0,
-		);
 		let lastPct = -1;
 
 		const WATCHDOG_MS = 30_000;
@@ -6588,6 +6728,8 @@ const addVideoToQueue = async () => {
 				videoFilePath: "",
 				clipInTime: 0,
 				clipOutTime: 0,
+				fadeInSec: 0,
+				fadeOutSec: 0,
 				joinedToNext: false,
 				appState: { markers: [] },
 			};
@@ -6662,6 +6804,8 @@ async function addNewVideoToQueue(event) {
 			videoFilePath: filePath,
 			clipInTime: 0,
 			clipOutTime: 0,
+			fadeInSec: 0,
+			fadeOutSec: 0,
 			joinedToNext: false,
 			appState: { markers: [] },
 		};
@@ -7608,5 +7752,10 @@ if (typeof module !== "undefined" && module.exports) {
 		parseVttTimestamp,
 		shiftWebVttForTrim,
 		collectBatchExportCaptionCues,
+		normalizeFadeSec,
+		clampFadeSec,
+		formatFadeBadge,
+		FADE_DEFAULT_SEC,
+		FADE_HARD_MAX_SEC,
 	};
 }
