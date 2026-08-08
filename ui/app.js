@@ -344,6 +344,18 @@ export function setVideoFadeSec(edge, seconds, queueIndex = activeQueueIndex) {
 		video.fadeInSec = clamped;
 	}
 	if (typeof saveLocalState === "function") saveLocalState();
+	// Live preview + timeline zones when active clip fades change
+	if (queueIndex === activeQueueIndex) {
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	}
+	if (typeof window.paintTimelineMarkersAndShading === "function") {
+		window.paintTimelineMarkersAndShading();
+	}
+	if (typeof window.refreshClipFadeTimelineZones === "function") {
+		window.refreshClipFadeTimelineZones();
+	}
 	return clamped;
 }
 window.setVideoFadeSec = setVideoFadeSec;
@@ -351,6 +363,290 @@ window.formatFadeBadge = formatFadeBadge;
 window.clampFadeSec = clampFadeSec;
 window.getVideoFadeSeconds = getVideoFadeSeconds;
 window.FADE_DEFAULT_SEC = FADE_DEFAULT_SEC;
+
+/**
+ * Compute linear fade gain (0..1) for local media time within [clipIn, clipOut].
+ * @param {number} localTime
+ * @param {number} clipIn
+ * @param {number} clipOut
+ * @param {number} fadeInSec
+ * @param {number} fadeOutSec
+ * @returns {number}
+ */
+export function computeClipEdgeFadeGain(
+	localTime,
+	clipIn,
+	clipOut,
+	fadeInSec,
+	fadeOutSec,
+) {
+	const t = Number(localTime) || 0;
+	const inT = Math.max(0, Number(clipIn) || 0);
+	let outT = Math.max(0, Number(clipOut) || 0);
+	const fi = Math.max(0, Number(fadeInSec) || 0);
+	const fo = Math.max(0, Number(fadeOutSec) || 0);
+	if (outT > 0 && outT <= inT) outT = inT;
+	let gain = 1;
+	// Outside active clip: fully faded (matches export bounds)
+	if (t < inT - 1e-4) return 0;
+	if (outT > inT && t > outT + 1e-4) return 0;
+	if (fi > 0) {
+		const endIn = inT + fi;
+		if (t <= inT) gain = 0;
+		else if (t < endIn) gain = Math.min(gain, (t - inT) / fi);
+	}
+	if (fo > 0 && outT > inT) {
+		const startOut = outT - fo;
+		if (t >= outT) gain = 0;
+		else if (t > startOut) gain = Math.min(gain, (outT - t) / fo);
+	}
+	if (!Number.isFinite(gain)) return 1;
+	return Math.max(0, Math.min(1, gain));
+}
+window.computeClipEdgeFadeGain = computeClipEdgeFadeGain;
+
+/** RAF id for smooth fade preview while playing. */
+window._clipFadePreviewRaf = null;
+
+/**
+ * Apply live soft-fade preview on the player (opacity + volume).
+ * Does not change volumeLevel / mute preference — only player.volume while fading.
+ */
+window.applyClipEdgeFadePreview = () => {
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		window.player ||
+		document.getElementById("my_video");
+	if (!videoEl) return;
+	if (window._sequenceHandoffInProgress) return;
+
+	const qIndex =
+		typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	const video =
+		typeof videoQueue !== "undefined" ? videoQueue[qIndex] : null;
+	const fades =
+		typeof getVideoFadeSeconds === "function"
+			? getVideoFadeSeconds(video, qIndex)
+			: {
+					fadeInSec: Number(video?.fadeInSec) || 0,
+					fadeOutSec: Number(video?.fadeOutSec) || 0,
+				};
+	const inT =
+		typeof getClipInTime === "function"
+			? getClipInTime(video)
+			: Math.max(0, Number(video?.clipInTime) || 0);
+	let outT =
+		typeof getClipOutTime === "function"
+			? getClipOutTime(video, qIndex)
+			: Math.max(0, Number(video?.clipOutTime) || 0);
+	if (outT <= 0 && videoEl.duration) outT = videoEl.duration;
+
+	const gain = computeClipEdgeFadeGain(
+		videoEl.currentTime,
+		inT,
+		outT,
+		fades.fadeInSec,
+		fades.fadeOutSec,
+	);
+
+	// Video opacity (visual fade)
+	videoEl.style.opacity = String(gain);
+
+	// Audio: scale user volume preference; never leave volumeLevel stuck at 0
+	const baseVol = clampVolume01(
+		typeof volumeLevel !== "undefined" ? volumeLevel : 1,
+		1,
+	);
+	const userMuted = !!videoEl.muted;
+	if (!userMuted) {
+		videoEl.volume = baseVol * gain;
+	}
+	// If muted, leave volume alone (mute handles silence)
+	window._clipFadePreviewGain = gain;
+};
+
+/** Start/stop RAF loop for smooth fade ramps during playback. */
+window.ensureClipFadePreviewLoop = () => {
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		window.player ||
+		document.getElementById("my_video");
+	if (!videoEl) return;
+	const tick = () => {
+		window._clipFadePreviewRaf = null;
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+		if (videoEl && !videoEl.paused && !videoEl.ended) {
+			window._clipFadePreviewRaf = requestAnimationFrame(tick);
+		}
+	};
+	if (!videoEl.paused && !videoEl.ended) {
+		if (!window._clipFadePreviewRaf) {
+			window._clipFadePreviewRaf = requestAnimationFrame(tick);
+		}
+	} else if (window._clipFadePreviewRaf) {
+		cancelAnimationFrame(window._clipFadePreviewRaf);
+		window._clipFadePreviewRaf = null;
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	}
+};
+
+/**
+ * Paint fade-in / fade-out zone overlays inside a segment shell or solo track.
+ * @param {HTMLElement} host
+ * @param {{ clipIn: number, clipOut: number, fadeInSec: number, fadeOutSec: number, mediaRelative?: boolean, mediaDur?: number }} opts
+ */
+window.paintClipFadeZonesOnHost = (host, opts) => {
+	if (!host) return;
+	for (const old of host.querySelectorAll(".sequence-fade-zone")) {
+		old.remove();
+	}
+	const clipIn = Math.max(0, Number(opts?.clipIn) || 0);
+	let clipOut = Math.max(0, Number(opts?.clipOut) || 0);
+	const fi = Math.max(0, Number(opts?.fadeInSec) || 0);
+	const fo = Math.max(0, Number(opts?.fadeOutSec) || 0);
+	if (fi <= 0 && fo <= 0) return;
+	const activeDur = Math.max(0, clipOut > clipIn ? clipOut - clipIn : 0);
+	if (activeDur <= 0) return;
+
+	const mediaRelative = !!opts?.mediaRelative;
+	const mediaDur = Math.max(
+		0.001,
+		Number(opts?.mediaDur) || (mediaRelative ? clipOut || activeDur : activeDur),
+	);
+
+	const addZone = (kind, leftPct, widthPct, title) => {
+		if (widthPct <= 0.05) return;
+		const el = document.createElement("div");
+		el.className = `sequence-fade-zone sequence-fade-zone-${kind}`;
+		el.title = title;
+		el.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct}%;width:${widthPct}%;pointer-events:none;z-index:5;box-sizing:border-box;`;
+		host.appendChild(el);
+	};
+
+	if (mediaRelative) {
+		const fiUse = Math.min(fi, activeDur);
+		if (fiUse > 0) {
+			addZone(
+				"in",
+				(clipIn / mediaDur) * 100,
+				(fiUse / mediaDur) * 100,
+				`Fade in ${fiUse.toFixed(1)}s`,
+			);
+		}
+		const foUse = Math.min(fo, activeDur);
+		if (foUse > 0) {
+			const start = Math.max(clipIn, clipOut - foUse);
+			addZone(
+				"out",
+				(start / mediaDur) * 100,
+				(foUse / mediaDur) * 100,
+				`Fade out ${foUse.toFixed(1)}s`,
+			);
+		}
+	} else {
+		// Host represents [clipIn, clipOut] only (solo filmstrip)
+		const fiUse = Math.min(fi, activeDur);
+		if (fiUse > 0) {
+			addZone("in", 0, (fiUse / activeDur) * 100, `Fade in ${fiUse.toFixed(1)}s`);
+		}
+		const foUse = Math.min(fo, activeDur);
+		if (foUse > 0) {
+			addZone(
+				"out",
+				(1 - foUse / activeDur) * 100,
+				(foUse / activeDur) * 100,
+				`Fade out ${foUse.toFixed(1)}s`,
+			);
+		}
+	}
+};
+
+/**
+ * Refresh fade zone overlays on all detailed-timeline segment shells / solo track.
+ */
+window.refreshClipFadeTimelineZones = () => {
+	const run =
+		typeof getActiveJoinRun === "function" ? getActiveJoinRun() : null;
+	const multi = !!(run?.segments && run.segments.length > 1);
+
+	if (multi) {
+		for (const seg of run.segments) {
+			const fades =
+				typeof getVideoFadeSeconds === "function"
+					? getVideoFadeSeconds(seg.video, seg.queueIndex)
+					: {
+							fadeInSec: Number(seg.video?.fadeInSec) || 0,
+							fadeOutSec: Number(seg.video?.fadeOutSec) || 0,
+						};
+			const shells = document.querySelectorAll(
+				`.sequence-media-shell[data-queue-index="${seg.queueIndex}"]`,
+			);
+			for (const shell of shells) {
+				const mediaDur = Math.max(
+					0.001,
+					Number(shell.dataset.mediaDuration) ||
+						Number(seg.video?.mediaDuration) ||
+						seg.duration ||
+						1,
+				);
+				window.paintClipFadeZonesOnHost(shell, {
+					clipIn: Number(shell.dataset.clipIn) || seg.clipIn || 0,
+					clipOut: Number(shell.dataset.clipOut) || seg.clipOut || 0,
+					fadeInSec: fades.fadeInSec,
+					fadeOutSec: fades.fadeOutSec,
+					mediaRelative: true,
+					mediaDur,
+				});
+			}
+		}
+		return;
+	}
+
+	// Solo: filmstrip track is the active [clipIn, clipOut] window
+	const videoTrack = document.getElementById("timeline-video-track");
+	const audioTrack = document.getElementById("timeline-audio-track");
+	const video =
+		typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
+	const fades =
+		typeof getVideoFadeSeconds === "function"
+			? getVideoFadeSeconds(video, activeQueueIndex)
+			: {
+					fadeInSec: Number(video?.fadeInSec) || 0,
+					fadeOutSec: Number(video?.fadeOutSec) || 0,
+				};
+	const inT =
+		typeof getClipInTime === "function"
+			? getClipInTime(video)
+			: Number(video?.clipInTime) || 0;
+	const outT =
+		typeof getClipOutTime === "function"
+			? getClipOutTime(video, activeQueueIndex)
+			: Number(video?.clipOutTime) || 0;
+	const opts = {
+		clipIn: inT,
+		clipOut: outT > inT ? outT : inT + 1,
+		fadeInSec: fades.fadeInSec,
+		fadeOutSec: fades.fadeOutSec,
+		mediaRelative: false,
+	};
+	if (videoTrack && !videoTrack.querySelector(".sequence-segment-fill")) {
+		// Ensure relative host for absolute zones
+		if (getComputedStyle(videoTrack).position === "static") {
+			videoTrack.style.position = "relative";
+		}
+		window.paintClipFadeZonesOnHost(videoTrack, opts);
+	}
+	if (audioTrack && !audioTrack.querySelector(".sequence-segment-fill")) {
+		if (getComputedStyle(audioTrack).position === "static") {
+			audioTrack.style.position = "relative";
+		}
+		window.paintClipFadeZonesOnHost(audioTrack, opts);
+	}
+};
 
 /**
  * Derive clipIn/clipOut on a queue item from its in/out markers (and media duration).
@@ -1003,6 +1299,13 @@ const handoffToNextJoinedClip = async () => {
 		window._sequenceContinuePlay = false;
 		window._softHandoffVolumeActive = false;
 		window._softHandoffAudio = null;
+		// Next segment's own fadeInSec/fadeOutSec
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
 	}
 };
 window.handoffToNextJoinedClip = handoffToNextJoinedClip;
@@ -2481,6 +2784,25 @@ const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	activeBand.style.cssText = `position:absolute;top:0;bottom:0;left:${headFrac * 100}%;width:${Math.max(0, (1 - headFrac - tailFrac) * 100)}%;z-index:2;pointer-events:none;box-sizing:border-box;`;
 	shell.appendChild(activeBand);
 
+	// Clip-edge fade zones within the active [clipIn, clipOut] band
+	const fades =
+		typeof getVideoFadeSeconds === "function"
+			? getVideoFadeSeconds(seg.video, seg.queueIndex)
+			: {
+					fadeInSec: Number(seg.video?.fadeInSec) || 0,
+					fadeOutSec: Number(seg.video?.fadeOutSec) || 0,
+				};
+	if (typeof window.paintClipFadeZonesOnHost === "function") {
+		window.paintClipFadeZonesOnHost(shell, {
+			clipIn,
+			clipOut,
+			fadeInSec: fades.fadeInSec,
+			fadeOutSec: fades.fadeOutSec,
+			mediaRelative: true,
+			mediaDur,
+		});
+	}
+
 	trackEl.appendChild(shell);
 	return content;
 };
@@ -2614,6 +2936,9 @@ window.loadWaveformTimeline = async () => {
 					}
 					fillFilmstripTrack(videoTrack, thumbnailPaths);
 					window.setupVideoTrack();
+					if (typeof window.refreshClipFadeTimelineZones === "function") {
+						window.refreshClipFadeTimelineZones();
+					}
 				})
 				.catch((err) => {
 					if (isStaleRequest()) return;
@@ -2775,6 +3100,10 @@ window.loadWaveformTimeline = async () => {
 		}
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
+		}
+		// Re-paint fade zones after filmstrip fills (zones are on shells, not content)
+		if (typeof window.refreshClipFadeTimelineZones === "function") {
+			window.refreshClipFadeTimelineZones();
 		}
 	} catch (err) {
 		if (isStaleRequest()) return;
@@ -3568,6 +3897,27 @@ const initializePlayer = () => {
 	}
 
 	player.addEventListener("timeupdate", seektimeupdate);
+	player.addEventListener("play", () => {
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	});
+	player.addEventListener("pause", () => {
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	});
+	player.addEventListener("seeked", () => {
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	});
 	player.addEventListener("loadedmetadata", () => {
 		const duration = player.duration;
 		configureTimelineTicks(duration);
@@ -4786,6 +5136,14 @@ const seektimeupdate = () => {
 
 		// Do not fight the player mid-handoff load
 		if (window._sequenceHandoffInProgress) return;
+
+		// Soft clip-edge fade preview (opacity + volume ramp)
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
 
 		const currentTime = player.currentTime;
 		const duration = player.duration;
@@ -7755,6 +8113,7 @@ if (typeof module !== "undefined" && module.exports) {
 		normalizeFadeSec,
 		clampFadeSec,
 		formatFadeBadge,
+		computeClipEdgeFadeGain,
 		FADE_DEFAULT_SEC,
 		FADE_HARD_MAX_SEC,
 	};

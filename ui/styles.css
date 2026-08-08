@@ -902,6 +902,51 @@ html.dark .sequence-clip-shade {
 		inset -2px 0 0 0 rgba(59, 130, 246, 0.55);
 }
 
+/*
+ * Clip-edge fade zones on detailed timeline (export soft fades).
+ * Left ramp = fade-in after clipIn; right ramp = fade-out into clipOut.
+ */
+.sequence-fade-zone {
+	pointer-events: none;
+	box-sizing: border-box;
+}
+.sequence-fade-zone-in {
+	background: linear-gradient(
+		to right,
+		rgba(168, 85, 247, 0.55) 0%,
+		rgba(168, 85, 247, 0.22) 45%,
+		rgba(168, 85, 247, 0.04) 100%
+	);
+	box-shadow: inset 0 0 0 1px rgba(168, 85, 247, 0.35);
+}
+.sequence-fade-zone-out {
+	background: linear-gradient(
+		to left,
+		rgba(168, 85, 247, 0.55) 0%,
+		rgba(168, 85, 247, 0.22) 45%,
+		rgba(168, 85, 247, 0.04) 100%
+	);
+	box-shadow: inset 0 0 0 1px rgba(168, 85, 247, 0.35);
+}
+.dark .sequence-fade-zone-in,
+html.dark .sequence-fade-zone-in {
+	background: linear-gradient(
+		to right,
+		rgba(192, 132, 252, 0.5) 0%,
+		rgba(192, 132, 252, 0.2) 45%,
+		rgba(192, 132, 252, 0.04) 100%
+	);
+}
+.dark .sequence-fade-zone-out,
+html.dark .sequence-fade-zone-out {
+	background: linear-gradient(
+		to left,
+		rgba(192, 132, 252, 0.5) 0%,
+		rgba(192, 132, 252, 0.2) 45%,
+		rgba(192, 132, 252, 0.04) 100%
+	);
+}
+
 .sequence-media-content {
 	width: 100%;
 	height: 100%;
