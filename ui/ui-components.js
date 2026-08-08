@@ -237,15 +237,32 @@ const getActiveRunMarkerViewEntries = () => {
 	const multi = !!(run?.segments && run.segments.length > 1);
 
 	if (!multi) {
-		return (markers || []).map((m, i) => ({
-			queueIndex: activeQueueIndex,
-			markerIndex: i,
-			marker: m,
-			displayTime: m.startTime,
-			isSequence: false,
-			clipIn: typeof clipInTime !== "undefined" ? clipInTime : 0,
-			clipOut: typeof clipOutTime !== "undefined" ? clipOutTime : 0,
-		}));
+		// Start column matches playhead clock: effective (output) time when Speed warps timeline
+		const speedModel =
+			typeof window.getActiveSpeedTimelineModel === "function"
+				? window.getActiveSpeedTimelineModel()
+				: null;
+		return (markers || []).map((m, i) => {
+			let displayTime = m.startTime;
+			if (
+				speedModel?.hasSpeedMarkers &&
+				typeof window.sourceTimeToEffective === "function"
+			) {
+				displayTime = window.sourceTimeToEffective(
+					m.startTime,
+					speedModel.ranges,
+				);
+			}
+			return {
+				queueIndex: activeQueueIndex,
+				markerIndex: i,
+				marker: m,
+				displayTime,
+				isSequence: !!speedModel?.hasSpeedMarkers,
+				clipIn: typeof clipInTime !== "undefined" ? clipInTime : 0,
+				clipOut: typeof clipOutTime !== "undefined" ? clipOutTime : 0,
+			};
+		});
 	}
 
 	const entries = [];

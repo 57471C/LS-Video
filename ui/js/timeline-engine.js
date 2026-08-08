@@ -425,10 +425,14 @@ const setupVideoTrack = () => {
 	const videoTrack = document.getElementById("timeline-video-track");
 	if (!videoTrack || !player) return;
 
-	// Multi-join spine: never re-flex outer track into a full-width filmstrip —
-	// that destroys absolute segment fills on row 1 (#timeline-video-track).
+	// Multi-join spine or speed-warped cells: keep block + absolute children
 	const hasSegmentFill = !!videoTrack.querySelector(".sequence-segment-fill");
-	if (hasSegmentFill || videoTrack.dataset.sequenceSpine === "1") {
+	const hasSpeedCells = !!videoTrack.querySelector(".sequence-speed-cell");
+	if (
+		hasSegmentFill ||
+		hasSpeedCells ||
+		videoTrack.dataset.sequenceSpine === "1"
+	) {
 		const oldPlayheads =
 			videoTrack.getElementsByClassName("sequencer-playhead");
 		while (oldPlayheads.length > 0) {

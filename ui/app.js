@@ -997,10 +997,7 @@ window.refreshClipFadeTimelineZones = () => {
 		return;
 	}
 
-	// Solo: same media clock as out marker + grey tail (full source duration).
-	// Do NOT map zones onto active-only filmstrip % — that parks fade-out at the
-	// right edge of the track (into the post-clipOut grey). Use media-relative
-	// [clipOut - fo, clipOut] so purple ends at the out line, left of the grey.
+	// Solo filmstrip: timeline host is OUTPUT time when Speed markers are active.
 	const videoTrack = document.getElementById("timeline-video-track");
 	if (!videoTrack || videoTrack.querySelector(".sequence-segment-fill")) {
 		return;
@@ -1014,17 +1011,49 @@ window.refreshClipFadeTimelineZones = () => {
 					fadeInSec: Number(video?.fadeInSec) || 0,
 					fadeOutSec: Number(video?.fadeOutSec) || 0,
 				};
-	const inT =
-		typeof getClipInTime === "function"
-			? getClipInTime(video)
-			: Number(video?.clipInTime) || 0;
-	let outT =
-		typeof getClipOutTime === "function"
-			? getClipOutTime(video, activeQueueIndex)
-			: Number(video?.clipOutTime) || 0;
+	const model =
+		typeof window.getActiveSpeedTimelineModel === "function"
+			? window.getActiveSpeedTimelineModel()
+			: null;
+	const inT = model?.clipIn ?? (Number(video?.clipInTime) || 0);
+	let outT = model?.clipOut ?? (Number(video?.clipOutTime) || 0);
 	const p =
 		(typeof player !== "undefined" && player) || window.player || null;
 	if (outT <= inT && p?.duration) outT = p.duration;
+
+	if (getComputedStyle(videoTrack).position === "static") {
+		videoTrack.style.position = "relative";
+	}
+
+	// Speed-warped: fade zones in OUTPUT time on the same host as filmstrip cells
+	if (model?.hasSpeedMarkers && model.ranges?.length) {
+		for (const old of videoTrack.querySelectorAll(".sequence-fade-zone")) {
+			old.remove();
+		}
+		const effDur = Math.max(0.001, model.effectiveDuration);
+		const addOutZone = (kind, srcA, srcB, title) => {
+			const a = sourceTimeToEffective(srcA, model.ranges);
+			const b = sourceTimeToEffective(srcB, model.ranges);
+			const left = (Math.min(a, b) / effDur) * 100;
+			const width = (Math.abs(b - a) / effDur) * 100;
+			if (width <= 0.02) return;
+			const el = document.createElement("div");
+			el.className = `sequence-fade-zone sequence-fade-zone-${kind}`;
+			el.title = title;
+			el.style.cssText = `position:absolute;top:0;bottom:0;left:${left}%;width:${width}%;pointer-events:none;z-index:5;box-sizing:border-box;`;
+			videoTrack.appendChild(el);
+		};
+		if (fades.fadeInSec > 0) {
+			const fi = Math.min(fades.fadeInSec, Math.max(0, outT - inT));
+			addOutZone("in", inT, inT + fi, `Fade in ${fi.toFixed(1)}s`);
+		}
+		if (fades.fadeOutSec > 0) {
+			const fo = Math.min(fades.fadeOutSec, Math.max(0, outT - inT));
+			addOutZone("out", outT - fo, outT, `Fade out ${fo.toFixed(1)}s`);
+		}
+		return;
+	}
+
 	const mediaDur = Math.max(
 		0.001,
 		Number(video?.mediaDuration) || 0,
@@ -1032,9 +1061,6 @@ window.refreshClipFadeTimelineZones = () => {
 		outT,
 		inT + 0.001,
 	);
-	if (getComputedStyle(videoTrack).position === "static") {
-		videoTrack.style.position = "relative";
-	}
 	window.paintClipFadeZonesOnHost(videoTrack, {
 		clipIn: inT,
 		clipOut: outT > inT ? outT : inT + 1,
@@ -3105,6 +3131,152 @@ const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
 };
 
 /**
+ * Layout filmstrip thumbs in OUTPUT time: each Speed run is a cell with width
+ * proportional to (sourceSpan/rate). 2x sections are half as wide as 1x of same source length.
+ * Thumbs covering [clipIn, clipOut] are sliced per run (visual density compresses under 2x).
+ *
+ * @param {HTMLElement} host
+ * @param {string[]} thumbnailPaths ordered thumbs for [clipIn, clipOut]
+ * @param {Array<{start:number,end:number,rate:number}>} ranges
+ * @param {number} clipIn
+ * @param {number} clipOut
+ */
+window.layoutSpeedWarpedFilmstrip = (
+	host,
+	thumbnailPaths,
+	ranges,
+	clipIn,
+	clipOut,
+) => {
+	if (!host || !thumbnailPaths?.length) return;
+	const inT = Math.max(0, Number(clipIn) || 0);
+	const outT = Math.max(inT, Number(clipOut) || inT);
+	const srcSpan = Math.max(0.001, outT - inT);
+	const list =
+		Array.isArray(ranges) && ranges.length
+			? ranges
+			: [{ start: inT, end: outT, rate: 1 }];
+	const effTotal = list.reduce(
+		(s, r) => s + Math.max(0, r.end - r.start) / Math.max(0.01, r.rate),
+		0,
+	);
+	if (effTotal <= 0) {
+		fillFilmstripTrack(host, thumbnailPaths);
+		return;
+	}
+
+	host.innerHTML = "";
+	host.style.position = "relative";
+	host.style.display = "block";
+	host.style.width = "100%";
+	host.style.overflow = "hidden";
+	host.style.boxSizing = "border-box";
+
+	const n = thumbnailPaths.length;
+	let effCursor = 0;
+	for (const r of list) {
+		const rate = Math.max(0.01, Number(r.rate) || 1);
+		const a = Math.max(inT, Number(r.start) || inT);
+		const b = Math.min(outT, Number(r.end) || outT);
+		if (b <= a) continue;
+		const outSpan = (b - a) / rate;
+		const leftPct = (effCursor / effTotal) * 100;
+		const widthPct = (outSpan / effTotal) * 100;
+		const cell = document.createElement("div");
+		cell.className = "sequence-speed-cell";
+		cell.dataset.rate = String(rate);
+		cell.dataset.srcStart = String(a);
+		cell.dataset.srcEnd = String(b);
+		cell.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct}%;width:${widthPct}%;overflow:hidden;display:flex;align-items:stretch;box-sizing:border-box;`;
+		// Slice thumbs covering this source span within [clipIn, clipOut]
+		const i0 = Math.max(
+			0,
+			Math.floor(((a - inT) / srcSpan) * n - 1e-9),
+		);
+		const i1 = Math.min(n, Math.ceil(((b - inT) / srcSpan) * n + 1e-9));
+		const slice = thumbnailPaths.slice(i0, Math.max(i0 + 1, i1));
+		for (const pathString of slice) {
+			const img = document.createElement("img");
+			img.src = window.__TAURI__.core.convertFileSrc(pathString);
+			img.className =
+				"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
+			img.style.flex = "1 1 0";
+			img.style.minWidth = "0";
+			img.style.height = "100%";
+			img.style.boxSizing = "border-box";
+			cell.appendChild(img);
+		}
+		if (!slice.length) {
+			cell.style.background =
+				"repeating-linear-gradient(90deg,#0000,#0000 4px,#8882 4px 8px)";
+		}
+		host.appendChild(cell);
+		effCursor += outSpan;
+	}
+};
+
+/**
+ * Layout waveform peaks in OUTPUT time (same cell geometry as filmstrip).
+ * peaks cover full media 0..mediaDur (or clip if shorter).
+ */
+window.layoutSpeedWarpedWaveform = (
+	host,
+	peaks,
+	ranges,
+	clipIn,
+	clipOut,
+	mediaDur,
+) => {
+	if (!host) return;
+	const inT = Math.max(0, Number(clipIn) || 0);
+	const outT = Math.max(inT, Number(clipOut) || inT);
+	const md = Math.max(outT, Number(mediaDur) || outT, 0.001);
+	const list =
+		Array.isArray(ranges) && ranges.length
+			? ranges
+			: [{ start: inT, end: outT, rate: 1 }];
+	const effTotal = list.reduce(
+		(s, r) => s + Math.max(0, r.end - r.start) / Math.max(0.01, r.rate),
+		0,
+	);
+	if (!peaks?.length || effTotal <= 0) {
+		if (typeof window.renderWaveformInto === "function") {
+			window.renderWaveformInto(host, peaks || []);
+		}
+		return;
+	}
+
+	host.innerHTML = "";
+	host.style.position = "relative";
+	host.style.display = "block";
+	host.style.width = "100%";
+	host.style.overflow = "hidden";
+
+	const n = peaks.length;
+	let effCursor = 0;
+	for (const r of list) {
+		const rate = Math.max(0.01, Number(r.rate) || 1);
+		const a = Math.max(inT, Number(r.start) || inT);
+		const b = Math.min(outT, Number(r.end) || outT);
+		if (b <= a) continue;
+		const outSpan = (b - a) / rate;
+		const leftPct = (effCursor / effTotal) * 100;
+		const widthPct = (outSpan / effTotal) * 100;
+		const cell = document.createElement("div");
+		cell.className = "sequence-speed-cell sequence-speed-wave-cell";
+		cell.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct}%;width:${widthPct}%;overflow:hidden;`;
+		const i0 = Math.max(0, Math.floor((a / md) * n));
+		const i1 = Math.min(n, Math.ceil((b / md) * n));
+		const slice = peaks.slice(i0, Math.max(i0 + 1, i1));
+		if (typeof window.renderWaveformInto === "function") {
+			window.renderWaveformInto(cell, slice);
+		}
+		host.appendChild(cell);
+		effCursor += outSpan;
+	}
+};
+
+/**
  * Layout a join-row track on the sequence spine.
  *
  * Sequence playhead alignment (unchanged):
@@ -3122,23 +3294,30 @@ const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
 const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	if (!trackEl || !seg || totalDuration <= 0) return trackEl;
 	const total = Math.max(totalDuration, 0.001);
-	const activeDur = Math.max(Number(seg.duration) || 0, 0.001);
+	// seg.duration is OUTPUT/speed-warped length of the sequence slot
+	const activeDurOut = Math.max(Number(seg.duration) || 0, 0.001);
 	const clipIn = Math.max(0, Number(seg.clipIn) || 0);
-	let clipOut = Number(seg.clipOut) || clipIn + activeDur;
+	const sourceActive = Math.max(
+		0.001,
+		Number(seg.sourceDuration) || 0,
+		(Number(seg.clipOut) || 0) - clipIn,
+	);
+	let clipOut = Number(seg.clipOut) || clipIn + sourceActive;
 	let mediaDur =
 		typeof getMediaDurationForQueueIndex === "function"
 			? getMediaDurationForQueueIndex(seg.video, seg.queueIndex)
 			: Number(seg.video?.mediaDuration) || 0;
-	if (mediaDur <= 0) mediaDur = Math.max(clipOut, activeDur);
+	if (mediaDur <= 0) mediaDur = Math.max(clipOut, sourceActive);
 	if (clipOut > mediaDur) clipOut = mediaDur;
-	if (clipOut <= clipIn) clipOut = Math.min(mediaDur, clipIn + activeDur);
+	if (clipOut <= clipIn) clipOut = Math.min(mediaDur, clipIn + sourceActive);
 
-	// Active window on the sequence spine (flush join boundary)
+	// Active window on the sequence spine = warped duration
 	const activeLeftPct = (seg.offset / total) * 100;
-	const activeWidthPct = (activeDur / total) * 100;
+	const activeWidthPct = (activeDurOut / total) * 100;
 
-	// Full media shell: scale so [clipIn, clipOut] maps onto the active slot
-	const fullWidthPct = activeWidthPct * (mediaDur / activeDur);
+	// Full media shell: scale so source [clipIn, clipOut] maps onto the active slot.
+	// Use SOURCE active length (not warped) for media fraction math.
+	const fullWidthPct = activeWidthPct * (mediaDur / sourceActive);
 	const fullLeftPct = activeLeftPct - (clipIn / mediaDur) * fullWidthPct;
 	const headFrac = mediaDur > 0 ? clipIn / mediaDur : 0;
 	const tailFrac =
@@ -3294,10 +3473,18 @@ window.loadWaveformTimeline = async () => {
 
 	try {
 		if (!multi) {
-			// -------- Solo path (unchanged behaviour) --------
+			// -------- Solo path (speed-warped output timebase when Speed markers active) --------
 			const videoEl = document.querySelector("video") || player;
-			const duration = videoEl.duration || player.duration || 0;
-			// Zoom content width drives tile density (fit * factor)
+			const mediaDuration = videoEl.duration || player.duration || 0;
+			const speedModel =
+				typeof window.getActiveSpeedTimelineModel === "function"
+					? window.getActiveSpeedTimelineModel()
+					: null;
+			// Ruler / zoom use OUTPUT duration (∫ dt/rate), not raw source duration
+			const timelineDur = Math.max(
+				0.001,
+				speedModel?.effectiveDuration || mediaDuration || 0.001,
+			);
 			if (typeof window.applyTimelineZoomLayout === "function") {
 				window.applyTimelineZoomLayout();
 			}
@@ -3305,7 +3492,7 @@ window.loadWaveformTimeline = async () => {
 				"get_waveform_data",
 				{
 					videoPath: requestPath,
-					durationSeconds: duration,
+					durationSeconds: mediaDuration,
 				},
 			);
 			if (isStaleRequest()) return;
@@ -3319,15 +3506,19 @@ window.loadWaveformTimeline = async () => {
 			window.currentWaveformData = peakArray;
 			window.currentWaveformDataPath = requestPath;
 
-			window.paintTimelineRuler(duration);
-			window.setupVideoTrack();
-			window.renderAudioWaveformCanvas();
-			if (typeof window.paintTimelineMarkersAndShading === "function") {
-				window.paintTimelineMarkersAndShading();
-			}
+			window.paintTimelineRuler(timelineDur);
 
 			const videoTrack =
 				rows[0]?.videoTrack || document.getElementById("timeline-video-track");
+			const audioTrack =
+				rows[0]?.audioTrack || document.getElementById("timeline-audio-track");
+
+			const soloIn = speedModel?.clipIn ?? (clipInTime || 0);
+			const soloOut =
+				speedModel?.clipOut ||
+				(clipOutTime > 0
+					? clipOutTime
+					: mediaDuration || 0);
 
 			if (isAudioOnlyMedia(requestPath)) {
 				if (videoTrack) {
@@ -3336,7 +3527,22 @@ window.loadWaveformTimeline = async () => {
 					videoTrack.style.alignItems = "center";
 					videoTrack.style.justifyContent = "center";
 					videoTrack.style.width = "100%";
+				}
+				if (audioTrack && speedModel?.hasSpeedMarkers) {
+					window.layoutSpeedWarpedWaveform(
+						audioTrack,
+						peakArray,
+						speedModel.ranges,
+						soloIn,
+						soloOut,
+						mediaDuration,
+					);
+				} else {
 					window.setupVideoTrack();
+					window.renderAudioWaveformCanvas();
+				}
+				if (typeof window.paintTimelineMarkersAndShading === "function") {
+					window.paintTimelineMarkersAndShading();
 				}
 				return;
 			}
@@ -3346,7 +3552,6 @@ window.loadWaveformTimeline = async () => {
 				videoTrack.style.width = "100%";
 				videoTrack.style.display = "flex";
 				videoTrack.style.boxSizing = "border-box";
-				window.setupVideoTrack();
 			}
 
 			const trackWidth =
@@ -3356,14 +3561,6 @@ window.loadWaveformTimeline = async () => {
 				videoTrack?.offsetWidth ||
 				0;
 			const requiredTileCount = Math.max(Math.floor(trackWidth / 120), 1);
-
-			// Solo: still bound to active clipIn/Out so full-file strip is not used
-			// when the user has trimmed the slot.
-			const soloIn = clipInTime || 0;
-			const soloOut =
-				clipOutTime > 0
-					? clipOutTime
-					: (document.querySelector("video") || player)?.duration || 0;
 
 			window.__TAURI__.core
 				.invoke("generate_timeline_thumbnails", {
@@ -3377,8 +3574,32 @@ window.loadWaveformTimeline = async () => {
 					if (!videoTrack || !thumbnailPaths || thumbnailPaths.length === 0) {
 						return;
 					}
-					fillFilmstripTrack(videoTrack, thumbnailPaths);
+					if (speedModel?.hasSpeedMarkers) {
+						window.layoutSpeedWarpedFilmstrip(
+							videoTrack,
+							thumbnailPaths,
+							speedModel.ranges,
+							soloIn,
+							soloOut,
+						);
+						if (audioTrack) {
+							window.layoutSpeedWarpedWaveform(
+								audioTrack,
+								peakArray,
+								speedModel.ranges,
+								soloIn,
+								soloOut,
+								mediaDuration,
+							);
+						}
+					} else {
+						fillFilmstripTrack(videoTrack, thumbnailPaths);
+						window.renderAudioWaveformCanvas();
+					}
 					window.setupVideoTrack();
+					if (typeof window.paintTimelineMarkersAndShading === "function") {
+						window.paintTimelineMarkersAndShading();
+					}
 					if (typeof window.refreshClipFadeTimelineZones === "function") {
 						window.refreshClipFadeTimelineZones();
 					}
@@ -3461,8 +3682,9 @@ window.loadWaveformTimeline = async () => {
 					Number(seg.clipOut) > clipInSec ? Number(seg.clipOut) : mediaDur;
 
 				// Waveform for full source so head/tail outside clip bounds are visible under tint
+				let segPeaks = null;
 				try {
-					const peaks = await window.__TAURI__.core.invoke(
+					segPeaks = await window.__TAURI__.core.invoke(
 						"get_waveform_data",
 						{
 							videoPath: path,
@@ -3470,11 +3692,27 @@ window.loadWaveformTimeline = async () => {
 						},
 					);
 					if (isStaleRequest()) return;
-					if (typeof window.renderWaveformInto === "function") {
-						window.renderWaveformInto(audioFill || row.audioTrack, peaks);
+					const hasSpeedW = (seg.speedRanges || []).some(
+						(r) => Math.abs((Number(r.rate) || 1) - 1) > 0.01,
+					);
+					if (
+						hasSpeedW &&
+						audioFill &&
+						typeof window.layoutSpeedWarpedWaveform === "function"
+					) {
+						window.layoutSpeedWarpedWaveform(
+							audioFill,
+							segPeaks || [],
+							seg.speedRanges,
+							clipInSec,
+							clipOutSec,
+							mediaDur,
+						);
+					} else if (typeof window.renderWaveformInto === "function") {
+						window.renderWaveformInto(audioFill || row.audioTrack, segPeaks);
 					}
 					if (seg.queueIndex === activeQueueIndex) {
-						window.currentWaveformData = peaks || [];
+						window.currentWaveformData = segPeaks || [];
 						window.currentWaveformDataPath = path;
 					}
 				} catch (err) {
@@ -3511,21 +3749,53 @@ window.loadWaveformTimeline = async () => {
 				const tileCount = Math.max(Math.floor(fullWidthPx / 120), 1);
 
 				try {
-					// Full source filmstrip; CSS shades tint outside [clipIn, clipOut]
-					const thumbnailPaths = await window.__TAURI__.core.invoke(
-						"generate_timeline_thumbnails",
-						{
-							videoPath: path,
-							tileCount: tileCount,
-							startSeconds: 0,
-							endSeconds: mediaDur,
-						},
+					const hasSpeed = (seg.speedRanges || []).some(
+						(r) => Math.abs((Number(r.rate) || 1) - 1) > 0.01,
 					);
-					if (isStaleRequest()) return;
-					if (videoFill && thumbnailPaths?.length) {
-						fillFilmstripTrack(videoFill, thumbnailPaths);
-					} else if (videoFill) {
-						videoFill.textContent = "No filmstrip";
+					if (hasSpeed && videoFill) {
+						// Active [clipIn,clipOut] thumbs laid out in OUTPUT time (2x half width)
+						const activeTiles = Math.max(
+							Math.floor(activeWidthPx / 80),
+							4,
+						);
+						const thumbnailPaths = await window.__TAURI__.core.invoke(
+							"generate_timeline_thumbnails",
+							{
+								videoPath: path,
+								tileCount: activeTiles,
+								startSeconds: clipInSec,
+								endSeconds: clipOutSec,
+							},
+						);
+						if (isStaleRequest()) return;
+						if (thumbnailPaths?.length) {
+							window.layoutSpeedWarpedFilmstrip(
+								videoFill,
+								thumbnailPaths,
+								seg.speedRanges,
+								clipInSec,
+								clipOutSec,
+							);
+						} else {
+							videoFill.textContent = "No filmstrip";
+						}
+					} else {
+						// Full source filmstrip; CSS shades tint outside [clipIn, clipOut]
+						const thumbnailPaths = await window.__TAURI__.core.invoke(
+							"generate_timeline_thumbnails",
+							{
+								videoPath: path,
+								tileCount: tileCount,
+								startSeconds: 0,
+								endSeconds: mediaDur,
+							},
+						);
+						if (isStaleRequest()) return;
+						if (videoFill && thumbnailPaths?.length) {
+							fillFilmstripTrack(videoFill, thumbnailPaths);
+						} else if (videoFill) {
+							videoFill.textContent = "No filmstrip";
+						}
 					}
 				} catch (err) {
 					if (isStaleRequest()) return;
