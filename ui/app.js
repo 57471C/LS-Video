@@ -2158,15 +2158,6 @@ window.downloadVttFallback = (vttContent, basename = "captions.vtt") => {
 	}
 };
 
-/** Escape cue text for plain WebVTT (& < >). */
-window.escapeVttText = (text) => {
-	return String(text ?? "")
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/\r\n|\r|\n/g, " ");
-};
-
 /**
  * Ensure timeline tracks host has N video+audio row pairs for the active run.
  * Solo (1 segment) keeps classic #timeline-video-track / #timeline-audio-track ids.
@@ -5589,6 +5580,7 @@ const buildBatchJobsFromQueue = () => {
 				start_time: startT,
 				end_time: endT,
 				loop_count: loopM ? loopM.loopCount || 1 : 1,
+				queueIndex: idx,
 			});
 			const base = (
 				v.videoFileName ||
@@ -5866,6 +5858,29 @@ async function processBatchQueue(presetType) {
 					quality,
 					stripAudio,
 				});
+
+				// Soft-caption sidecar next to the video (never fails the video job)
+				try {
+					const vttResult = await writeBatchExportSidecarVtt(
+						job,
+						actualOutputPath,
+					);
+					if (vttResult?.skipped && vttResult.reason === "no-captions") {
+						// No markers / source VTT — silent skip per product rules
+					} else if (vttResult?.path) {
+						toConsole(
+							"Batch VTT sidecar written",
+							{ path: vttResult.path, job: job.label },
+							debuggin,
+						);
+					}
+				} catch (vttErr) {
+					console.warn("[batch VTT] sidecar write failed:", vttErr);
+					showToast(
+						`Exported video; captions not written for ${job.fileName}`,
+						"warning",
+					);
+				}
 
 				if (specificProgressBar) {
 					specificProgressBar.value = 100;
@@ -6993,8 +7008,15 @@ window.renderSidebarPlaylist = () => {
 
 // 5. Central LocalStorage Serialization Triggers
 
-// Helper to transform raw seconds into valid WebVTT time syntax (HH:MM:SS.mmm)
-window.formatVttTimestamp = (seconds) => {
+/** Last-cue hold (seconds) when no next marker; clamped to clipOut/duration. */
+const VTT_DEFAULT_CUE_HOLD_SEC = 3;
+
+/**
+ * Transform raw seconds into valid WebVTT time syntax (HH:MM:SS.mmm).
+ * @param {number} seconds
+ * @returns {string}
+ */
+export function formatVttTimestamp(seconds) {
 	const safe = Math.max(0, Number(seconds) || 0);
 	const h = Math.floor(safe / 3600)
 		.toString()
@@ -7009,10 +7031,309 @@ window.formatVttTimestamp = (seconds) => {
 		.toString()
 		.padStart(3, "0");
 	return `${h}:${m}:${s}.${ms}`;
-};
+}
+window.formatVttTimestamp = formatVttTimestamp;
 
-/** Last-cue hold (seconds) when no next marker; clamped to clipOut/duration. */
-const VTT_DEFAULT_CUE_HOLD_SEC = 3;
+/**
+ * Escape cue text for plain WebVTT (& < > and newlines → space).
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function escapeVttText(text) {
+	return String(text ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/\r\n|\r|\n/g, " ");
+}
+window.escapeVttText = escapeVttText;
+
+/**
+ * Build plain WebVTT from ordered cues (same end policy as Generate CC).
+ * Cue end = next cue start; last cue = min(start+3s, endLimit) when endLimit known.
+ * @param {Array<{ start: number, name?: string }>} cues
+ * @param {number} [endLimit=0] Export timeline duration (clip end on relative clock)
+ * @returns {string|null} Full VTT document, or null when there are no cues
+ */
+export function buildWebVttFromCues(cues, endLimit = 0) {
+	if (!Array.isArray(cues) || cues.length === 0) return null;
+	const sorted = [...cues]
+		.map((c) => ({
+			start: Math.max(0, Number(c.start) || 0),
+			name: c.name || "",
+		}))
+		.sort((a, b) => a.start - b.start);
+	const limit = Math.max(0, Number(endLimit) || 0);
+
+	// Plain WebVTT only — no REGION/STYLE/titles
+	let vttContent = "WEBVTT\n\n";
+	for (let idx = 0; idx < sorted.length; idx++) {
+		const startSec = sorted[idx].start;
+		let endSec;
+		if (idx < sorted.length - 1) {
+			endSec = Math.max(startSec, sorted[idx + 1].start);
+		} else {
+			const holdEnd = startSec + VTT_DEFAULT_CUE_HOLD_SEC;
+			endSec = limit > startSec ? Math.min(holdEnd, limit) : holdEnd;
+			if (endSec <= startSec) {
+				endSec = startSec + VTT_DEFAULT_CUE_HOLD_SEC;
+			}
+		}
+		const cueText = escapeVttText(
+			sorted[idx].name || `Marker ${idx + 1}`,
+		);
+		vttContent += `${formatVttTimestamp(startSec)} --> ${formatVttTimestamp(endSec)}\n${cueText}\n\n`;
+	}
+	return vttContent;
+}
+
+/**
+ * Parse a WebVTT / SRT-style timestamp to seconds.
+ * Accepts HH:MM:SS.mmm, HH:MM:SS,mmm, MM:SS.mmm.
+ * @param {string} ts
+ * @returns {number|null}
+ */
+export function parseVttTimestamp(ts) {
+	if (ts == null) return null;
+	const cleaned = String(ts).trim().replace(",", ".");
+	const parts = cleaned.split(":");
+	if (parts.length < 2 || parts.length > 3) return null;
+	let h = 0;
+	let m = 0;
+	let s = 0;
+	if (parts.length === 3) {
+		h = Number(parts[0]);
+		m = Number(parts[1]);
+		s = Number(parts[2]);
+	} else {
+		m = Number(parts[0]);
+		s = Number(parts[1]);
+	}
+	if (![h, m, s].every((n) => Number.isFinite(n))) return null;
+	return h * 3600 + m * 60 + s;
+}
+
+/**
+ * Shift / clip an existing source WebVTT onto the exported trim timeline (clipIn → 0).
+ * Soft captions only — no styling blocks rewritten beyond cue times + text.
+ * @param {string} vttText
+ * @param {number} clipIn
+ * @param {number} [clipOut=0] Source-local out; 0 = no upper bound
+ * @returns {string|null}
+ */
+export function shiftWebVttForTrim(vttText, clipIn, clipOut = 0) {
+	const text = String(vttText || "");
+	if (!text.trim()) return null;
+	const inT = Math.max(0, Number(clipIn) || 0);
+	const outT = Math.max(0, Number(clipOut) || 0);
+	const exportDur = outT > inT ? outT - inT : 0;
+
+	const lines = text.replace(/^\uFEFF/, "").split(/\r\n|\n|\r/);
+	/** @type {Array<{ start: number, end: number, name: string }>} */
+	const parsed = [];
+	let i = 0;
+	// Skip WEBVTT header / note blocks until first blank after header
+	while (i < lines.length && !/-->/.test(lines[i])) i += 1;
+
+	while (i < lines.length) {
+		const line = lines[i];
+		if (!line || !/-->/.test(line)) {
+			i += 1;
+			continue;
+		}
+		const arrow = line.match(/([0-9:.,]+)\s*-->\s*([0-9:.,]+)/);
+		if (!arrow) {
+			i += 1;
+			continue;
+		}
+		const startSec = parseVttTimestamp(arrow[1]);
+		const endSec = parseVttTimestamp(arrow[2]);
+		i += 1;
+		const textLines = [];
+		while (i < lines.length && lines[i].trim() !== "") {
+			textLines.push(lines[i]);
+			i += 1;
+		}
+		if (startSec == null || endSec == null) continue;
+		// Overlap with [clipIn, clipOut]
+		if (outT > inT) {
+			if (endSec <= inT || startSec >= outT) continue;
+		} else if (endSec <= inT) {
+			continue;
+		}
+		const relStart = Math.max(0, startSec - inT);
+		let relEnd = Math.max(relStart, endSec - inT);
+		if (exportDur > 0) {
+			if (relStart >= exportDur) continue;
+			relEnd = Math.min(relEnd, exportDur);
+		}
+		if (relEnd <= relStart) continue;
+		parsed.push({
+			start: relStart,
+			end: relEnd,
+			name: textLines.join(" ").trim(),
+		});
+	}
+
+	if (parsed.length === 0) return null;
+
+	// Rebuild with exact end times from source (not +3s policy) so existing VTT timing is preserved
+	let out = "WEBVTT\n\n";
+	for (const c of parsed) {
+		out += `${formatVttTimestamp(c.start)} --> ${formatVttTimestamp(c.end)}\n${escapeVttText(c.name)}\n\n`;
+	}
+	return out;
+}
+
+/**
+ * Collect export-timeline caption cues for a batch job.
+ * Solo: marker times relative to that item's clipIn (export t=0).
+ * Join: all markers in the run, ordered by sequence time; each cue offset by
+ * the sum of prior segment durations (same spine as join export).
+ *
+ * @param {{ indices: number[], segments: Array<{ path?: string, start_time?: number, end_time?: number, queueIndex?: number }>, multi?: boolean }} job
+ * @param {Array} queue videoQueue
+ * @param {{ activeIndex?: number, activeMarkers?: Array }} [opts]
+ * @returns {{ cues: Array<{ start: number, name: string }>, endLimit: number, hasMarkers: boolean }}
+ */
+export function collectBatchExportCaptionCues(job, queue, opts = {}) {
+	const cues = [];
+	let sequenceOffset = 0;
+	const segments = Array.isArray(job?.segments) ? job.segments : [];
+	const indices = Array.isArray(job?.indices) ? job.indices : [];
+
+	for (let si = 0; si < segments.length; si++) {
+		const seg = segments[si];
+		const qi =
+			typeof seg.queueIndex === "number"
+				? seg.queueIndex
+				: typeof indices[si] === "number"
+					? indices[si]
+					: -1;
+		const video = qi >= 0 && queue ? queue[qi] : null;
+		const clipIn = Math.max(0, Number(seg.start_time) || 0);
+		let clipOut = Math.max(0, Number(seg.end_time) || 0);
+		if (clipOut > 0 && clipOut < clipIn) clipOut = clipIn;
+		// Prefer explicit export bounds; fall back to media duration for join offsets
+		let segDur = 0;
+		if (clipOut > clipIn) {
+			segDur = clipOut - clipIn;
+		} else {
+			const mediaDur = Math.max(0, Number(video?.mediaDuration) || 0);
+			if (mediaDur > clipIn) segDur = mediaDur - clipIn;
+		}
+
+		const sourceMarkers =
+			qi === opts.activeIndex && Array.isArray(opts.activeMarkers)
+				? opts.activeMarkers
+				: video?.appState?.markers || [];
+
+		for (const m of sourceMarkers) {
+			const srcT = Number(m?.startTime);
+			if (!Number.isFinite(srcT)) continue;
+			// Only markers that fall inside the exported trim
+			if (srcT < clipIn - 1e-3) continue;
+			if (clipOut > clipIn && srcT > clipOut + 1e-3) continue;
+			const rel = Math.max(0, srcT - clipIn);
+			cues.push({
+				start: sequenceOffset + rel,
+				name: m?.name || "",
+			});
+		}
+
+		sequenceOffset += segDur > 0 ? segDur : 0;
+	}
+
+	cues.sort((a, b) => a.start - b.start);
+	return {
+		cues,
+		endLimit: sequenceOffset,
+		hasMarkers: cues.length > 0,
+	};
+}
+
+/**
+ * After a successful batch video export, write a soft-caption .vtt sidecar
+ * next to the output (same basename, .vtt). Never throws to caller for missing
+ * captions; write failures propagate so the batch loop can toast-warn only.
+ *
+ * @param {object} job
+ * @param {string} outputVideoPath Absolute path to the exported mp4/etc.
+ * @returns {Promise<{ path?: string, skipped?: boolean, reason?: string }>}
+ */
+async function writeBatchExportSidecarVtt(job, outputVideoPath) {
+	if (!outputVideoPath) {
+		return { skipped: true, reason: "no-output-path" };
+	}
+
+	const queue =
+		typeof videoQueue !== "undefined" && Array.isArray(videoQueue)
+			? videoQueue
+			: [];
+	const { cues, endLimit, hasMarkers } = collectBatchExportCaptionCues(
+		job,
+		queue,
+		{
+			activeIndex:
+				typeof activeQueueIndex !== "undefined" ? activeQueueIndex : -1,
+			activeMarkers: typeof markers !== "undefined" ? markers : undefined,
+		},
+	);
+
+	let vttContent = hasMarkers ? buildWebVttFromCues(cues, endLimit) : null;
+
+	// Solo fallback: existing source VTT/SRT when the item has no markers
+	if (!vttContent && !job?.multi && job?.segments?.length === 1) {
+		const seg = job.segments[0];
+		const sourcePath = seg?.path || "";
+		if (sourcePath && window.__TAURI__?.core?.invoke) {
+			try {
+				let sourceVttPath = null;
+				try {
+					sourceVttPath = await window.__TAURI__.core.invoke(
+						"resolve_subtitles",
+						{ videoPath: sourcePath },
+					);
+				} catch {
+					// resolve_subtitles optional
+				}
+				if (!sourceVttPath) {
+					const guess = `${sourcePath.replace(/\.[^/.]+$/, "")}.vtt`;
+					const existsFn = window.__TAURI__?.fs?.exists;
+					if (existsFn && (await existsFn(guess))) {
+						sourceVttPath = guess;
+					}
+				}
+				if (sourceVttPath && window.__TAURI__?.fs?.readTextFile) {
+					const raw = await window.__TAURI__.fs.readTextFile(sourceVttPath);
+					const clipIn = Math.max(0, Number(seg.start_time) || 0);
+					const clipOut = Math.max(0, Number(seg.end_time) || 0);
+					vttContent = shiftWebVttForTrim(raw, clipIn, clipOut);
+				}
+			} catch (readErr) {
+				console.warn("[batch VTT] source VTT read failed:", readErr);
+			}
+		}
+	}
+
+	if (!vttContent) {
+		return { skipped: true, reason: "no-captions" };
+	}
+
+	if (!window.__TAURI__?.core?.invoke) {
+		throw new Error("Tauri invoke unavailable for save_vtt_file");
+	}
+
+	// save_vtt_file writes <basename>.vtt next to the given video path
+	const written = await window.__TAURI__.core.invoke("save_vtt_file", {
+		videoPath: outputVideoPath,
+		vttText: vttContent,
+	});
+	return {
+		path: typeof written === "string" && written ? written : outputVideoPath,
+	};
+}
+window.writeBatchExportSidecarVtt = writeBatchExportSidecarVtt;
 
 window.toggleClosedCaptions = () => {
 	// No VTT / no tracks: disabled control — click is a silent no-op
@@ -7138,25 +7459,14 @@ window.triggerVttGeneration = async () => {
 		return;
 	}
 
-	// Plain WebVTT only — no REGION/STYLE/titles
-	let vttContent = "WEBVTT\n\n";
-	for (let idx = 0; idx < cueStarts.length; idx++) {
-		const startSec = Math.max(0, Number(cueStarts[idx]) || 0);
-		let endSec;
-		if (idx < cueStarts.length - 1) {
-			endSec = Math.max(startSec, Number(cueStarts[idx + 1]) || startSec);
-		} else {
-			// Last cue: min(start+3, clipOut/duration) when known, else start+3
-			const holdEnd = startSec + VTT_DEFAULT_CUE_HOLD_SEC;
-			endSec = endLimit > startSec ? Math.min(holdEnd, endLimit) : holdEnd;
-			if (endSec <= startSec) {
-				endSec = startSec + VTT_DEFAULT_CUE_HOLD_SEC;
-			}
-		}
-		const startTs = window.formatVttTimestamp(startSec);
-		const endTs = window.formatVttTimestamp(endSec);
-		const cueText = window.escapeVttText(cueNames[idx] || `Marker ${idx + 1}`);
-		vttContent += `${startTs} --> ${endTs}\n${cueText}\n\n`;
+	const vttCues = cueStarts.map((start, idx) => ({
+		start,
+		name: cueNames[idx] || "",
+	}));
+	const vttContent = buildWebVttFromCues(vttCues, endLimit);
+	if (!vttContent) {
+		showToast("Please add at least one marker to compile captions", "error");
+		return;
 	}
 
 	const sourcePath = currentVideo.videoFilePath || "";
@@ -7290,5 +7600,13 @@ setTimeout(() => {
 
 // Export for testing in Node.js environment without breaking browser execution
 if (typeof module !== "undefined" && module.exports) {
-	module.exports = { parseFFmpegTime };
+	module.exports = {
+		parseFFmpegTime,
+		formatVttTimestamp,
+		escapeVttText,
+		buildWebVttFromCues,
+		parseVttTimestamp,
+		shiftWebVttForTrim,
+		collectBatchExportCaptionCues,
+	};
 }
