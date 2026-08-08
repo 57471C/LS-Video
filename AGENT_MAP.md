@@ -41,8 +41,8 @@ Living map for agents and humans. Read this before large refactors. Update when 
 - `window.updateMarkersList`, `window.updateVideoTimeSummary`
 - Join / sequence: `getActiveJoinRun`, `isActiveRunMulti`, `seekSequenceTime`, `sourceTimeToSequence`, `scheduleJoinTimelineRebuild`, `syncClipBoundsFromMarkers`
 - Timeline zoom: `applyTimelineZoomLayout`, `setTimelineZoom`, `getTimelineContentWidth`, `initTimelineZoomControls`
-- CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`
-- Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`
+- CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`, `buildWebVttFromCues`
+- Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt` (soft `.vtt` next to each job output; failure never fails the video job)
 
 If something “does nothing” in the markers table, check window exports first.
 
@@ -150,12 +150,17 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 
 | Job type | Output |
 |----------|--------|
-| Contiguous `joinedToNext` run | One concat MP4 (each segment `[clipIn, clipOut]`) |
-| Unjoined item | Solo trim/export |
+| Contiguous `joinedToNext` run | One concat MP4 (each segment `[clipIn, clipOut]`) + optional soft `.vtt` |
+| Unjoined item | Solo trim/export + optional soft `.vtt` |
 
 - Folder pick once; names like `sequence_001_…mp4` / `basename_export.mp4`.
-- Rust: `export_queue_job` (trim → concat → quality). **IPC:** each `VideoSegment` must send **one** of `loop_count` / `loopCount`, never both (serde duplicate field).
+- Soft captions sidecar (no burn-in): same basename as the video, `.vtt`, same folder.
+  - **Solo:** markers (or existing source VTT) with times relative to export trim (`clipIn → 0`).
+  - **Join:** all markers in the run, sequence-shifted by sum of prior segment durations; cue text = marker name; end = next cue / +3s / clip end (same policy as Generate CC).
+  - Skip when no markers and no source VTT; **VTT write failure never fails the video job** (toast warning OK).
+- Rust: `export_queue_job` (trim → concat → quality) + `save_vtt_file` for sidecar write. **IPC:** each `VideoSegment` must send **one** of `loop_count` / `loopCount`, never both (serde duplicate field).
 - Also: `join_and_compress_videos` (legacy single-shot join UI path).
+- Out of scope for batch captions: burn-in, ASS/SSA styling, fades/titles.
 
 ---
 
@@ -190,7 +195,7 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 - Peaks.js, Whisper, Failsafe Proxy
 - VLC / libmpv experimental branches (orphaned; proxy is the supported H.265 path)
 - Shipping without ffmpeg sidecar in the NSIS bundle
-- Batch export: fades/titles, fancy re-encode UI beyond quality presets
+- Batch export: fades/titles, burn-in captions, fancy re-encode UI beyond quality presets
 
 ---
 
