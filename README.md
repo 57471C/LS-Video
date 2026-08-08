@@ -54,8 +54,10 @@ The application features deep Windows registry integration for automatic workspa
 LS.Video values speed and minimalism, entirely avoiding heavy third-party framework layers (such as Peaks.js or Wavesurfer.js) or cloud transcription weights.
 
 * **High-Performance Canvas Timeline:** Audio tracks and video filmstrips are rendered using low-level, pure HTML5 2D canvas drawings, enabling lag-free frame lookups.
+* **Speed markers & clip-edge fades:** Speed markers (0.25×–4×) drive live `playbackRate` and warp the detailed timeline to output time; batch export uses ffmpeg `setpts`/`atempo` then optional edge fades. Clip-in/out fade durations live on the marker type menu (default 0).
+* **Batch export:** Queue-driven solo trim or joined concat, optional strip-audio, soft `.vtt` sidecars (never burn-in; VTT failures never fail the video job).
 * **Isolated DOM Component Purging:** The application relies on a strict lifecycle separation. Standalone `.lsv` / `.tmv` data imports only swap marker data points, preserving your running visual timeline. True project switches or "New Project" resets perform clean canvas context wipes (`ctx.clearRect`) and empty image buffers without destroying core structural DOM layouts.
-* **Code Health & Compilation:** Code validation is enforced via the high-speed **Biome compiler toolchain** to maintain syntax uniformity across all tracking engines.
+* **Code Health & Compilation:** Code validation is enforced by the high-speed **Biome compiler toolchain** to maintain syntax uniformity across all tracking engines.
 
 ---
 

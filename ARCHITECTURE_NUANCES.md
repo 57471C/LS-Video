@@ -2,7 +2,7 @@
 
 Hard-won constraints. Agents: prefer reading this over rediscovering via breakage.
 
-Last oriented: v0.6.2 (join sequence, batch export, timeline zoom, CC hygiene).
+Last oriented: v0.6.2 + feature/marker-type-speed (join sequence, batch export, timeline zoom, CC hygiene, clip-edge fades, Speed markers + speed-warped timeline).
 
 ---
 
@@ -207,14 +207,38 @@ Do not reintroduce time-study **features**. Migrating away residual names is fin
 
 ---
 
-## 19. Known product backlog (not blockers)
+## 19. Speed markers, export order, timeline warp
 
-- Marker type: **Speed** (playbackRate segments)
+**Marker model:** `type: "speed"`, `speedValue` clamped 0.25–4. Rate applies from that marker’s time until the next speed marker (or clip out). Gaps default to 1×. Shared builder: `buildSpeedRanges(markers, clipIn, clipOut)` → `[{ start, end, rate }, …]` covering the clip.
+
+**Live playback:** `applyActiveSpeedPlayback` sets `video.playbackRate` from the active range. Footer speed slider snaps to the active marker’s range and writes back `speedValue` while dragging. Exactly **1×** does not paint orange speed-zone tint (visual noise).
+
+**Export pipeline (do not reorder casually):** per segment
+
+1. Trim to `[clipIn, clipOut]` (source time)
+2. Split into speed ranges; each piece: `setpts=(PTS-STARTPTS)/rate` + chained `atempo` (0.5–2 per stage); **`-t span/rate`** so output length is correct (missing this → slow-mo files still “full source duration”)
+3. Concat speed pieces
+4. Edge `fade` / `afade` on **output** time (`fade_in_sec` / `fade_out_sec`, default 0)
+5. Quality / strip-audio as configured
+
+Join runs: per-segment process then concat segments. Fades stay per-segment.
+
+**Time mapping:** `sourceTimeToEffective` / `effectiveTimeToSource` are the single source of truth for ∫ dt/rate. Solo detailed timeline (ruler, playhead, scrub, filmstrip/waveform layout) uses **output** time so a 2× section is half as wide. Seek bar scrub must inverse-map effective → source before assigning `video.currentTime`. After speed/marker/clip edits call `scheduleSpeedTimelineRebuild`.
+
+**IPC:** `VideoSegment.speed_ranges` as `{ start, end, rate }[]`. Still never send both `loop_count` and `loopCount`.
+
+**Fade UX footgun:** default stored fade is **0** (`FADE_DEFAULT_SEC`). Type-menu input may show a 1.0 placeholder for convenience; clearing sets 0. Fade-out zone is `[clipOut − fo, clipOut)` — never paint past the out marker.
+
+---
+
+## 20. Known product backlog (not blockers)
+
 - Butterchurn preset UX polish / optional viz on video (explicitly rejected for now)
 - Installer/R2 public pipeline
 - Mac target
 - Rename Rust tspz commands + drop legacy localStorage key after a grace release
-- Batch: VTT merge across joins (optional; must not block video export)
+- Batch: optional richer VTT timing under speed warp (soft VTT sidecars exist; sequence shift is clip-duration based today)
+- Multi-clip join detailed timeline fully speed-warped end-to-end (solo path is warped; join sequence offsets still use raw clip spans)
 
 ---
 
@@ -229,3 +253,6 @@ Do not reintroduce time-study **features**. Migrating away residual names is fin
 7. Don’t map Cinema Esc → Normal  
 8. Don’t send both `loop_count` and `loopCount` on the same `VideoSegment` JSON  
 9. Don’t stretch sequence filmstrip fills to 100% width (destroys join geometry)  
+10. Don’t apply edge fades before speed pieces (fade must be on output time)  
+11. Don’t omit `-t span/rate` on speed-filtered ffmpeg pieces  
+12. Don’t paint 1× speed zones with orange tint  
