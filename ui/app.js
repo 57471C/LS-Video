@@ -260,8 +260,8 @@ const getClipSegmentDuration = (video, queueIndex) => {
 	return Math.max(0, outT - inT);
 };
 
-/** Default fade duration when the user first enables a fade via the menu. */
-export const FADE_DEFAULT_SEC = 1.0;
+/** Default fade duration for Clip In/Out menu (0 = no fade until user sets one). */
+export const FADE_DEFAULT_SEC = 0;
 /** Hard ceiling so fades cannot swallow a long clip. */
 export const FADE_HARD_MAX_SEC = 10;
 

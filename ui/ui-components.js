@@ -80,7 +80,7 @@ const fadeBadgeHtml = (fadeSec) => {
 /**
  * Apply fade seconds for a queue source (and optionally set marker type to in/out).
  * Like loop count edit: typing in the menu field commits the bound + duration.
- * 0 / empty clears the fade (no export filter). Default display when unset is 1.0.
+ * 0 / empty clears the fade (no export filter). Default display when unset is 0.
  * @param {number} queueIndex
  * @param {"in"|"out"} edge
  * @param {unknown} rawValue
@@ -448,11 +448,11 @@ const updateMarkersListImmediate = () => {
 			} else if ((isOutBound || nearOut) && fadeOutShow > 0) {
 				boundFadeBadge = fadeBadgeHtml(fadeOutShow);
 			}
-			// Menu inputs: show current fade, or 1.0 default when unset (apply on blur like loop)
+			// Menu inputs: show current fade, or 0 when unset (no fade by default)
 			const fadeInInputVal =
-				fadeInShow > 0 ? Number(fadeInShow).toFixed(1) : "1.0";
+				fadeInShow > 0 ? Number(fadeInShow).toFixed(1) : "0";
 			const fadeOutInputVal =
-				fadeOutShow > 0 ? Number(fadeOutShow).toFixed(1) : "1.0";
+				fadeOutShow > 0 ? Number(fadeOutShow).toFixed(1) : "0";
 
 			rows.push(`
         <tr class="marker-row ${rowBgClass} border-b border-zinc-200 dark:border-zinc-700" data-view-index="${i}" data-queue-index="${entry.queueIndex}" data-marker-index="${entry.markerIndex}" data-sequence="${entry.isSequence ? "1" : "0"}">
@@ -501,12 +501,12 @@ const updateMarkersListImmediate = () => {
                         <input type="text" inputmode="decimal"
                                class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-in-input"
                                value="${fadeInInputVal}"
-                               placeholder="1.0"
+                               placeholder="0"
                                maxlength="4"
                                data-marker-index="${entry.markerIndex}"
                                data-queue-index="${entry.queueIndex}"
                                data-fade-edge="in"
-                               title="Fade in (s). 0 clears. Default 1.0">
+                               title="Fade in (s). 0 = none">
                         <span class="text-[10px] text-zinc-500 font-normal">s</span>
                       </span>
                     </button>
@@ -516,12 +516,12 @@ const updateMarkersListImmediate = () => {
                         <input type="text" inputmode="decimal"
                                class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-out-input"
                                value="${fadeOutInputVal}"
-                               placeholder="1.0"
+                               placeholder="0"
                                maxlength="4"
                                data-marker-index="${entry.markerIndex}"
                                data-queue-index="${entry.queueIndex}"
                                data-fade-edge="out"
-                               title="Fade out (s). 0 clears. Default 1.0">
+                               title="Fade out (s). 0 = none">
                         <span class="text-[10px] text-zinc-500 font-normal">s</span>
                       </span>
                     </button>

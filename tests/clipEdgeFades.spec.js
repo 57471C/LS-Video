@@ -11,8 +11,8 @@ import {
 } from "../ui/app.js";
 
 describe("clip-edge fade helpers", () => {
-	it("defaults first-set duration to 1.0s", () => {
-		expect(FADE_DEFAULT_SEC).toBe(1.0);
+	it("defaults clip-edge fade duration to 0 (no fade)", () => {
+		expect(FADE_DEFAULT_SEC).toBe(0);
 	});
 
 	it("normalizeFadeSec floors non-positive and keeps one decimal", () => {
