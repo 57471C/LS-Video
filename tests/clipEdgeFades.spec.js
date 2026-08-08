@@ -66,7 +66,18 @@ describe("clip-edge fade helpers", () => {
 		it("fade-in is [clipIn, clipIn+fi]; fade-out is [clipOut-fo, clipOut]", () => {
 			const r = computeClipFadeZoneRanges(0, 9, 2, 1);
 			expect(r.fadeIn).toEqual({ start: 0, end: 2 });
+			// Must be LEFT of out (8→9), never [9, 10]
 			expect(r.fadeOut).toEqual({ start: 8, end: 9 });
+			expect(r.fadeOut.end).toBe(9);
+			expect(r.fadeOut.start).toBeLessThan(r.fadeOut.end);
+			expect(r.fadeOut.start).toBe(9 - 1);
+		});
+
+		it("never places fade-out starting at clipOut (right side / grey tail)", () => {
+			const r = computeClipFadeZoneRanges(0, 9, 0, 1);
+			expect(r.fadeOut.start).toBe(8);
+			expect(r.fadeOut.end).toBe(9);
+			expect(r.fadeOut.start).not.toBe(9);
 		});
 
 		it("clamps fades to active duration and clears zeros", () => {

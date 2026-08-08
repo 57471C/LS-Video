@@ -557,24 +557,37 @@ window.paintClipFadeZonesOnHost = (host, opts) => {
 	);
 
 	const addZone = (kind, startSec, endSec, title) => {
-		const span = Math.max(0, endSec - startSec);
+		// Hard clamp into [clipIn, clipOut] — never draw past clipOut into grey tail
+		const start = Math.max(ranges.clipIn, Math.min(ranges.clipOut, startSec));
+		const end = Math.max(ranges.clipIn, Math.min(ranges.clipOut, endSec));
+		const span = Math.max(0, end - start);
 		if (span <= 1e-4) return;
 		let leftPct;
 		let widthPct;
 		if (mediaRelative) {
-			leftPct = (startSec / mediaDur) * 100;
+			// Full media clock (matches out marker + grey shade on timeline)
+			leftPct = (start / mediaDur) * 100;
 			widthPct = (span / mediaDur) * 100;
 		} else {
-			// Host is the active [clipIn, clipOut] window only
-			leftPct = ((startSec - ranges.clipIn) / activeDur) * 100;
+			// Host is only the active [clipIn, clipOut] band
+			leftPct = ((start - ranges.clipIn) / activeDur) * 100;
 			widthPct = (span / activeDur) * 100;
+		}
+		if (widthPct <= 0.02) return;
+		// Never let zone extend past clipOut on the host
+		const maxRight =
+			mediaRelative
+				? (ranges.clipOut / mediaDur) * 100
+				: 100;
+		if (leftPct + widthPct > maxRight + 0.001) {
+			widthPct = Math.max(0, maxRight - leftPct);
 		}
 		if (widthPct <= 0.02) return;
 		const el = document.createElement("div");
 		el.className = `sequence-fade-zone sequence-fade-zone-${kind}`;
 		el.title = title;
-		el.dataset.fadeStart = String(startSec);
-		el.dataset.fadeEnd = String(endSec);
+		el.dataset.fadeStart = String(start);
+		el.dataset.fadeEnd = String(end);
 		el.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct}%;width:${widthPct}%;pointer-events:none;z-index:5;box-sizing:border-box;`;
 		host.appendChild(el);
 	};
@@ -588,6 +601,7 @@ window.paintClipFadeZonesOnHost = (host, opts) => {
 			`Fade in ${d.toFixed(1)}s`,
 		);
 	}
+	// Fade-out: start at clipOut - fo (LEFT of out marker), end at clipOut — never start at clipOut
 	if (ranges.fadeOut) {
 		const d = ranges.fadeOut.end - ranges.fadeOut.start;
 		addZone(
@@ -649,10 +663,12 @@ window.refreshClipFadeTimelineZones = () => {
 		return;
 	}
 
-	// Solo: filmstrip #timeline-video-track is the active [clipIn, clipOut] window
+	// Solo: same media clock as out marker + grey tail (full source duration).
+	// Do NOT map zones onto active-only filmstrip % — that parks fade-out at the
+	// right edge of the track (into the post-clipOut grey). Use media-relative
+	// [clipOut - fo, clipOut] so purple ends at the out line, left of the grey.
 	const videoTrack = document.getElementById("timeline-video-track");
 	if (!videoTrack || videoTrack.querySelector(".sequence-segment-fill")) {
-		// Multi shells already handled above; solo shell-on-track only
 		return;
 	}
 	const video =
@@ -672,11 +688,16 @@ window.refreshClipFadeTimelineZones = () => {
 		typeof getClipOutTime === "function"
 			? getClipOutTime(video, activeQueueIndex)
 			: Number(video?.clipOutTime) || 0;
-	if (outT <= inT) {
-		const p =
-			(typeof player !== "undefined" && player) || window.player || null;
-		if (p?.duration) outT = p.duration;
-	}
+	const p =
+		(typeof player !== "undefined" && player) || window.player || null;
+	if (outT <= inT && p?.duration) outT = p.duration;
+	const mediaDur = Math.max(
+		0.001,
+		Number(video?.mediaDuration) || 0,
+		Number(p?.duration) || 0,
+		outT,
+		inT + 0.001,
+	);
 	if (getComputedStyle(videoTrack).position === "static") {
 		videoTrack.style.position = "relative";
 	}
@@ -685,7 +706,8 @@ window.refreshClipFadeTimelineZones = () => {
 		clipOut: outT > inT ? outT : inT + 1,
 		fadeInSec: fades.fadeInSec,
 		fadeOutSec: fades.fadeOutSec,
-		mediaRelative: false,
+		mediaRelative: true,
+		mediaDur,
 	});
 };
 
