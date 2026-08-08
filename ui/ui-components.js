@@ -39,297 +39,14 @@ const toggleTypeDropdown = (e, index) => {
 	}
 };
 
-/** Hide clip-edge fade popouts (stable menus live on document.body). */
-const closeAllClipFadeMenus = () => {
-	for (const menu of document.querySelectorAll(".clip-fade-menu")) {
-		menu.classList.add("hidden");
-		menu.style.top = "";
-		menu.style.left = "";
-		menu.style.bottom = "";
-		menu.style.right = "";
-	}
-};
-window.closeAllClipFadeMenus = closeAllClipFadeMenus;
-
-/**
- * Position a fade menu with fixed coords (same escape hatch as marker type menus).
- * Always on body — never clipped by #markersList overflow / sticky footer.
- */
-const positionClipFadeMenu = (anchorEl, menu) => {
-	if (!anchorEl || !menu) return;
-	if (menu.parentElement !== document.body) {
-		document.body.appendChild(menu);
-	}
-	menu.classList.remove("hidden");
-	const rect = anchorEl.getBoundingClientRect();
-	const menuHeight = menu.offsetHeight || 130;
-	const menuWidth = menu.offsetWidth || 176;
-	const gap = 4;
-	const spaceAbove = rect.top;
-	const spaceBelow = window.innerHeight - rect.bottom;
-	let top;
-	if (spaceAbove >= menuHeight + gap || spaceAbove >= spaceBelow) {
-		top = rect.top - menuHeight - gap;
-	} else {
-		top = rect.bottom + gap;
-	}
-	let left = rect.left;
-	if (left + menuWidth > window.innerWidth - 8) {
-		left = Math.max(8, window.innerWidth - menuWidth - 8);
-	}
-	if (left < 8) left = 8;
-	if (top < 4) top = 4;
-	if (top + menuHeight > window.innerHeight - 4) {
-		top = Math.max(4, window.innerHeight - menuHeight - 4);
-	}
-	menu.style.position = "fixed";
-	menu.style.top = `${top}px`;
-	menu.style.left = `${left}px`;
-	menu.style.bottom = "auto";
-	menu.style.right = "auto";
-	menu.style.zIndex = "10000";
-};
-
-/**
- * Ensure permanent body-level fade menus exist (not destroyed by footer innerHTML).
- * @param {"in"|"out"} edge
- * @returns {HTMLElement|null}
- */
-const ensureClipFadeMenuElement = (edge) => {
-	if (edge !== "in" && edge !== "out") return null;
-	const id = `clip-fade-menu-${edge}`;
-	let menu = document.getElementById(id);
-	if (menu) {
-		if (menu.parentElement !== document.body) {
-			document.body.appendChild(menu);
-		}
-		return menu;
-	}
-	const menuTitle = edge === "out" ? "Fade Out" : "Fade In";
-	menu = document.createElement("div");
-	menu.id = id;
-	menu.className =
-		"clip-fade-menu hidden w-44 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none";
-	menu.setAttribute("role", "menu");
-	menu.dataset.fadeEdge = edge;
-	menu.innerHTML = `
-    <div class="py-1">
-      <div class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">${menuTitle}</div>
-      <div class="px-3 py-1.5 flex items-center gap-1.5">
-        <input type="text" inputmode="decimal"
-          class="w-12 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-input"
-          value="1.0" maxlength="5" data-fade-edge="${edge}"
-          title="Seconds (e.g. 0.5, 1.0, 1.5)" autocomplete="off">
-        <span class="text-xs text-zinc-500">s</span>
-        <button type="button" class="btn btn-xs btn-outline-secondary py-0.5 px-2 h-6 text-[11px] clip-fade-apply" data-fade-edge="${edge}">Set</button>
-      </div>
-      <button type="button" class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 cursor-pointer font-semibold clip-fade-clear" data-fade-edge="${edge}">
-        Clear fade
-      </button>
-    </div>`;
-	document.body.appendChild(menu);
-
-	// Stop outside-dismiss while interacting with the menu
-	menu.addEventListener("click", (e) => e.stopPropagation());
-	menu.addEventListener("mousedown", (e) => e.stopPropagation());
-	menu.addEventListener("pointerdown", (e) => e.stopPropagation());
-	menu.addEventListener("contextmenu", (e) => e.stopPropagation());
-
-	const input = menu.querySelector(".clip-fade-input");
-	if (input) {
-		input.addEventListener("keydown", (e) => {
-			e.stopPropagation();
-			if (e.key === "Enter") {
-				e.preventDefault();
-				applyClipFadeFromMenu(edge);
-			} else if (e.key === "Escape") {
-				e.preventDefault();
-				closeAllClipFadeMenus();
-			}
-		});
-	}
-	const applyBtn = menu.querySelector(".clip-fade-apply");
-	if (applyBtn) {
-		applyBtn.addEventListener("click", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			applyClipFadeFromMenu(edge);
-		});
-	}
-	const clearBtn = menu.querySelector(".clip-fade-clear");
-	if (clearBtn) {
-		clearBtn.addEventListener("click", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			clearClipFade(edge);
-		});
-	}
-	return menu;
-};
-
-const applyClipFadeFromMenu = (edge) => {
-	const menu = ensureClipFadeMenuElement(edge);
-	const input = menu?.querySelector(".clip-fade-input");
-	const def =
-		typeof window.FADE_DEFAULT_SEC === "number" ? window.FADE_DEFAULT_SEC : 1.0;
-	let parsed = Number.parseFloat(String(input?.value ?? "").replace(",", "."));
-	if (!Number.isFinite(parsed) || parsed <= 0) parsed = def;
-	if (typeof window.setVideoFadeSec === "function") {
-		window.setVideoFadeSec(edge, parsed, activeQueueIndex);
-	} else if (typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) {
-		const key = edge === "out" ? "fadeOutSec" : "fadeInSec";
-		videoQueue[activeQueueIndex][key] = parsed;
-		if (typeof saveLocalState === "function") saveLocalState();
-	}
-	closeAllClipFadeMenus();
-	// Refresh footer + in/out row badges (updateMarkersList also fills footer)
-	if (typeof window.updateMarkersList === "function") {
-		window.updateMarkersList();
-	} else if (typeof window.updateVideoTimeSummary === "function") {
-		window.updateVideoTimeSummary();
-	}
-};
-
-const clearClipFade = (edge) => {
-	if (typeof window.setVideoFadeSec === "function") {
-		window.setVideoFadeSec(edge, 0, activeQueueIndex);
-	} else if (typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) {
-		const key = edge === "out" ? "fadeOutSec" : "fadeInSec";
-		videoQueue[activeQueueIndex][key] = 0;
-		if (typeof saveLocalState === "function") saveLocalState();
-	}
-	closeAllClipFadeMenus();
-	if (typeof window.updateMarkersList === "function") {
-		window.updateMarkersList();
-	} else if (typeof window.updateVideoTimeSummary === "function") {
-		window.updateVideoTimeSummary();
-	}
-};
-
-/**
- * Open fade menu for edge, anchored to a footer control.
- * Prefills 1.0 when current fade is 0; otherwise current value.
- * @param {"in"|"out"} edge
- * @param {Element} anchorEl
- */
-const openClipFadeMenu = (edge, anchorEl) => {
-	if (!anchorEl || (edge !== "in" && edge !== "out")) return;
-	// Close marker type menus
-	for (const m of document.querySelectorAll('[id^="type-menu-"]')) {
-		m.classList.add("hidden");
-	}
-	const other = edge === "in" ? "out" : "in";
-	const otherMenu = document.getElementById(`clip-fade-menu-${other}`);
-	if (otherMenu) otherMenu.classList.add("hidden");
-
-	const menu = ensureClipFadeMenuElement(edge);
-	if (!menu) return;
-
-	const activeVideo =
-		typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
-	const fades =
-		typeof window.getVideoFadeSeconds === "function"
-			? window.getVideoFadeSeconds(activeVideo, activeQueueIndex)
-			: {
-					fadeInSec: Number(activeVideo?.fadeInSec) || 0,
-					fadeOutSec: Number(activeVideo?.fadeOutSec) || 0,
-				};
-	const current = edge === "out" ? fades.fadeOutSec : fades.fadeInSec;
-	const input = menu.querySelector(".clip-fade-input");
-	if (input) {
-		input.value =
-			current > 0
-				? Number(current).toFixed(1)
-				: String(
-						typeof window.FADE_DEFAULT_SEC === "number"
-							? window.FADE_DEFAULT_SEC.toFixed(1)
-							: "1.0",
-					);
-	}
-
-	positionClipFadeMenu(anchorEl, menu);
-	// Do not focus immediately — WebView2 scroll-into-view was dismissing menus
-	requestAnimationFrame(() => {
-		if (menu.classList.contains("hidden")) return;
-		const inp = menu.querySelector(".clip-fade-input");
-		if (inp) {
-			try {
-				inp.focus({ preventScroll: true });
-				inp.select();
-			} catch {
-				/* ignore */
-			}
-		}
-	});
-};
-window.openClipFadeMenu = openClipFadeMenu;
-
-/**
- * One-time event delegation on stable #markersList.
- * Footer re-renders wipe child listeners; host delegation survives.
- */
-const ensureClipFadeListDelegation = () => {
-	const host = document.getElementById("markersList");
-	if (!host) return;
-	if (host.dataset.clipFadeDelegated === "1") return;
-	host.dataset.clipFadeDelegated = "1";
-
-	// Visible Fade button / label click
-	host.addEventListener("click", (e) => {
-		const openBtn = e.target.closest?.(
-			".clip-fade-open-btn, .clip-fade-trigger",
-		);
-		if (!openBtn || !host.contains(openBtn)) return;
-		// Don't steal clicks from Generate CC or other footer buttons
-		if (e.target.closest?.("#generateCcBtn")) return;
-		e.preventDefault();
-		e.stopPropagation();
-		const edge =
-			openBtn.getAttribute("data-fade-edge") ||
-			openBtn.closest(".clip-fade-control")?.getAttribute("data-fade-edge");
-		if (edge !== "in" && edge !== "out") return;
-		const control = openBtn.closest(".clip-fade-control") || openBtn;
-		openClipFadeMenu(edge, control);
-	});
-
-	// Right-click anywhere on Clip In / Clip Out control
-	host.addEventListener("contextmenu", (e) => {
-		const control = e.target.closest?.(".clip-fade-control");
-		if (!control || !host.contains(control)) return;
-		e.preventDefault();
-		e.stopPropagation();
-		const edge = control.getAttribute("data-fade-edge");
-		if (edge !== "in" && edge !== "out") return;
-		openClipFadeMenu(edge, control);
-	});
-};
-window.ensureClipFadeListDelegation = ensureClipFadeListDelegation;
-
-// Install as soon as this classic script runs (markersList is already in the DOM)
-if (document.getElementById("markersList")) {
-	ensureClipFadeListDelegation();
-	// Prefetch permanent menus
-	ensureClipFadeMenuElement("in");
-	ensureClipFadeMenuElement("out");
-} else {
-	document.addEventListener("DOMContentLoaded", () => {
-		ensureClipFadeListDelegation();
-		ensureClipFadeMenuElement("in");
-		ensureClipFadeMenuElement("out");
-	});
-}
-
-document.addEventListener("click", (e) => {
+document.addEventListener("click", () => {
 	const menus = document.querySelectorAll('[id^="type-menu-"]');
 	for (const menu of menus) {
 		menu.classList.add("hidden");
 	}
-	// Fade menus: keep open when clicking inside menu or footer control
-	if (
-		!e.target.closest?.(".clip-fade-control") &&
-		!e.target.closest?.(".clip-fade-menu")
-	) {
-		closeAllClipFadeMenus();
+	// Clean any leftover footer fade portals from older builds
+	for (const m of document.querySelectorAll("body > .clip-fade-menu")) {
+		m.remove();
 	}
 });
 
@@ -340,17 +57,100 @@ document.addEventListener(
 		for (const menu of menus) {
 			menu.classList.add("hidden");
 		}
-		// Do NOT close fade menus on scroll — fixed body menus; scroll-dismiss
-		// was racing WebView2 focus/scroll-into-view and made opens look broken.
 	},
 	{ passive: true, capture: true },
 );
 
-document.addEventListener("keydown", (e) => {
-	if (e.key === "Escape") {
-		closeAllClipFadeMenus();
+/**
+ * Badge HTML for clip-edge fade on marker rows (same visual language as loop ##).
+ * @param {number} fadeSec
+ * @returns {string}
+ */
+const fadeBadgeHtml = (fadeSec) => {
+	const label =
+		typeof window.formatFadeBadge === "function"
+			? window.formatFadeBadge(fadeSec)
+			: fadeSec > 0
+				? `${Number(fadeSec).toFixed(1)}s`
+				: "";
+	if (!label) return "";
+	return `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none" title="Clip-edge fade (export)">${label}</span>`;
+};
+
+/**
+ * Apply fade seconds for a queue source (and optionally set marker type to in/out).
+ * Like loop count edit: typing in the menu field commits the bound + duration.
+ * 0 / empty clears the fade (no export filter). Default display when unset is 1.0.
+ * @param {number} queueIndex
+ * @param {"in"|"out"} edge
+ * @param {unknown} rawValue
+ * @param {number} [markerIndex]
+ * @param {{ reRender?: boolean, setType?: boolean }} [opts]
+ * @returns {number} clamped seconds written
+ */
+const applyMarkerClipFadeEdit = (
+	queueIndex,
+	edge,
+	rawValue,
+	markerIndex = -1,
+	{ reRender = false, setType = true } = {},
+) => {
+	const raw = String(rawValue ?? "")
+		.trim()
+		.replace(",", ".");
+	let parsed = Number.parseFloat(raw);
+	if (raw === "" || !Number.isFinite(parsed) || parsed < 0) {
+		parsed = 0;
 	}
-});
+	let written = 0;
+	if (typeof window.setVideoFadeSec === "function") {
+		written = window.setVideoFadeSec(edge, parsed, queueIndex);
+	} else if (typeof videoQueue !== "undefined" && videoQueue[queueIndex]) {
+		const key = edge === "out" ? "fadeOutSec" : "fadeInSec";
+		const n = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed * 10) / 10 : 0;
+		videoQueue[queueIndex][key] = n;
+		written = n;
+		if (typeof saveLocalState === "function") saveLocalState();
+	}
+
+	if (setType && markerIndex >= 0 && typeof videoQueue !== "undefined") {
+		const list =
+			queueIndex === activeQueueIndex
+				? typeof markers !== "undefined"
+					? markers
+					: videoQueue[queueIndex]?.appState?.markers
+				: videoQueue[queueIndex]?.appState?.markers;
+		if (list?.[markerIndex]) {
+			list[markerIndex].type = edge === "out" ? "out" : "in";
+			if (queueIndex === activeQueueIndex && typeof markers !== "undefined") {
+				// keep queue slot in sync
+				if (videoQueue[queueIndex]?.appState) {
+					videoQueue[queueIndex].appState.markers = markers;
+				}
+			}
+			if (typeof window.syncClipBoundsFromMarkers === "function") {
+				window.syncClipBoundsFromMarkers(queueIndex);
+			}
+		}
+	}
+
+	if (typeof saveLocalState === "function") saveLocalState();
+
+	if (reRender) {
+		if (typeof window.updateMarkersList === "function") {
+			window.updateMarkersList();
+		} else if (typeof updateMarkersList === "function") {
+			updateMarkersList();
+		}
+		if (typeof window.paintTimelineMarkersAndShading === "function") {
+			window.paintTimelineMarkersAndShading();
+		}
+		if (typeof window.scheduleJoinTimelineRebuild === "function") {
+			window.scheduleJoinTimelineRebuild();
+		}
+	}
+	return written;
+};
 
 const updateStickyOffsets = () => {
 	const activeLoggingPanel = document.getElementById("activeLoggingPanel");
@@ -603,7 +403,7 @@ const updateMarkersListImmediate = () => {
 					? `<span class="flex-shrink-0 text-[10px] font-bold text-zinc-400 dark:text-zinc-500" title="Clip ${entry.queueIndex + 1}">${entry.queueIndex + 1}</span>`
 					: "";
 
-			// Clip-edge fade badge on in/out bound markers (queue item fade, not playlist)
+			// Clip-edge fade on queue source; badge on in/out bound marker rows (like loop ##)
 			const boundVideo =
 				typeof videoQueue !== "undefined" ? videoQueue[entry.queueIndex] : null;
 			const boundFades =
@@ -621,6 +421,15 @@ const updateMarkersListImmediate = () => {
 					: isOutBound && boundFades.fadeOutSec > 0
 						? fadeBadgeHtml(boundFades.fadeOutSec)
 						: "";
+			// Menu inputs: show current fade, or 1.0 default when unset (apply on blur like loop)
+			const fadeInInputVal =
+				boundFades.fadeInSec > 0
+					? Number(boundFades.fadeInSec).toFixed(1)
+					: "1.0";
+			const fadeOutInputVal =
+				boundFades.fadeOutSec > 0
+					? Number(boundFades.fadeOutSec).toFixed(1)
+					: "1.0";
 
 			rows.push(`
         <tr class="marker-row ${rowBgClass} border-b border-zinc-200 dark:border-zinc-700" data-view-index="${i}" data-queue-index="${entry.queueIndex}" data-marker-index="${entry.markerIndex}" data-sequence="${entry.isSequence ? "1" : "0"}">
@@ -645,7 +454,7 @@ const updateMarkersListImmediate = () => {
                   ${boundFadeBadge}
                   ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "in" || marker.type === "start" ? ICONS.inType : marker.type === "out" || marker.type === "end" ? ICONS.outType : ICONS.standard}
                 </button>
-                <div id="type-menu-${i}" class="hidden absolute left-0 mt-1 w-40 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
+                <div id="type-menu-${i}" class="hidden absolute left-0 mt-1 w-52 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
                   <div class="py-1">
                     <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="standard">
                       ${ICONS.standard} Standard
@@ -663,11 +472,35 @@ const updateMarkersListImmediate = () => {
                              data-marker-index="${entry.markerIndex}"
                              data-queue-index="${entry.queueIndex}">
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="in">
-                      ${ICONS.inType} Set Clip In
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="in">
+                      <span class="flex items-center gap-2">${ICONS.inType} Set Clip In</span>
+                      <span class="inline-flex items-center gap-0.5" title="Fade-in seconds (0 = none)">
+                        <input type="text" inputmode="decimal"
+                               class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-in-input"
+                               value="${fadeInInputVal}"
+                               placeholder="1.0"
+                               maxlength="4"
+                               data-marker-index="${entry.markerIndex}"
+                               data-queue-index="${entry.queueIndex}"
+                               data-fade-edge="in"
+                               title="Fade in (s). 0 clears. Default 1.0">
+                        <span class="text-[10px] text-zinc-500 font-normal">s</span>
+                      </span>
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="out">
-                      ${ICONS.outType} Set Clip Out
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="out">
+                      <span class="flex items-center gap-2">${ICONS.outType} Set Clip Out</span>
+                      <span class="inline-flex items-center gap-0.5" title="Fade-out seconds (0 = none)">
+                        <input type="text" inputmode="decimal"
+                               class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-out-input"
+                               value="${fadeOutInputVal}"
+                               placeholder="1.0"
+                               maxlength="4"
+                               data-marker-index="${entry.markerIndex}"
+                               data-queue-index="${entry.queueIndex}"
+                               data-fade-edge="out"
+                               title="Fade out (s). 0 clears. Default 1.0">
+                        <span class="text-[10px] text-zinc-500 font-normal">s</span>
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -1023,6 +856,58 @@ const updateMarkersListImmediate = () => {
 					input.value = String(finalVal).padStart(2, "0");
 				});
 			});
+
+			// Clip-edge fade inputs on Set Clip In / Set Clip Out (same pattern as loop ##)
+			const bindClipFadeInput = (input, edge) => {
+				const markerIndex = parseInt(
+					input.getAttribute("data-marker-index"),
+					10,
+				);
+				const qIndex = parseInt(
+					input.getAttribute("data-queue-index") ?? activeQueueIndex,
+					10,
+				);
+				const commit = (reRender) => {
+					const written = applyMarkerClipFadeEdit(
+						qIndex,
+						edge,
+						input.value,
+						markerIndex,
+						{ reRender, setType: true },
+					);
+					input.value = written > 0 ? written.toFixed(1) : "0";
+					return written;
+				};
+				input.addEventListener("click", (e) => e.stopPropagation());
+				input.addEventListener("mousedown", (e) => e.stopPropagation());
+				input.addEventListener("mouseup", (e) => e.stopPropagation());
+				input.addEventListener("focus", (e) => e.stopPropagation());
+				input.addEventListener("keydown", (e) => {
+					e.stopPropagation();
+					if (e.key === "Enter") {
+						e.preventDefault();
+						commit(true);
+						// Close type menu after commit
+						const menus = document.querySelectorAll('[id^="type-menu-"]');
+						for (const menu of menus) menu.classList.add("hidden");
+					}
+				});
+				input.addEventListener("blur", (e) => {
+					e.stopPropagation();
+					commit(true);
+				});
+				input.addEventListener("change", (e) => {
+					e.stopPropagation();
+					commit(true);
+				});
+			};
+
+			markerTableBody
+				.querySelectorAll(".clip-fade-in-input")
+				.forEach((input) => bindClipFadeInput(input, "in"));
+			markerTableBody
+				.querySelectorAll(".clip-fade-out-input")
+				.forEach((input) => bindClipFadeInput(input, "out"));
 		}
 
 		DOM.markersTableFoot = document.getElementById("markersTableFoot");
@@ -1093,48 +978,6 @@ const updateMarkersList = () => {
 // Classic-script globals + window aliases for module consumers
 window.updateMarkersList = updateMarkersList;
 
-/**
- * Badge HTML for clip-edge fade (same visual language as loop ## badge).
- * @param {number} fadeSec
- * @returns {string}
- */
-const fadeBadgeHtml = (fadeSec) => {
-	const label =
-		typeof window.formatFadeBadge === "function"
-			? window.formatFadeBadge(fadeSec)
-			: fadeSec > 0
-				? `${Number(fadeSec).toFixed(1)}s`
-				: "";
-	if (!label) return "";
-	return `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none" title="Clip-edge fade">${label}</span>`;
-};
-
-/**
- * Footer Clip In / Clip Out control: label+time (right-click) + visible Fade button.
- * Menus live on document.body; #markersList delegation opens them (survives re-render).
- * @param {"in"|"out"} edge
- * @param {string} label
- * @param {string} timeStr
- * @param {number} fadeSec
- * @param {string} timeId
- * @returns {string}
- */
-const renderClipBoundFadeControl = (edge, label, timeStr, fadeSec, timeId) => {
-	const badge = fadeBadgeHtml(fadeSec);
-	const menuTitle = edge === "out" ? "Fade Out" : "Fade In";
-	return `
-    <span class="relative inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400 clip-fade-control" data-fade-edge="${edge}" title="Right-click for ${menuTitle}, or click Fade">
-      <button type="button" class="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer clip-fade-trigger" data-fade-edge="${edge}" title="${menuTitle} — click or right-click">
-        <span>${label}:</span>
-        <span id="${timeId}" class="font-mono font-bold text-zinc-900 dark:text-white">${timeStr}</span>
-        ${badge}
-      </button>
-      <button type="button" class="btn btn-xs btn-outline-secondary py-0.5 px-1.5 h-6 text-[10px] font-semibold leading-none cursor-pointer clip-fade-open-btn" data-fade-edge="${edge}" title="Set ${menuTitle} duration (export filter)">
-        Fade
-      </button>
-    </span>`;
-};
-
 const updateVideoTimeSummary = () => {
 	try {
 		let footer = document.getElementById("markersTableFoot");
@@ -1152,11 +995,10 @@ const updateVideoTimeSummary = () => {
 		}
 
 		const playerEl = getMarkersPlayer();
-		const activeVideo =
-			(typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) || {};
 
 		// Multi-clip join run: footer reflects SEQUENCE bounds (sum of segment lengths).
 		// Solo / unjoined: keep per-clip Clip In / Out / Duration behaviour.
+		// Fades are NOT edited in the footer — use marker type menu (like Loop).
 		const multi =
 			typeof window.isActiveRunMulti === "function" &&
 			window.isActiveRunMulti();
@@ -1169,14 +1011,6 @@ const updateVideoTimeSummary = () => {
 		if (typeof window.syncClipBoundsFromMarkers === "function") {
 			window.syncClipBoundsFromMarkers(activeQueueIndex);
 		}
-
-		const fades =
-			typeof window.getVideoFadeSeconds === "function"
-				? window.getVideoFadeSeconds(activeVideo, activeQueueIndex)
-				: {
-						fadeInSec: Number(activeVideo.fadeInSec) || 0,
-						fadeOutSec: Number(activeVideo.fadeOutSec) || 0,
-					};
 
 		if (multi) {
 			const run =
@@ -1191,37 +1025,21 @@ const updateVideoTimeSummary = () => {
 			const formattedEndTime = formatTimeToHHMMSSMS(seqOut);
 			const formattedDuration = formatTimeToHHMMSSMS(seqDur);
 
-			// Active clip bounds for fade editing (not playlist-level)
-			const activeIn =
-				typeof clipInTime !== "undefined" ? clipInTime : activeVideo.clipInTime || 0;
-			const activeOut =
-				typeof clipOutTime !== "undefined"
-					? clipOutTime
-					: activeVideo.clipOutTime || 0;
-			const activeInStr = formatTimeToHHMMSSMS(activeIn);
-			const activeOutStr = formatTimeToHHMMSSMS(activeOut);
-
 			footer.innerHTML = `
-      <div class="flex flex-col items-center gap-1 w-full py-1 text-sm font-medium">
-        <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full">
-          <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-            <span>Seq In:</span>
-            <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
-          </span>
-          <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-            <span>Seq Out:</span>
-            <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
-          </span>
-          <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-            <span>Sequence Duration:</span>
-            <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
-          </span>
-          ${generateCcBtnHtml}
-        </div>
-        <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full text-xs">
-          ${renderClipBoundFadeControl("in", "Clip In", activeInStr, fades.fadeInSec, "activeClipInTimeDisplay")}
-          ${renderClipBoundFadeControl("out", "Clip Out", activeOutStr, fades.fadeOutSec, "activeClipOutTimeDisplay")}
-        </div>
+      <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full py-1 text-sm font-medium">
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Seq In:</span>
+          <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Seq Out:</span>
+          <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Sequence Duration:</span>
+          <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
+        </span>
+        ${generateCcBtnHtml}
       </div>
     `;
 			const genBtn = document.getElementById("generateCcBtn");
@@ -1232,8 +1050,6 @@ const updateVideoTimeSummary = () => {
 					window.triggerVttGeneration();
 				});
 			}
-			// Delegation is on stable #markersList (once); re-assert after re-render
-			ensureClipFadeListDelegation();
 			return;
 		}
 
@@ -1277,8 +1093,14 @@ const updateVideoTimeSummary = () => {
 
 		footer.innerHTML = `
       <div class="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 w-full py-1 text-sm font-medium">
-        ${renderClipBoundFadeControl("in", "Clip In", formattedStartTime, fades.fadeInSec, "videoStartTimeDisplay")}
-        ${renderClipBoundFadeControl("out", "Clip Out", formattedEndTime, fades.fadeOutSec, "videoEndTimeDisplay")}
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Clip In:</span>
+          <span id="videoStartTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedStartTime}</span>
+        </span>
+        <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+          <span>Clip Out:</span>
+          <span id="videoEndTimeDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedEndTime}</span>
+        </span>
         <span class="inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
           <span>Video Duration:</span>
           <span id="videoDurationDisplay" class="font-mono font-bold text-zinc-900 dark:text-white">${formattedDuration}</span>
@@ -1294,8 +1116,6 @@ const updateVideoTimeSummary = () => {
 				window.triggerVttGeneration();
 			});
 		}
-		// Delegation is on stable #markersList (once); re-assert after re-render
-		ensureClipFadeListDelegation();
 	} catch (error) {
 		toConsole("updateVideoTimeSummary error", error.message, debuggin);
 	}

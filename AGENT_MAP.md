@@ -43,7 +43,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 - Timeline zoom: `applyTimelineZoomLayout`, `setTimelineZoom`, `getTimelineContentWidth`, `initTimelineZoomControls`
 - CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`, `buildWebVttFromCues`
 - Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt` (soft `.vtt` next to each job output; failure never fails the video job)
-- Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge` (`fadeInSec` / `fadeOutSec` on each queue item)
+- Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge` (`fadeInSec` / `fadeOutSec` on each queue item). UX is **marker type menu** (Set Clip In / Out + `#.#s` input like Loop count), badge on the in/out **marker row** — not the table footer, not the playlist.
 
 If something “does nothing” in the markers table, check window exports first.
 
@@ -160,8 +160,8 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
   - **Join:** all markers in the run, sequence-shifted by sum of prior segment durations; cue text = marker name; end = next cue / +3s / clip end (same policy as Generate CC).
   - Skip when no markers and no source VTT; **VTT write failure never fails the video job** (toast warning OK).
 - Clip-edge fades (soft export filters only):
-  - Per queue item: `fadeInSec` / `fadeOutSec` (default 0; first set via menu prefills **1.0s**).
-  - UX: context menu + cyan badge on marker-table **Clip In / Clip Out** footer (and in/out bound rows) — **not** playlist queue.
+  - Per queue item: `fadeInSec` / `fadeOutSec` (default 0).
+  - UX (same family as Loop): marker row type menu → **Set Clip In** / **Set Clip Out** with `#.#s` duration input (default display 1.0; `0` clears). Cyan `1.0s` badge on the in/out **marker row** when fade > 0. **No** footer Fade button; **no** playlist fade UI.
   - Export: ffmpeg `fade` / `afade` at segment start/end; join keeps per-segment fades; `0` → no filter. Forces reencode when fade > 0.
 - Rust: `export_queue_job` (trim → optional fade → concat → quality) + `save_vtt_file` for sidecar write. **IPC:** each `VideoSegment` must send **one** of `loop_count` / `loopCount`, never both (serde duplicate field). Fade fields: `fade_in_sec` / `fade_out_sec` (aliases `fadeInSec` / `fadeOutSec`).
 - Also: `join_and_compress_videos` (legacy single-shot join UI path).
