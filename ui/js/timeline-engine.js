@@ -651,49 +651,12 @@ const paintTimelineMarkersAndShading = () => {
 			endShade.style.width = `${100 - endPct}%`;
 			fragment.appendChild(endShade);
 		}
-
-		// Solo clip-edge fade zones (media timeline coords)
-		const soloVideo =
-			typeof videoQueue !== "undefined"
-				? videoQueue[typeof activeQueueIndex === "number" ? activeQueueIndex : 0]
-				: null;
-		const soloFades =
-			typeof window.getVideoFadeSeconds === "function"
-				? window.getVideoFadeSeconds(
-						soloVideo,
-						typeof activeQueueIndex === "number" ? activeQueueIndex : 0,
-					)
-				: {
-						fadeInSec: Number(soloVideo?.fadeInSec) || 0,
-						fadeOutSec: Number(soloVideo?.fadeOutSec) || 0,
-					};
-		const activeEnd =
-			soloOut > soloIn ? soloOut : duration > soloIn ? duration : soloIn;
-		const activeDur = Math.max(0, activeEnd - soloIn);
-		if (soloFades.fadeInSec > 0 && activeDur > 0 && duration > 0) {
-			const fi = Math.min(soloFades.fadeInSec, activeDur);
-			const fadeIn = document.createElement("div");
-			fadeIn.className =
-				"absolute top-0 bottom-0 sequence-fade-zone sequence-fade-zone-in z-[6]";
-			fadeIn.style.left = `${(soloIn / duration) * 100}%`;
-			fadeIn.style.width = `${(fi / duration) * 100}%`;
-			fadeIn.title = `Fade in ${fi.toFixed(1)}s`;
-			fragment.appendChild(fadeIn);
-		}
-		if (soloFades.fadeOutSec > 0 && activeDur > 0 && duration > 0) {
-			const fo = Math.min(soloFades.fadeOutSec, activeDur);
-			const start = Math.max(soloIn, activeEnd - fo);
-			const fadeOut = document.createElement("div");
-			fadeOut.className =
-				"absolute top-0 bottom-0 sequence-fade-zone sequence-fade-zone-out z-[6]";
-			fadeOut.style.left = `${(start / duration) * 100}%`;
-			fadeOut.style.width = `${(fo / duration) * 100}%`;
-			fadeOut.title = `Fade out ${fo.toFixed(1)}s`;
-			fragment.appendChild(fadeOut);
-		}
+		// Fade zones are painted only on the filmstrip (refreshClipFadeTimelineZones),
+		// not on this marker overlay — avoids double purple stacks.
 	} else {
 		// Multi: per-row grey outside [clipIn, clipOut] lives on each track via
 		// applySegmentWindow (.sequence-row-dim). Overlay only draws flush join cuts.
+		// Fade zones: filmstrip shells only (not overlay).
 		const run = window.getActiveJoinRun?.();
 		if (run?.segments && duration > 0) {
 			for (let i = 1; i < run.segments.length; i += 1) {
@@ -705,39 +668,6 @@ const paintTimelineMarkersAndShading = () => {
 				joinLine.style.left = `${boundaryPct}%`;
 				joinLine.title = "Join boundary";
 				fragment.appendChild(joinLine);
-			}
-			// Per-segment fade zones on sequence spine (overlay, zoom-aware %)
-			for (const seg of run.segments) {
-				const fades =
-					typeof window.getVideoFadeSeconds === "function"
-						? window.getVideoFadeSeconds(seg.video, seg.queueIndex)
-						: {
-								fadeInSec: Number(seg.video?.fadeInSec) || 0,
-								fadeOutSec: Number(seg.video?.fadeOutSec) || 0,
-							};
-				const segDur = Math.max(0, Number(seg.duration) || 0);
-				const off = Math.max(0, Number(seg.offset) || 0);
-				if (fades.fadeInSec > 0 && segDur > 0) {
-					const fi = Math.min(fades.fadeInSec, segDur);
-					const fadeIn = document.createElement("div");
-					fadeIn.className =
-						"absolute top-0 bottom-0 sequence-fade-zone sequence-fade-zone-in z-[6]";
-					fadeIn.style.left = `${(off / duration) * 100}%`;
-					fadeIn.style.width = `${(fi / duration) * 100}%`;
-					fadeIn.title = `Fade in ${fi.toFixed(1)}s (clip ${seg.queueIndex + 1})`;
-					fragment.appendChild(fadeIn);
-				}
-				if (fades.fadeOutSec > 0 && segDur > 0) {
-					const fo = Math.min(fades.fadeOutSec, segDur);
-					const start = off + segDur - fo;
-					const fadeOut = document.createElement("div");
-					fadeOut.className =
-						"absolute top-0 bottom-0 sequence-fade-zone sequence-fade-zone-out z-[6]";
-					fadeOut.style.left = `${(start / duration) * 100}%`;
-					fadeOut.style.width = `${(fo / duration) * 100}%`;
-					fadeOut.title = `Fade out ${fo.toFixed(1)}s (clip ${seg.queueIndex + 1})`;
-					fragment.appendChild(fadeOut);
-				}
 			}
 		}
 	}

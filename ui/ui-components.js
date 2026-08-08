@@ -413,23 +413,46 @@ const updateMarkersListImmediate = () => {
 							fadeInSec: Number(boundVideo?.fadeInSec) || 0,
 							fadeOutSec: Number(boundVideo?.fadeOutSec) || 0,
 						};
+			// Prefer raw stored values for badge so display matches menu even if clamp edge-cases
+			const fadeInShow =
+				boundFades.fadeInSec > 0
+					? boundFades.fadeInSec
+					: Math.max(0, Number(boundVideo?.fadeInSec) || 0);
+			const fadeOutShow =
+				boundFades.fadeOutSec > 0
+					? boundFades.fadeOutSec
+					: Math.max(0, Number(boundVideo?.fadeOutSec) || 0);
 			const isInBound = marker.type === "in" || marker.type === "start";
 			const isOutBound = marker.type === "out" || marker.type === "end";
-			const boundFadeBadge =
-				isInBound && boundFades.fadeInSec > 0
-					? fadeBadgeHtml(boundFades.fadeInSec)
-					: isOutBound && boundFades.fadeOutSec > 0
-						? fadeBadgeHtml(boundFades.fadeOutSec)
-						: "";
+			// Also match bound by time (syncClipBounds may leave type while time is the out)
+			const clipInBoundT = Math.max(
+				0,
+				Number(boundVideo?.clipInTime) || entry.clipIn || 0,
+			);
+			const clipOutBoundT = Math.max(
+				0,
+				Number(boundVideo?.clipOutTime) || entry.clipOut || 0,
+			);
+			const nearIn =
+				!isInBound &&
+				!isOutBound &&
+				Math.abs((Number(marker.startTime) || 0) - clipInBoundT) < 0.051;
+			const nearOut =
+				!isOutBound &&
+				!isInBound &&
+				clipOutBoundT > 0 &&
+				Math.abs((Number(marker.startTime) || 0) - clipOutBoundT) < 0.051;
+			let boundFadeBadge = "";
+			if ((isInBound || nearIn) && fadeInShow > 0) {
+				boundFadeBadge = fadeBadgeHtml(fadeInShow);
+			} else if ((isOutBound || nearOut) && fadeOutShow > 0) {
+				boundFadeBadge = fadeBadgeHtml(fadeOutShow);
+			}
 			// Menu inputs: show current fade, or 1.0 default when unset (apply on blur like loop)
 			const fadeInInputVal =
-				boundFades.fadeInSec > 0
-					? Number(boundFades.fadeInSec).toFixed(1)
-					: "1.0";
+				fadeInShow > 0 ? Number(fadeInShow).toFixed(1) : "1.0";
 			const fadeOutInputVal =
-				boundFades.fadeOutSec > 0
-					? Number(boundFades.fadeOutSec).toFixed(1)
-					: "1.0";
+				fadeOutShow > 0 ? Number(fadeOutShow).toFixed(1) : "1.0";
 
 			rows.push(`
         <tr class="marker-row ${rowBgClass} border-b border-zinc-200 dark:border-zinc-700" data-view-index="${i}" data-queue-index="${entry.queueIndex}" data-marker-index="${entry.markerIndex}" data-sequence="${entry.isSequence ? "1" : "0"}">

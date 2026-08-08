@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	clampFadeSec,
 	computeClipEdgeFadeGain,
+	computeClipFadeZoneRanges,
 	FADE_DEFAULT_SEC,
 	FADE_HARD_MAX_SEC,
 	formatFadeBadge,
@@ -58,6 +59,24 @@ describe("clip-edge fade helpers", () => {
 			expect(computeClipEdgeFadeGain(9, 10, 40, 1, 1)).toBe(0);
 			expect(computeClipEdgeFadeGain(25, 10, 40, 1, 1)).toBe(1);
 			expect(computeClipEdgeFadeGain(41, 10, 40, 1, 1)).toBe(0);
+		});
+	});
+
+	describe("computeClipFadeZoneRanges", () => {
+		it("fade-in is [clipIn, clipIn+fi]; fade-out is [clipOut-fo, clipOut]", () => {
+			const r = computeClipFadeZoneRanges(0, 9, 2, 1);
+			expect(r.fadeIn).toEqual({ start: 0, end: 2 });
+			expect(r.fadeOut).toEqual({ start: 8, end: 9 });
+		});
+
+		it("clamps fades to active duration and clears zeros", () => {
+			const r = computeClipFadeZoneRanges(10, 20, 0, 0);
+			expect(r.fadeIn).toBeNull();
+			expect(r.fadeOut).toBeNull();
+			const long = computeClipFadeZoneRanges(0, 4, 10, 10);
+			expect(long.fadeIn).toEqual({ start: 0, end: 4 });
+			// full-span out when fo >= active
+			expect(long.fadeOut).toEqual({ start: 0, end: 4 });
 		});
 	});
 });
