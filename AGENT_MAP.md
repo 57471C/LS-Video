@@ -43,7 +43,8 @@ Living map for agents and humans. Read this before large refactors. Update when 
 - Timeline zoom: `applyTimelineZoomLayout`, `setTimelineZoom`, `getTimelineContentWidth`, `initTimelineZoomControls`
 - CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`, `buildWebVttFromCues`
 - Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt` (soft `.vtt` next to each job output; failure never fails the video job)
-- Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge`, `computeClipEdgeFadeGain`, `applyClipEdgeFadePreview`, `paintClipFadeZonesOnHost` / `refreshClipFadeTimelineZones`. UX is **marker type menu** (Set Clip In / Out + `#.#s` like Loop); badge on in/out **row**. Live preview ramps opacity/volume; detailed timeline shows purple fade zones.
+- Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge`, `computeClipEdgeFadeGain`, `applyClipEdgeFadePreview`, `paintClipFadeZonesOnHost` / `refreshClipFadeTimelineZones`. `FADE_DEFAULT_SEC = 0`, hard max 10s (also half clip). UX is **marker type menu** (Set Clip In / Out + `#.#s` like Loop); badge on in/out **row**. Live preview ramps opacity/volume; detailed timeline shows purple fade zones.
+- Speed markers: type `speed` + `speedValue` (0.25–4). Badge `1.5x` (no orange tint at exactly 1×). Helpers: `getActiveSpeedMarker`, `buildSpeedRanges`, `applyActiveSpeedPlayback`, `sourceTimeToEffective`, `effectiveTimeToSource`, `scheduleSpeedTimelineRebuild`, `layoutSpeedWarpedFilmstrip` / `layoutSpeedWarpedWaveform`. Live `playbackRate`; slider snaps to active range and drag updates that marker’s rate. Detailed timeline is **output-time** warped (∫ dt/rate). Export: `speed_ranges` on `VideoSegment` → setpts + chained atempo, then edge fades on output time.
 
 If something “does nothing” in the markers table, check window exports first.
 
@@ -129,7 +130,9 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 
 ## Markers & closed captions
 
-- Types include standard, jump, loop, in, out.
+- Types include standard, jump, loop, in, out, **speed**.
+- **Speed** (`type: "speed"`, `speedValue` 0.25–4): holds rate from that marker’s time until the next speed marker (or clip out). Non-1× zones get orange timeline tint; **1× does not**. Badge on the speed marker row (`1.5x`).
+- Clip-edge fade is **not** a marker type — it is set on **in/out** rows via the type menu (same pattern as Loop count).
 - **Generate CC** (table footer): plain WebVTT from markers (solo = active source; multi = sequence-ordered run); save beside video + load track.
 - CC transport button states (`setCcButtonState`): **none** (dark/disabled), **available** (white/idle), **active** (green glow).
 
@@ -142,6 +145,8 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 - Per-video thumbnail cache dir in Rust.
 - **Skip** filmstrip/thumb generation for audio-only files.
 - **Detailed timeline zoom** (`#timelineZoomSlider`): factor `1` = fit width; `>1` = `fitWidth * zoom` + horizontal scroll on `#timeline-h-scroll` (ruler + tracks share scrollLeft). Debounce filmstrip regen on slider change.
+- **Speed-warped timeline (solo detailed):** ruler, playhead, scrub, filmstrip cells, and waveform use **output time** (`∫ dt / rate` over clip). Source→effective / effective→source via `sourceTimeToEffective` / `effectiveTimeToSource` + `buildSpeedRanges`. Filmstrip/waveform cells sized by `outSpan = sourceSpan / rate`. Call `scheduleSpeedTimelineRebuild` after speed/marker/clip edits. Join multi-clip sequence time is still unwarped per segment durations (clipOut−clipIn); speed warp applies inside each solo layout path when ranges exist.
+- Purple **clip-edge fade zones** on the detailed host: fade-in over `[clipIn, clipIn+fi)`; fade-out over `[clipOut−fo, clipOut)` (not past the out marker).
 
 ---
 
@@ -151,7 +156,7 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 
 | Job type | Output |
 |----------|--------|
-| Contiguous `joinedToNext` run | One concat MP4 (each segment `[clipIn, clipOut]`) + optional soft `.vtt` |
+| Contiguous `joinedToNext` run | One concat MP4 (each segment `[clipIn, clipOut]`, speed-warped + fades) + optional soft `.vtt` |
 | Unjoined item | Solo trim/export + optional soft `.vtt` |
 
 - Folder pick once; names like `sequence_001_…mp4` / `basename_export.mp4`.
@@ -160,10 +165,16 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
   - **Join:** all markers in the run, sequence-shifted by sum of prior segment durations; cue text = marker name; end = next cue / +3s / clip end (same policy as Generate CC).
   - Skip when no markers and no source VTT; **VTT write failure never fails the video job** (toast warning OK).
 - Clip-edge fades (soft export filters only):
-  - Per queue item: `fadeInSec` / `fadeOutSec` (default 0).
-  - UX (same family as Loop): marker row type menu → **Set Clip In** / **Set Clip Out** with `#.#s` duration input (default display 1.0; `0` clears). Cyan `1.0s` badge on the in/out **marker row** when fade > 0. **No** footer Fade button; **no** playlist fade UI.
-  - Export: ffmpeg `fade` / `afade` at segment start/end; join keeps per-segment fades; `0` → no filter. Forces reencode when fade > 0.
-- Rust: `export_queue_job` (trim → optional fade → concat → quality) + `save_vtt_file` for sidecar write. **IPC:** each `VideoSegment` must send **one** of `loop_count` / `loopCount`, never both (serde duplicate field). Fade fields: `fade_in_sec` / `fade_out_sec` (aliases `fadeInSec` / `fadeOutSec`).
+  - Per queue item: `fadeInSec` / `fadeOutSec` (default **0**).
+  - UX (same family as Loop): marker row type menu → **Set Clip In** / **Set Clip Out** with `#.#s` duration input (UI placeholder may show `1.0`; stored default is `0`; `0` clears). Cyan badge on the in/out **marker row** when fade > 0. **No** footer Fade button; **no** playlist fade UI.
+  - Live preview: opacity + volume ramp via `computeClipEdgeFadeGain` / `applyClipEdgeFadePreview`.
+  - Export: ffmpeg `fade` / `afade` on **output** segment time after speed; join keeps per-segment fades; `0` → no filter. Forces reencode when fade > 0.
+- Speed markers (export):
+  - Frontend builds `speed_ranges: [{ start, end, rate }, …]` covering `[clipIn, clipOut]` via `buildSpeedRanges` (gaps default rate 1).
+  - Per range: `setpts=(PTS-STARTPTS)/rate` + chained `atempo` (ffmpeg 0.5–2 per stage); `-t` caps piece length at `span/rate`.
+  - Pieces concat’d then fade applied on that output timeline. 1×-only ranges can skip speed filter when whole segment is flat 1×.
+- Rust: `export_queue_job` pipeline order: **trim → speed pieces → concat pieces → edge fade → quality**. Also `save_vtt_file` for sidecar write.
+- **IPC `VideoSegment`:** send **one** of `loop_count` / `loopCount`, never both (serde duplicate field). Fade: `fade_in_sec` / `fade_out_sec` (aliases `fadeInSec` / `fadeOutSec`). Speed: `speed_ranges` array of `{ start, end, rate }` (snake_case preferred).
 - Also: `join_and_compress_videos` (legacy single-shot join UI path).
 - Out of scope for batch captions: burn-in, ASS/SSA styling, titles.
 
@@ -200,7 +211,8 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 - Peaks.js, Whisper, Failsafe Proxy
 - VLC / libmpv experimental branches (orphaned; proxy is the supported H.265 path)
 - Shipping without ffmpeg sidecar in the NSIS bundle
-- Batch export: titles, burn-in captions, dip-to-black fade mode, live player fade preview, fancy re-encode UI beyond quality presets
+- Batch export: titles, burn-in captions, dip-to-black as a separate fade **mode**, fancy re-encode UI beyond quality presets
+- (Done, do not re-litigate:) soft VTT sidecars, clip-edge fades + live preview, Speed markers + export + speed-warped solo timeline
 
 ---
 

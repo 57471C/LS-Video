@@ -498,6 +498,21 @@ async fn load_tspz_bundle(
     .map_err(|e| format!("Blocking task panicked: {e}"))?
 }
 
+/// Source-time speed range within a segment [start, end) at constant `rate`.
+#[derive(Clone, serde::Deserialize)]
+struct SpeedRange {
+    #[serde(default, alias = "startTime")]
+    start: f64,
+    #[serde(default, alias = "endTime")]
+    end: f64,
+    #[serde(default = "default_speed_rate", alias = "speedValue")]
+    rate: f64,
+}
+
+fn default_speed_rate() -> f64 {
+    1.0
+}
+
 #[derive(serde::Deserialize)]
 struct VideoSegment {
     path: String,
@@ -512,6 +527,100 @@ struct VideoSegment {
     /// Soft clip-edge fade-out (seconds) ending at segment end. 0 / omit = no fade.
     #[serde(default, alias = "fadeOutSec")]
     fade_out_sec: Option<f64>,
+    /// Optional constant-rate sub-ranges in source time (for Speed markers).
+    /// When empty / all rate≈1, treated as a normal trim.
+    #[serde(default, alias = "speedRanges")]
+    speed_ranges: Option<Vec<SpeedRange>>,
+}
+
+/// atempo only accepts 0.5–2.0; chain for rates outside that band.
+fn build_atempo_filter(rate: f64) -> String {
+    let mut r = rate.max(0.01);
+    let mut parts: Vec<String> = Vec::new();
+    while r > 2.0 + 1e-6 {
+        parts.push("atempo=2.0".into());
+        r /= 2.0;
+    }
+    while r < 0.5 - 1e-6 {
+        parts.push("atempo=0.5".into());
+        r *= 2.0;
+    }
+    parts.push(format!("atempo={:.4}", r));
+    parts.join(",")
+}
+
+/// Output duration of a source span played at `rate`.
+fn speed_output_duration(source_span: f64, rate: f64) -> f64 {
+    let r = rate.max(0.01);
+    (source_span / r).max(0.01)
+}
+
+/// Sort/clamp/fill speed ranges so they form a contiguous partition of [start, end].
+/// Gaps filled at rate 1.0. Overlaps resolved by later range winning at the boundary.
+fn normalize_speed_ranges(start: f64, end: f64, raw: &[SpeedRange]) -> Vec<SpeedRange> {
+    let mut pts: Vec<(f64, f64)> = raw
+        .iter()
+        .map(|sr| {
+            let a = sr.start.max(start).min(end);
+            (a, sr.rate.clamp(0.25, 4.0))
+        })
+        .filter(|(a, _)| *a < end - 1e-6)
+        .collect();
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Dedupe same start — keep last rate
+    let mut dedup: Vec<(f64, f64)> = Vec::new();
+    for p in pts {
+        if let Some(last) = dedup.last_mut() {
+            if (last.0 - p.0).abs() < 1e-4 {
+                *last = p;
+                continue;
+            }
+        }
+        dedup.push(p);
+    }
+    let mut out: Vec<SpeedRange> = Vec::new();
+    let mut cursor = start;
+    let mut rate = 1.0;
+    if let Some(&(t0, r0)) = dedup.first() {
+        if (t0 - start).abs() < 1e-4 {
+            rate = r0;
+        }
+    }
+    for (t, r) in &dedup {
+        if *t > cursor + 1e-4 {
+            out.push(SpeedRange {
+                start: cursor,
+                end: *t,
+                rate,
+            });
+            cursor = *t;
+        }
+        rate = *r;
+        cursor = cursor.max(*t);
+    }
+    if cursor < end - 1e-4 {
+        out.push(SpeedRange {
+            start: cursor,
+            end,
+            rate,
+        });
+    }
+    if out.is_empty() {
+        out.push(SpeedRange {
+            start,
+            end,
+            rate: 1.0,
+        });
+    }
+    println!(
+        "[export_queue_job] speed ranges [{:.3}..{:.3}]: {:?}",
+        start,
+        end,
+        out.iter()
+            .map(|s| format!("[{:.3},{:.3})@{:.3}", s.start, s.end, s.rate))
+            .collect::<Vec<_>>()
+    );
+    out
 }
 
 /// Build ffmpeg video/audio fade filter strings for a trimmed segment (timeline t=0..dur).
@@ -980,8 +1089,21 @@ async fn export_queue_job(
             };
             let fade_in = segment.fade_in_sec.unwrap_or(0.0).max(0.0);
             let fade_out = segment.fade_out_sec.unwrap_or(0.0).max(0.0);
+
+            // Contiguous partition of [start, end] on Speed marker times
+            let raw_ranges = segment.speed_ranges.clone().unwrap_or_default();
+            let speed_ranges = normalize_speed_ranges(start, end, &raw_ranges);
+            let has_variable_speed = speed_ranges
+                .iter()
+                .any(|sr| (sr.rate - 1.0).abs() > 0.01);
+            let output_seg_dur: f64 = speed_ranges
+                .iter()
+                .map(|sr| speed_output_duration(sr.end - sr.start, sr.rate))
+                .sum();
+            // Fades apply on OUTPUT timeline after speed (correct export length first)
             let has_fades = fade_in > 0.001 || fade_out > 0.001;
-            let (fade_vf, fade_af) = build_segment_fade_filters(seg_dur, fade_in, fade_out);
+            let (fade_vf, fade_af) =
+                build_segment_fade_filters(output_seg_dur.max(0.01), fade_in, fade_out);
 
             let is_full = start <= 0.001
                 && (end <= 0.0
@@ -994,11 +1116,11 @@ async fn export_queue_job(
 
             let mut made = false;
 
-            // Stream copy only when no soft fades (filters require reencode)
-            if !has_fades && is_full && prefer_copy && !strip_audio {
+            // Stream copy only when no soft fades and no speed changes
+            if !has_fades && !has_variable_speed && is_full && prefer_copy && !strip_audio {
                 cleaned_paths.push(segment.path.clone());
                 made = true;
-            } else if !has_fades && is_full && prefer_copy && strip_audio {
+            } else if !has_fades && !has_variable_speed && is_full && prefer_copy && strip_audio {
                 // Full file, strip audio only
                 let args = vec![
                     "-y".into(),
@@ -1025,6 +1147,297 @@ async fn export_queue_job(
             }
 
             if !made {
+                // --- Variable speed path: split on Speed markers, setpts/atempo, concat, then fade ---
+                if has_variable_speed {
+                    // Each run: trim ONLY [sr.start, sr.end), then speed that piece alone.
+                    // Output piece duration MUST be span/rate (explicit -t after filters).
+                    let mut speed_temps: Vec<std::path::PathBuf> = Vec::new();
+                    for (ri, sr) in speed_ranges.iter().enumerate() {
+                        let piece = temp_dir.join(format!(
+                            "batch_spd_{}_{}_{}.mp4",
+                            i, ri, unique_id
+                        ));
+                        let piece_str = piece.to_string_lossy().to_string();
+                        let span = (sr.end - sr.start).max(0.01);
+                        let rate = sr.rate.clamp(0.25, 4.0);
+                        let out_dur = speed_output_duration(span, rate);
+                        println!(
+                            "[export_queue_job] seg{} run{} trim [{:.3},{:.3}) span={:.3} rate={:.3} -> out_dur={:.3}",
+                            i, ri, sr.start, sr.end, span, rate, out_dur
+                        );
+                        // Input seek + duration first, then setpts/atempo on that slice only.
+                        // setpts alone does not drop frames; -t out_dur caps the encode length.
+                        let mut rargs: Vec<String> = vec![
+                            "-y".into(),
+                            "-ss".into(),
+                            format!("{:.6}", sr.start),
+                            "-i".into(),
+                            segment.path.clone(),
+                            "-t".into(),
+                            format!("{:.6}", span),
+                        ];
+                        if (rate - 1.0).abs() > 0.01 {
+                            rargs.push("-vf".into());
+                            rargs.push(format!(
+                                "setpts=(PTS-STARTPTS)/{:.6}",
+                                rate
+                            ));
+                        } else {
+                            // 1x: reset PTS only (no time stretch)
+                            rargs.push("-vf".into());
+                            rargs.push("setpts=PTS-STARTPTS".into());
+                        }
+                        rargs.extend([
+                            "-c:v".into(),
+                            "libx264".into(),
+                            "-pix_fmt".into(),
+                            "yuv420p".into(),
+                            "-crf".into(),
+                            crf.into(),
+                            "-preset".into(),
+                            preset.into(),
+                        ]);
+                        if strip_audio {
+                            rargs.push("-an".into());
+                        } else if (rate - 1.0).abs() > 0.01 {
+                            rargs.push("-af".into());
+                            rargs.push(build_atempo_filter(rate));
+                            rargs.extend([
+                                "-c:a".into(),
+                                "aac".into(),
+                                "-b:a".into(),
+                                "128k".into(),
+                            ]);
+                        } else {
+                            rargs.extend([
+                                "-c:a".into(),
+                                "aac".into(),
+                                "-b:a".into(),
+                                "128k".into(),
+                            ]);
+                        }
+                        // Force output length = source_span / rate (prevents ~10s from 5s@2x frame count)
+                        rargs.push("-t".into());
+                        rargs.push(format!("{:.6}", out_dur));
+                        rargs.push(piece_str.clone());
+                        let out = tauri::async_runtime::block_on(
+                            app.shell()
+                                .sidecar("ffmpeg")
+                                .map_err(|e| e.to_string())?
+                                .args(rargs)
+                                .output(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if !out.status.success() {
+                            for c in &speed_temps {
+                                let _ = std::fs::remove_file(c);
+                            }
+                            for c in &temp_clips {
+                                let _ = std::fs::remove_file(c);
+                            }
+                            return Err(format_ffmpeg_output_error(
+                                &format!("Failed speed range {} on segment {}", ri, i),
+                                &out,
+                            ));
+                        }
+                        speed_temps.push(piece);
+                    }
+
+                    // Concat speed pieces
+                    let speed_concat_list =
+                        temp_dir.join(format!("batch_spd_list_{}_{}.txt", i, unique_id));
+                    let speed_concat_out =
+                        temp_dir.join(format!("batch_spd_cat_{}_{}.mp4", i, unique_id));
+                    {
+                        use std::io::Write;
+                        let mut lf = std::fs::File::create(&speed_concat_list)
+                            .map_err(|e| e.to_string())?;
+                        for p in &speed_temps {
+                            let formatted = p.to_string_lossy().replace('\\', "/");
+                            writeln!(lf, "file '{}'", formatted).map_err(|e| e.to_string())?;
+                        }
+                        lf.flush().map_err(|e| e.to_string())?;
+                    }
+                    let list_str = speed_concat_list.to_string_lossy().to_string();
+                    let cat_str = speed_concat_out.to_string_lossy().to_string();
+                    let cat_args = vec![
+                        "-y".into(),
+                        "-f".into(),
+                        "concat".into(),
+                        "-safe".into(),
+                        "0".into(),
+                        "-i".into(),
+                        list_str.clone(),
+                        "-c".into(),
+                        "copy".into(),
+                        cat_str.clone(),
+                    ];
+                    let mut cat_ok = false;
+                    if let Ok(out) = tauri::async_runtime::block_on(
+                        app.shell()
+                            .sidecar("ffmpeg")
+                            .map_err(|e| e.to_string())?
+                            .args(cat_args)
+                            .output(),
+                    ) {
+                        cat_ok = out.status.success();
+                    }
+                    if !cat_ok {
+                        // Reencode concat fallback
+                        let mut cargs = vec!["-y".to_string()];
+                        let mut fc = String::new();
+                        let n = speed_temps.len();
+                        for (pi, p) in speed_temps.iter().enumerate() {
+                            cargs.push("-i".into());
+                            cargs.push(p.to_string_lossy().to_string());
+                            if strip_audio {
+                                fc.push_str(&format!("[{}:v]", pi));
+                            } else {
+                                fc.push_str(&format!("[{}:v][{}:a]", pi, pi));
+                            }
+                        }
+                        if strip_audio {
+                            fc.push_str(&format!("concat=n={}:v=1:a=0[v]", n));
+                        } else {
+                            fc.push_str(&format!("concat=n={}:v=1:a=1[v][a]", n));
+                        }
+                        cargs.push("-filter_complex".into());
+                        cargs.push(fc);
+                        cargs.push("-map".into());
+                        cargs.push("[v]".into());
+                        if !strip_audio {
+                            cargs.push("-map".into());
+                            cargs.push("[a]".into());
+                        }
+                        cargs.extend([
+                            "-c:v".into(),
+                            "libx264".into(),
+                            "-pix_fmt".into(),
+                            "yuv420p".into(),
+                            "-crf".into(),
+                            crf.into(),
+                            "-preset".into(),
+                            preset.into(),
+                        ]);
+                        if strip_audio {
+                            cargs.push("-an".into());
+                        } else {
+                            cargs.extend([
+                                "-c:a".into(),
+                                "aac".into(),
+                                "-b:a".into(),
+                                "128k".into(),
+                            ]);
+                        }
+                        cargs.push(cat_str.clone());
+                        let out = tauri::async_runtime::block_on(
+                            app.shell()
+                                .sidecar("ffmpeg")
+                                .map_err(|e| e.to_string())?
+                                .args(cargs)
+                                .output(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if !out.status.success() {
+                            let _ = std::fs::remove_file(&speed_concat_list);
+                            for c in &speed_temps {
+                                let _ = std::fs::remove_file(c);
+                            }
+                            for c in &temp_clips {
+                                let _ = std::fs::remove_file(c);
+                            }
+                            return Err(format_ffmpeg_output_error(
+                                &format!("Failed to concat speed ranges for segment {}", i),
+                                &out,
+                            ));
+                        }
+                    }
+
+                    // Apply edge fades on OUTPUT timeline after speed
+                    if has_fades {
+                        let mut fargs: Vec<String> = vec![
+                            "-y".into(),
+                            "-i".into(),
+                            cat_str.clone(),
+                        ];
+                        if let Some(ref vf) = fade_vf {
+                            fargs.push("-vf".into());
+                            fargs.push(vf.clone());
+                        }
+                        fargs.extend([
+                            "-c:v".into(),
+                            "libx264".into(),
+                            "-pix_fmt".into(),
+                            "yuv420p".into(),
+                            "-crf".into(),
+                            crf.into(),
+                            "-preset".into(),
+                            preset.into(),
+                        ]);
+                        if strip_audio {
+                            fargs.push("-an".into());
+                        } else if let Some(ref af) = fade_af {
+                            fargs.push("-af".into());
+                            fargs.push(af.clone());
+                            fargs.extend([
+                                "-c:a".into(),
+                                "aac".into(),
+                                "-b:a".into(),
+                                "128k".into(),
+                            ]);
+                        } else {
+                            fargs.extend([
+                                "-c:a".into(),
+                                "aac".into(),
+                                "-b:a".into(),
+                                "128k".into(),
+                            ]);
+                        }
+                        fargs.push(temp_out_str.clone());
+                        let out = tauri::async_runtime::block_on(
+                            app.shell()
+                                .sidecar("ffmpeg")
+                                .map_err(|e| e.to_string())?
+                                .args(fargs)
+                                .output(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let _ = std::fs::remove_file(&speed_concat_list);
+                        let _ = std::fs::remove_file(&speed_concat_out);
+                        for c in &speed_temps {
+                            let _ = std::fs::remove_file(c);
+                        }
+                        if !out.status.success() {
+                            for c in &temp_clips {
+                                let _ = std::fs::remove_file(c);
+                            }
+                            return Err(format_ffmpeg_output_error(
+                                &format!("Failed fade after speed on segment {}", i),
+                                &out,
+                            ));
+                        }
+                        temp_clips.push(temp_out.clone());
+                        cleaned_paths.push(temp_out_str.clone());
+                        made = true;
+                    } else {
+                        // Move concat result to temp_out
+                        let _ = std::fs::remove_file(&speed_concat_list);
+                        for c in &speed_temps {
+                            let _ = std::fs::remove_file(c);
+                        }
+                        if std::fs::rename(&speed_concat_out, &temp_out).is_err() {
+                            std::fs::copy(&speed_concat_out, &temp_out)
+                                .map_err(|e| e.to_string())?;
+                            let _ = std::fs::remove_file(&speed_concat_out);
+                        }
+                        temp_clips.push(temp_out.clone());
+                        cleaned_paths.push(temp_out_str.clone());
+                        made = true;
+                    }
+                }
+            }
+
+            if !made {
                 // Trim (and optionally reencode). Prefer reencode for HEVC/proxy safety.
                 let mut args: Vec<String> = vec!["-y".into()];
                 if start > 0.001 {
@@ -1039,8 +1452,8 @@ async fn export_queue_job(
                     args.push(seg_dur.to_string());
                 }
 
-                // Stream copy only when no fades
-                if prefer_copy && !has_fades {
+                // Stream copy only when no fades / no speed
+                if prefer_copy && !has_fades && !has_variable_speed {
                     args.push("-c".into());
                     args.push("copy".into());
                     if strip_audio {

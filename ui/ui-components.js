@@ -7,6 +7,7 @@ const ICONS = {
 	loopType: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>`,
 	inType: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><path d="M5 4h4v16H5zM19 12l-6-6v12z"/></svg>`,
 	outType: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><path d="M15 4h4v16h-4zM5 12l6 6V6z"/></svg>`,
+	speedType: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
 };
 
 const openMarkerMenu = (e, index) => {
@@ -236,15 +237,32 @@ const getActiveRunMarkerViewEntries = () => {
 	const multi = !!(run?.segments && run.segments.length > 1);
 
 	if (!multi) {
-		return (markers || []).map((m, i) => ({
-			queueIndex: activeQueueIndex,
-			markerIndex: i,
-			marker: m,
-			displayTime: m.startTime,
-			isSequence: false,
-			clipIn: typeof clipInTime !== "undefined" ? clipInTime : 0,
-			clipOut: typeof clipOutTime !== "undefined" ? clipOutTime : 0,
-		}));
+		// Start column matches playhead clock: effective (output) time when Speed warps timeline
+		const speedModel =
+			typeof window.getActiveSpeedTimelineModel === "function"
+				? window.getActiveSpeedTimelineModel()
+				: null;
+		return (markers || []).map((m, i) => {
+			let displayTime = m.startTime;
+			if (
+				speedModel?.hasSpeedMarkers &&
+				typeof window.sourceTimeToEffective === "function"
+			) {
+				displayTime = window.sourceTimeToEffective(
+					m.startTime,
+					speedModel.ranges,
+				);
+			}
+			return {
+				queueIndex: activeQueueIndex,
+				markerIndex: i,
+				marker: m,
+				displayTime,
+				isSequence: !!speedModel?.hasSpeedMarkers,
+				clipIn: typeof clipInTime !== "undefined" ? clipInTime : 0,
+				clipOut: typeof clipOutTime !== "undefined" ? clipOutTime : 0,
+			};
+		});
 	}
 
 	const entries = [];
@@ -474,8 +492,9 @@ const updateMarkersListImmediate = () => {
               <div class="relative inline-block text-left marker-type-dropdown">
                 <button type="button" class="inline-flex items-center justify-center p-1 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer gap-1 marker-context-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-view-index="${i}" id="type-btn-${i}">
                   ${marker.type === "loop" ? `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none">${marker.loopCount || 1}</span>` : ""}
+                  ${marker.type === "speed" ? `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-orange-100 dark:bg-orange-950/40 text-orange-700 dark:text-orange-400 border border-orange-200 dark:border-orange-800/50 leading-none select-none">${typeof window.formatSpeedBadge === "function" ? window.formatSpeedBadge(marker.speedValue) : `${Number(marker.speedValue) || 1}x`}</span>` : ""}
                   ${boundFadeBadge}
-                  ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "in" || marker.type === "start" ? ICONS.inType : marker.type === "out" || marker.type === "end" ? ICONS.outType : ICONS.standard}
+                  ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "speed" ? ICONS.speedType : marker.type === "in" || marker.type === "start" ? ICONS.inType : marker.type === "out" || marker.type === "end" ? ICONS.outType : ICONS.standard}
                 </button>
                 <div id="type-menu-${i}" class="hidden absolute left-0 mt-1 w-52 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
                   <div class="py-1">
@@ -494,6 +513,20 @@ const updateMarkersListImmediate = () => {
                              maxlength="2" 
                              data-marker-index="${entry.markerIndex}"
                              data-queue-index="${entry.queueIndex}">
+                    </button>
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="speed">
+                      <span class="flex items-center gap-2">${ICONS.speedType} Speed</span>
+                      <span class="inline-flex items-center gap-0.5" title="Playback rate (0.25–4)">
+                        <input type="text" inputmode="decimal"
+                               class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 speed-value-input"
+                               value="${typeof window.clampSpeedValue === "function" ? window.clampSpeedValue(marker.speedValue ?? 1).toFixed(2).replace(/\.?0+$/, "") || "1" : String(marker.speedValue || 1)}"
+                               placeholder="1"
+                               maxlength="5"
+                               data-marker-index="${entry.markerIndex}"
+                               data-queue-index="${entry.queueIndex}"
+                               title="Speed multiplier e.g. 0.5, 1, 1.5, 2">
+                        <span class="text-[10px] text-zinc-500 font-normal">x</span>
+                      </span>
                     </button>
                     <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="in">
                       <span class="flex items-center gap-2">${ICONS.inType} Set Clip In</span>
@@ -763,6 +796,12 @@ const updateMarkersListImmediate = () => {
 						if (type === "loop") {
 							m.loopCount = m.loopCount || 1;
 						}
+						if (type === "speed") {
+							m.speedValue =
+								typeof window.clampSpeedValue === "function"
+									? window.clampSpeedValue(m.speedValue ?? 1)
+									: Number(m.speedValue) || 1;
+						}
 						// Non-active clip in/out still reshapes the join spine
 						if (typeof window.syncClipBoundsFromMarkers === "function") {
 							window.syncClipBoundsFromMarkers(qIndex);
@@ -931,6 +970,85 @@ const updateMarkersListImmediate = () => {
 			markerTableBody
 				.querySelectorAll(".clip-fade-out-input")
 				.forEach((input) => bindClipFadeInput(input, "out"));
+
+			// Speed rate inputs (like loop count)
+			const applySpeedValueEdit = (
+				qIndex,
+				markerIndex,
+				rawValue,
+				{ reRender = false } = {},
+			) => {
+				const rate =
+					typeof window.clampSpeedValue === "function"
+						? window.clampSpeedValue(rawValue)
+						: Math.min(4, Math.max(0.25, Number(rawValue) || 1));
+				const list =
+					qIndex === activeQueueIndex
+						? markers
+						: videoQueue[qIndex]?.appState?.markers;
+				if (!list?.[markerIndex]) return rate;
+				list[markerIndex].type = "speed";
+				list[markerIndex].speedValue = rate;
+				if (qIndex === activeQueueIndex && videoQueue[qIndex]?.appState) {
+					videoQueue[qIndex].appState.markers = markers;
+				}
+				if (typeof saveLocalState === "function") saveLocalState();
+				if (typeof window.applyActiveSpeedPlayback === "function") {
+					window.applyActiveSpeedPlayback();
+				}
+				if (typeof window.scheduleSpeedTimelineRebuild === "function") {
+					window.scheduleSpeedTimelineRebuild();
+				}
+				if (reRender) {
+					if (typeof window.updateMarkersList === "function") {
+						window.updateMarkersList();
+					}
+					if (typeof window.paintTimelineMarkersAndShading === "function") {
+						window.paintTimelineMarkersAndShading();
+					}
+				}
+				return rate;
+			};
+
+			markerTableBody.querySelectorAll(".speed-value-input").forEach((input) => {
+				const markerIndex = parseInt(
+					input.getAttribute("data-marker-index"),
+					10,
+				);
+				const qIndex = parseInt(
+					input.getAttribute("data-queue-index") ?? activeQueueIndex,
+					10,
+				);
+				const commit = (reRender) => {
+					const rate = applySpeedValueEdit(qIndex, markerIndex, input.value, {
+						reRender,
+					});
+					input.value = String(rate);
+					return rate;
+				};
+				input.addEventListener("click", (e) => e.stopPropagation());
+				input.addEventListener("mousedown", (e) => e.stopPropagation());
+				input.addEventListener("mouseup", (e) => e.stopPropagation());
+				input.addEventListener("focus", (e) => e.stopPropagation());
+				input.addEventListener("keydown", (e) => {
+					e.stopPropagation();
+					if (e.key === "Enter") {
+						e.preventDefault();
+						commit(true);
+						for (const menu of document.querySelectorAll('[id^="type-menu-"]')) {
+							menu.classList.add("hidden");
+						}
+					}
+				});
+				input.addEventListener("blur", (e) => {
+					e.stopPropagation();
+					commit(true);
+				});
+				input.addEventListener("change", (e) => {
+					e.stopPropagation();
+					commit(true);
+				});
+			});
 		}
 
 		DOM.markersTableFoot = document.getElementById("markersTableFoot");
