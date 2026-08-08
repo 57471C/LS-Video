@@ -516,6 +516,10 @@ struct VideoSegment {
 
 /// Build ffmpeg video/audio fade filter strings for a trimmed segment (timeline t=0..dur).
 /// Soft filters only — no titles, burn-in, or ASS.
+///
+/// Fade-out reaches full black a few frames *before* the cut: if `st+d` lands
+/// exactly on the last sample, frame rounding often leaves the final frame
+/// mid-grey instead of black. Early completion holds solid black to the end.
 fn build_segment_fade_filters(
     dur: f64,
     fade_in: f64,
@@ -528,14 +532,20 @@ fn build_segment_fade_filters(
     let fo = fade_out.max(0.0);
     if fi > 0.001 {
         let d = fi.min(safe_dur);
-        vf.push(format!("fade=t=in:st=0:d={}", d));
-        af.push(format!("afade=t=in:st=0:d={}", d));
+        vf.push(format!("fade=t=in:st=0:d={:.4}", d));
+        af.push(format!("afade=t=in:st=0:d={:.4}", d));
     }
     if fo > 0.001 {
         let d = fo.min(safe_dur);
-        let st = (safe_dur - d).max(0.0);
-        vf.push(format!("fade=t=out:st={}:d={}", st, d));
-        af.push(format!("afade=t=out:st={}:d={}", st, d));
+        // ~2 frames @ 24fps, capped so short fades still work
+        let early = 0.08_f64.min(d * 0.2).min((safe_dur * 0.5).max(0.0));
+        let st = (safe_dur - d - early).max(0.0);
+        // color=black ensures solid black (not residual RGB from source)
+        vf.push(format!(
+            "fade=t=out:st={:.4}:d={:.4}:color=black",
+            st, d
+        ));
+        af.push(format!("afade=t=out:st={:.4}:d={:.4}", st, d));
     }
     (
         if vf.is_empty() {

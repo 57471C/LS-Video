@@ -6623,12 +6623,17 @@ async function executeExport(presetType) {
 			}
 			if (fadeInSec > 0) {
 				const d = Math.min(fadeInSec, Math.max(0.01, duration));
-				vfParts.push(`fade=t=in:st=0:d=${d}`);
+				vfParts.push(`fade=t=in:st=0:d=${d.toFixed(4)}`);
 			}
 			if (fadeOutSec > 0) {
 				const d = Math.min(fadeOutSec, Math.max(0.01, duration));
-				const st = Math.max(0, duration - d);
-				vfParts.push(`fade=t=out:st=${st}:d=${d}`);
+				// Reach solid black slightly before the cut (frame rounding otherwise
+				// leaves the last frame mid-grey). Black holds through the remaining samples.
+				const early = Math.min(0.08, d * 0.2, Math.max(0, duration * 0.5));
+				const st = Math.max(0, duration - d - early);
+				vfParts.push(
+					`fade=t=out:st=${st.toFixed(4)}:d=${d.toFixed(4)}:color=black`,
+				);
 			}
 
 			let crf = "26";
@@ -6664,12 +6669,13 @@ async function executeExport(presetType) {
 			const afParts = [];
 			if (fadeInSec > 0) {
 				const d = Math.min(fadeInSec, Math.max(0.01, duration));
-				afParts.push(`afade=t=in:st=0:d=${d}`);
+				afParts.push(`afade=t=in:st=0:d=${d.toFixed(4)}`);
 			}
 			if (fadeOutSec > 0) {
 				const d = Math.min(fadeOutSec, Math.max(0.01, duration));
-				const st = Math.max(0, duration - d);
-				afParts.push(`afade=t=out:st=${st}:d=${d}`);
+				const early = Math.min(0.08, d * 0.2, Math.max(0, duration * 0.5));
+				const st = Math.max(0, duration - d - early);
+				afParts.push(`afade=t=out:st=${st.toFixed(4)}:d=${d.toFixed(4)}`);
 			}
 			if (afParts.length) {
 				args.push("-af", afParts.join(","), "-c:a", "aac", "-b:a", "128k");
