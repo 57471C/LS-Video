@@ -44,6 +44,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 - CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`, `buildWebVttFromCues`
 - Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt` (soft `.vtt` next to each job output; failure never fails the video job)
 - Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge`, `computeClipEdgeFadeGain`, `applyClipEdgeFadePreview`, `paintClipFadeZonesOnHost` / `refreshClipFadeTimelineZones`. UX is **marker type menu** (Set Clip In / Out + `#.#s` like Loop); badge on in/out **row**. Live preview ramps opacity/volume; detailed timeline shows purple fade zones.
+- Speed markers: type `speed` + `speedValue` (0.25–4). Badge `1.5x`. `getActiveSpeedMarker` / `buildSpeedRanges` / `applyActiveSpeedPlayback`. Slider snaps to active range; drag updates that marker’s rate. Export: `speed_ranges` on `VideoSegment` → setpts + atempo per sub-range, then edge fades.
 
 If something “does nothing” in the markers table, check window exports first.
 

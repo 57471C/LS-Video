@@ -709,6 +709,32 @@ const paintTimelineMarkersAndShading = () => {
 			}
 		}
 
+		// Speed range highlight until next Speed marker (or end)
+		if (marker.type === "speed") {
+			let endTime = duration;
+			for (let k = i + 1; k < entries.length; k++) {
+				if (entries[k].type === "speed") {
+					endTime = entries[k].startTime;
+					break;
+				}
+			}
+			const endPct = (endTime / duration) * 100;
+			const widthPct = endPct - markerLeft;
+			if (widthPct > 0) {
+				const speedShade = document.createElement("div");
+				speedShade.className =
+					"absolute top-0 bottom-0 bg-orange-500/10 dark:bg-orange-400/10";
+				speedShade.style.left = `${markerLeft}%`;
+				speedShade.style.width = `${widthPct}%`;
+				speedShade.title = `Speed ${
+					typeof window.formatSpeedBadge === "function"
+						? window.formatSpeedBadge(marker.speedValue)
+						: `${marker.speedValue || 1}x`
+				}`;
+				fragment.appendChild(speedShade);
+			}
+		}
+
 		// Create line element
 		const lineElement = document.createElement("div");
 		lineElement.style.left = `${markerLeft}%`;
@@ -725,6 +751,9 @@ const paintTimelineMarkersAndShading = () => {
 		} else if (marker.type === "loop") {
 			lineElement.className =
 				"absolute top-0 bottom-0 w-[2px] bg-cyan-500 dark:bg-cyan-400 z-10";
+		} else if (marker.type === "speed") {
+			lineElement.className =
+				"absolute top-0 bottom-0 w-[2px] bg-orange-500 dark:bg-orange-400 z-10";
 		} else {
 			// normal annotation marker
 			lineElement.className =
