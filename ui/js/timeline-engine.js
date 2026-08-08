@@ -709,29 +709,36 @@ const paintTimelineMarkersAndShading = () => {
 			}
 		}
 
-		// Speed range highlight until next Speed marker (or end)
+		// Speed range highlight until next Speed marker (or end).
+		// Skip orange tint when rate is 1x (normal speed — no visual zone).
 		if (marker.type === "speed") {
-			let endTime = duration;
-			for (let k = i + 1; k < entries.length; k++) {
-				if (entries[k].type === "speed") {
-					endTime = entries[k].startTime;
-					break;
+			const rate =
+				typeof window.clampSpeedValue === "function"
+					? window.clampSpeedValue(marker.speedValue ?? 1)
+					: Number(marker.speedValue) || 1;
+			if (Math.abs(rate - 1) > 0.01) {
+				let endTime = duration;
+				for (let k = i + 1; k < entries.length; k++) {
+					if (entries[k].type === "speed") {
+						endTime = entries[k].startTime;
+						break;
+					}
 				}
-			}
-			const endPct = (endTime / duration) * 100;
-			const widthPct = endPct - markerLeft;
-			if (widthPct > 0) {
-				const speedShade = document.createElement("div");
-				speedShade.className =
-					"absolute top-0 bottom-0 bg-orange-500/10 dark:bg-orange-400/10";
-				speedShade.style.left = `${markerLeft}%`;
-				speedShade.style.width = `${widthPct}%`;
-				speedShade.title = `Speed ${
-					typeof window.formatSpeedBadge === "function"
-						? window.formatSpeedBadge(marker.speedValue)
-						: `${marker.speedValue || 1}x`
-				}`;
-				fragment.appendChild(speedShade);
+				const endPct = (endTime / duration) * 100;
+				const widthPct = endPct - markerLeft;
+				if (widthPct > 0) {
+					const speedShade = document.createElement("div");
+					speedShade.className =
+						"absolute top-0 bottom-0 bg-orange-500/10 dark:bg-orange-400/10";
+					speedShade.style.left = `${markerLeft}%`;
+					speedShade.style.width = `${widthPct}%`;
+					speedShade.title = `Speed ${
+						typeof window.formatSpeedBadge === "function"
+							? window.formatSpeedBadge(marker.speedValue)
+							: `${marker.speedValue || 1}x`
+					}`;
+					fragment.appendChild(speedShade);
+				}
 			}
 		}
 
