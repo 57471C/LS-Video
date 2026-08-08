@@ -39,16 +39,72 @@ const toggleTypeDropdown = (e, index) => {
 	}
 };
 
+/** Hide all clip-edge fade popouts (footer menus; may be portaled to body). */
+const closeAllClipFadeMenus = () => {
+	for (const menu of document.querySelectorAll(".clip-fade-menu")) {
+		menu.classList.add("hidden");
+		// Clear fixed coords so the next open remeasures cleanly
+		menu.style.top = "";
+		menu.style.left = "";
+		menu.style.bottom = "";
+		menu.style.right = "";
+	}
+};
+window.closeAllClipFadeMenus = closeAllClipFadeMenus;
+
+/**
+ * Position a fade menu with fixed coords (same escape hatch as marker type menus).
+ * Footer sits in #markersList { overflow-y:auto } — absolute menus are clipped otherwise.
+ */
+const positionClipFadeMenu = (trigger, menu) => {
+	if (!trigger || !menu) return;
+	// Portal to body so sticky/overflow ancestors cannot clip the popout
+	if (menu.parentElement !== document.body) {
+		document.body.appendChild(menu);
+	}
+	menu.classList.remove("hidden");
+	// Measure after un-hiding
+	const rect = trigger.getBoundingClientRect();
+	const menuHeight = menu.offsetHeight || 120;
+	const menuWidth = menu.offsetWidth || 176;
+	const gap = 4;
+	const spaceAbove = rect.top;
+	const spaceBelow = window.innerHeight - rect.bottom;
+	let top;
+	// Prefer above when the control is near the bottom (footer case)
+	if (spaceAbove >= menuHeight + gap || spaceAbove >= spaceBelow) {
+		top = rect.top - menuHeight - gap;
+	} else {
+		top = rect.bottom + gap;
+	}
+	let left = rect.left;
+	if (left + menuWidth > window.innerWidth - 8) {
+		left = Math.max(8, window.innerWidth - menuWidth - 8);
+	}
+	if (left < 8) left = 8;
+	if (top < 4) top = 4;
+	if (top + menuHeight > window.innerHeight - 4) {
+		top = Math.max(4, window.innerHeight - menuHeight - 4);
+	}
+	menu.style.position = "fixed";
+	menu.style.top = `${top}px`;
+	menu.style.left = `${left}px`;
+	menu.style.bottom = "auto";
+	menu.style.right = "auto";
+	menu.style.zIndex = "10000";
+};
+
 document.addEventListener("click", (e) => {
 	const menus = document.querySelectorAll('[id^="type-menu-"]');
 	for (const menu of menus) {
 		menu.classList.add("hidden");
 	}
-	// Clip-edge fade menus (footer Clip In / Clip Out) — close unless click is inside one
-	if (!e.target.closest?.(".clip-fade-control")) {
-		for (const menu of document.querySelectorAll(".clip-fade-menu")) {
-			menu.classList.add("hidden");
-		}
+	// Fade menus: keep open when clicking inside menu or its trigger control
+	if (
+		!e.target.closest?.(".clip-fade-control") &&
+		!e.target.closest?.(".clip-fade-menu")
+	) {
+		closeAllClipFadeMenus();
 	}
 });
 
@@ -59,9 +115,17 @@ document.addEventListener(
 		for (const menu of menus) {
 			menu.classList.add("hidden");
 		}
+		// Fade menus are fixed/portaled — still dismiss on scroll so they do not float orphaned
+		closeAllClipFadeMenus();
 	},
 	{ passive: true, capture: true },
 );
+
+document.addEventListener("keydown", (e) => {
+	if (e.key === "Escape") {
+		closeAllClipFadeMenus();
+	}
+});
 
 const updateStickyOffsets = () => {
 	const activeLoggingPanel = document.getElementById("activeLoggingPanel");
@@ -840,21 +904,22 @@ const renderClipBoundFadeControl = (edge, label, timeStr, fadeSec, timeId) => {
 				);
 	const badge = fadeBadgeHtml(fadeSec);
 	const menuTitle = edge === "out" ? "Fade Out" : "Fade In";
+	// Menu is portaled to document.body on open (fixed) — keep a shell here only until first open.
 	return `
     <span class="relative inline-flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400 clip-fade-control" data-fade-edge="${edge}">
-      <button type="button" class="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer clip-fade-trigger" data-fade-edge="${edge}" title="${menuTitle} (export filter)">
+      <button type="button" class="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer clip-fade-trigger" data-fade-edge="${edge}" title="${menuTitle} (export filter) — click to set duration">
         <span>${label}:</span>
         <span id="${timeId}" class="font-mono font-bold text-zinc-900 dark:text-white">${timeStr}</span>
         ${badge}
       </button>
-      <div id="clip-fade-menu-${edge}" class="clip-fade-menu hidden absolute left-0 bottom-full mb-1 w-44 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
+      <div id="clip-fade-menu-${edge}" class="clip-fade-menu hidden w-44 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none" role="menu" data-fade-edge="${edge}">
         <div class="py-1">
           <div class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">${menuTitle}</div>
           <div class="px-3 py-1.5 flex items-center gap-1.5">
             <input type="text" inputmode="decimal"
               class="w-12 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-input"
               value="${defaultSec}" maxlength="5" data-fade-edge="${edge}"
-              title="Seconds (e.g. 0.5, 1.0, 1.5)">
+              title="Seconds (e.g. 0.5, 1.0, 1.5)" autocomplete="off">
             <span class="text-xs text-zinc-500">s</span>
             <button type="button" class="btn btn-xs btn-outline-secondary py-0.5 px-2 h-6 text-[11px] clip-fade-apply" data-fade-edge="${edge}">Set</button>
           </div>
@@ -868,11 +933,10 @@ const renderClipBoundFadeControl = (edge, label, timeStr, fadeSec, timeId) => {
 
 /** Wire footer Clip In/Out fade menus after footer.innerHTML. */
 const bindClipFadeFooterControls = () => {
-	const closeAllFadeMenus = () => {
-		for (const menu of document.querySelectorAll(".clip-fade-menu")) {
-			menu.classList.add("hidden");
-		}
-	};
+	// Drop orphaned portaled menus from a previous footer render (ids would collide)
+	for (const orphan of document.querySelectorAll("body > .clip-fade-menu")) {
+		orphan.remove();
+	}
 
 	const applyFade = (edge, rawValue) => {
 		const def =
@@ -891,6 +955,7 @@ const bindClipFadeFooterControls = () => {
 			videoQueue[activeQueueIndex][key] = parsed;
 			if (typeof saveLocalState === "function") saveLocalState();
 		}
+		closeAllClipFadeMenus();
 		if (typeof window.updateVideoTimeSummary === "function") {
 			window.updateVideoTimeSummary();
 		}
@@ -907,12 +972,22 @@ const bindClipFadeFooterControls = () => {
 			videoQueue[activeQueueIndex][key] = 0;
 			if (typeof saveLocalState === "function") saveLocalState();
 		}
+		closeAllClipFadeMenus();
 		if (typeof window.updateVideoTimeSummary === "function") {
 			window.updateVideoTimeSummary();
 		}
 	};
 
-	for (const trigger of document.querySelectorAll(".clip-fade-trigger")) {
+	const footer = document.getElementById("markersTableFoot");
+	if (!footer) return;
+
+	// Single delegated handler on the footer (survives until next footer rebuild)
+	if (footer.dataset.clipFadeBound === "1") {
+		// Rebuilt via innerHTML — dataset is gone with the old node; always re-bind
+	}
+	footer.dataset.clipFadeBound = "1";
+
+	for (const trigger of footer.querySelectorAll(".clip-fade-trigger")) {
 		trigger.addEventListener("click", (e) => {
 			e.preventDefault();
 			e.stopPropagation();
@@ -920,26 +995,40 @@ const bindClipFadeFooterControls = () => {
 			const menu = document.getElementById(`clip-fade-menu-${edge}`);
 			if (!menu) return;
 			const wasHidden = menu.classList.contains("hidden");
-			closeAllFadeMenus();
+			closeAllClipFadeMenus();
 			// Also close marker type menus
 			for (const m of document.querySelectorAll('[id^="type-menu-"]')) {
 				m.classList.add("hidden");
 			}
 			if (wasHidden) {
-				menu.classList.remove("hidden");
-				const input = menu.querySelector(".clip-fade-input");
-				if (input) {
-					// First-time set: input already prefills 1.0 when fade is 0
-					input.focus();
-					input.select();
-				}
+				positionClipFadeMenu(trigger, menu);
+				// Focus after layout so WebView2 does not scroll the overflow list and dismiss
+				requestAnimationFrame(() => {
+					const input = menu.querySelector(".clip-fade-input");
+					if (input && !menu.classList.contains("hidden")) {
+						input.focus({ preventScroll: true });
+						input.select();
+					}
+				});
 			}
 		});
+	}
+
+	// Menus may live under footer or body after portal — bind both shells
+	const menus = [
+		...footer.querySelectorAll(".clip-fade-menu"),
+		...document.querySelectorAll("body > .clip-fade-menu"),
+	];
+	for (const menu of menus) {
+		menu.addEventListener("click", (e) => e.stopPropagation());
+		menu.addEventListener("mousedown", (e) => e.stopPropagation());
+		menu.addEventListener("pointerdown", (e) => e.stopPropagation());
 	}
 
 	for (const input of document.querySelectorAll(".clip-fade-input")) {
 		input.addEventListener("click", (e) => e.stopPropagation());
 		input.addEventListener("mousedown", (e) => e.stopPropagation());
+		input.addEventListener("pointerdown", (e) => e.stopPropagation());
 		input.addEventListener("keydown", (e) => {
 			e.stopPropagation();
 			if (e.key === "Enter") {
@@ -947,7 +1036,8 @@ const bindClipFadeFooterControls = () => {
 				const edge = input.getAttribute("data-fade-edge");
 				applyFade(edge, input.value);
 			} else if (e.key === "Escape") {
-				closeAllFadeMenus();
+				e.preventDefault();
+				closeAllClipFadeMenus();
 			}
 		});
 	}
@@ -957,7 +1047,9 @@ const bindClipFadeFooterControls = () => {
 			e.preventDefault();
 			e.stopPropagation();
 			const edge = btn.getAttribute("data-fade-edge");
-			const menu = document.getElementById(`clip-fade-menu-${edge}`);
+			const menu =
+				document.getElementById(`clip-fade-menu-${edge}`) ||
+				btn.closest(".clip-fade-menu");
 			const input = menu?.querySelector(".clip-fade-input");
 			applyFade(edge, input?.value);
 		});
