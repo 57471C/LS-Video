@@ -979,6 +979,9 @@ const updateMarkersListImmediate = () => {
 				if (typeof window.applyActiveSpeedPlayback === "function") {
 					window.applyActiveSpeedPlayback();
 				}
+				if (typeof window.scheduleSpeedTimelineRebuild === "function") {
+					window.scheduleSpeedTimelineRebuild();
+				}
 				if (reRender) {
 					if (typeof window.updateMarkersList === "function") {
 						window.updateMarkersList();

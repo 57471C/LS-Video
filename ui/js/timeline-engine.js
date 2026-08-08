@@ -49,9 +49,17 @@ const getTimelineDuration = () => {
 	if (isSequenceMode()) {
 		if (typeof window.getActiveJoinRun === "function") {
 			const run = window.getActiveJoinRun();
+			// totalDuration is already speed-warped per segment
 			if (run?.totalDuration > 0) return run.totalDuration;
 		}
 		return Math.max(window._sequenceMode?.totalDuration || 0, 0.001);
+	}
+	// Solo: effective duration (integral dt/rate) so 2x regions are shorter on the ruler
+	if (typeof window.getActiveSpeedTimelineModel === "function") {
+		const model = window.getActiveSpeedTimelineModel();
+		if (model?.effectiveDuration > 0) {
+			return Math.max(model.effectiveDuration, 0.001);
+		}
 	}
 	const p = getPlayer();
 	return Math.max(p?.duration || 0, 0.001);
@@ -202,6 +210,16 @@ const getPlayheadTime = () => {
 	) {
 		return window.getSequencePlayheadTime();
 	}
+	// Solo: effective (speed-warped) time so playhead matches ruler
+	if (typeof window.getActiveSpeedTimelineModel === "function") {
+		const model = window.getActiveSpeedTimelineModel();
+		const p = getPlayer();
+		if (model?.hasSpeedMarkers && p) {
+			return typeof window.sourceTimeToEffective === "function"
+				? window.sourceTimeToEffective(p.currentTime || 0, model.ranges)
+				: p.currentTime || 0;
+		}
+	}
 	const p = getPlayer();
 	return p?.currentTime || 0;
 };
@@ -214,7 +232,22 @@ const seekTimelineTime = (time) => {
 		return;
 	}
 	const p = getPlayer();
-	if (p) p.currentTime = time;
+	if (!p) return;
+	// Solo: timeline time is effective — map to source before seeking media
+	if (
+		typeof window.getActiveSpeedTimelineModel === "function" &&
+		typeof window.effectiveTimeToSource === "function"
+	) {
+		const model = window.getActiveSpeedTimelineModel();
+		if (model?.hasSpeedMarkers) {
+			p.currentTime = window.effectiveTimeToSource(
+				Math.max(0, Number(time) || 0),
+				model.ranges,
+			);
+			return;
+		}
+	}
+	p.currentTime = time;
 };
 
 // Cache the live HTMLCollection of playheads globally so we don't query the DOM repeatedly in the animation frame
@@ -611,7 +644,7 @@ const paintTimelineMarkersAndShading = () => {
 
 	const fragment = document.createDocumentFragment();
 
-	// Start/End Trimming Shading (solo mode, local times from markers or clip bounds)
+	// Start/End Trimming Shading (solo mode). Map to effective time when Speed warps the ruler.
 	if (!isSequenceMode()) {
 		const startMarker = entries.find(
 			(m) => m.type === "in" || m.type === "start",
@@ -624,16 +657,30 @@ const paintTimelineMarkersAndShading = () => {
 					? clipInTime
 					: 0;
 		const soloOut =
-			endMarker && endMarker.startTime > 0 && endMarker.startTime < duration
+			endMarker && endMarker.startTime > 0
 				? endMarker.startTime
-				: typeof clipOutTime !== "undefined" &&
-						clipOutTime > 0 &&
-						clipOutTime < duration
+				: typeof clipOutTime !== "undefined" && clipOutTime > 0
 					? clipOutTime
 					: 0;
 
-		if (soloIn > 0) {
-			const startPct = (soloIn / duration) * 100;
+		const speedModel =
+			typeof window.getActiveSpeedTimelineModel === "function"
+				? window.getActiveSpeedTimelineModel()
+				: null;
+		const toEff = (srcT) => {
+			if (
+				speedModel?.hasSpeedMarkers &&
+				typeof window.sourceTimeToEffective === "function"
+			) {
+				return window.sourceTimeToEffective(srcT, speedModel.ranges);
+			}
+			return srcT;
+		};
+		const soloInEff = toEff(soloIn);
+		const soloOutEff = soloOut > 0 ? toEff(soloOut) : 0;
+
+		if (soloInEff > 0 && duration > 0) {
+			const startPct = (soloInEff / duration) * 100;
 			const startShade = document.createElement("div");
 			startShade.className =
 				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
@@ -642,14 +689,40 @@ const paintTimelineMarkersAndShading = () => {
 			fragment.appendChild(startShade);
 		}
 
-		if (soloOut > 0 && soloOut < duration) {
-			const endPct = (soloOut / duration) * 100;
+		if (soloOutEff > 0 && soloOutEff < duration) {
+			const endPct = (soloOutEff / duration) * 100;
 			const endShade = document.createElement("div");
 			endShade.className =
 				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
 			endShade.style.left = `${endPct}%`;
 			endShade.style.width = `${100 - endPct}%`;
 			fragment.appendChild(endShade);
+		}
+
+		// Speed zones on effective timebase (2x sections are shorter; 1x has no tint)
+		if (speedModel?.hasSpeedMarkers && speedModel.ranges?.length) {
+			let effCursor = 0;
+			const effDur = Math.max(0.001, speedModel.effectiveDuration || duration);
+			for (const r of speedModel.ranges) {
+				const rate = Math.max(0.01, Number(r.rate) || 1);
+				const outSpan = (Math.max(0, r.end - r.start)) / rate;
+				if (Math.abs(rate - 1) > 0.01 && outSpan > 0) {
+					const left = (effCursor / effDur) * 100;
+					const width = (outSpan / effDur) * 100;
+					const speedShade = document.createElement("div");
+					speedShade.className =
+						"absolute top-0 bottom-0 bg-orange-500/10 dark:bg-orange-400/10";
+					speedShade.style.left = `${left}%`;
+					speedShade.style.width = `${width}%`;
+					speedShade.title = `Speed ${
+						typeof window.formatSpeedBadge === "function"
+							? window.formatSpeedBadge(rate)
+							: `${rate}x`
+					}`;
+					fragment.appendChild(speedShade);
+				}
+				effCursor += outSpan;
+			}
 		}
 		// Fade zones are painted only on the filmstrip (refreshClipFadeTimelineZones),
 		// not on this marker overlay — avoids double purple stacks.
@@ -709,42 +782,28 @@ const paintTimelineMarkersAndShading = () => {
 			}
 		}
 
-		// Speed range highlight until next Speed marker (or end).
-		// Skip orange tint when rate is 1x (normal speed — no visual zone).
-		if (marker.type === "speed") {
-			const rate =
-				typeof window.clampSpeedValue === "function"
-					? window.clampSpeedValue(marker.speedValue ?? 1)
-					: Number(marker.speedValue) || 1;
-			if (Math.abs(rate - 1) > 0.01) {
-				let endTime = duration;
-				for (let k = i + 1; k < entries.length; k++) {
-					if (entries[k].type === "speed") {
-						endTime = entries[k].startTime;
-						break;
-					}
-				}
-				const endPct = (endTime / duration) * 100;
-				const widthPct = endPct - markerLeft;
-				if (widthPct > 0) {
-					const speedShade = document.createElement("div");
-					speedShade.className =
-						"absolute top-0 bottom-0 bg-orange-500/10 dark:bg-orange-400/10";
-					speedShade.style.left = `${markerLeft}%`;
-					speedShade.style.width = `${widthPct}%`;
-					speedShade.title = `Speed ${
-						typeof window.formatSpeedBadge === "function"
-							? window.formatSpeedBadge(marker.speedValue)
-							: `${marker.speedValue || 1}x`
-					}`;
-					fragment.appendChild(speedShade);
+		// Speed zones painted once from shared ranges (effective timebase) below.
+
+		// Create line element — marker times mapped to effective % when speed-warped
+		const lineLeftPct = (() => {
+			if (
+				!isSequenceMode() &&
+				typeof window.getActiveSpeedTimelineModel === "function" &&
+				typeof window.sourceTimeToEffective === "function"
+			) {
+				const model = window.getActiveSpeedTimelineModel();
+				if (model?.hasSpeedMarkers && model.effectiveDuration > 0) {
+					const eff = window.sourceTimeToEffective(
+						marker.startTime,
+						model.ranges,
+					);
+					return (eff / model.effectiveDuration) * 100;
 				}
 			}
-		}
-
-		// Create line element
+			return markerLeft;
+		})();
 		const lineElement = document.createElement("div");
-		lineElement.style.left = `${markerLeft}%`;
+		lineElement.style.left = `${lineLeftPct}%`;
 
 		if (
 			marker.type === "in" ||
