@@ -506,6 +506,59 @@ struct VideoSegment {
     /// Prefer `loop_count` from JS. `loopCount` accepted as alias only — never send both.
     #[serde(default, alias = "loopCount")]
     loop_count: Option<i32>,
+    /// Soft clip-edge fade-in (seconds) at segment start. 0 / omit = no fade.
+    #[serde(default, alias = "fadeInSec")]
+    fade_in_sec: Option<f64>,
+    /// Soft clip-edge fade-out (seconds) ending at segment end. 0 / omit = no fade.
+    #[serde(default, alias = "fadeOutSec")]
+    fade_out_sec: Option<f64>,
+}
+
+/// Build ffmpeg video/audio fade filter strings for a trimmed segment (timeline t=0..dur).
+/// Soft filters only — no titles, burn-in, or ASS.
+///
+/// Fade-out reaches full black a few frames *before* the cut: if `st+d` lands
+/// exactly on the last sample, frame rounding often leaves the final frame
+/// mid-grey instead of black. Early completion holds solid black to the end.
+fn build_segment_fade_filters(
+    dur: f64,
+    fade_in: f64,
+    fade_out: f64,
+) -> (Option<String>, Option<String>) {
+    let mut vf: Vec<String> = Vec::new();
+    let mut af: Vec<String> = Vec::new();
+    let safe_dur = dur.max(0.01);
+    let fi = fade_in.max(0.0);
+    let fo = fade_out.max(0.0);
+    if fi > 0.001 {
+        let d = fi.min(safe_dur);
+        vf.push(format!("fade=t=in:st=0:d={:.4}", d));
+        af.push(format!("afade=t=in:st=0:d={:.4}", d));
+    }
+    if fo > 0.001 {
+        let d = fo.min(safe_dur);
+        // ~2 frames @ 24fps, capped so short fades still work
+        let early = 0.08_f64.min(d * 0.2).min((safe_dur * 0.5).max(0.0));
+        let st = (safe_dur - d - early).max(0.0);
+        // color=black ensures solid black (not residual RGB from source)
+        vf.push(format!(
+            "fade=t=out:st={:.4}:d={:.4}:color=black",
+            st, d
+        ));
+        af.push(format!("afade=t=out:st={:.4}:d={:.4}", st, d));
+    }
+    (
+        if vf.is_empty() {
+            None
+        } else {
+            Some(vf.join(","))
+        },
+        if af.is_empty() {
+            None
+        } else {
+            Some(af.join(","))
+        },
+    )
 }
 
 #[tauri::command]
@@ -920,6 +973,16 @@ async fn export_queue_job(
                 ));
             }
 
+            let seg_dur = if end > start {
+                (end - start).max(0.01)
+            } else {
+                get_duration(&segment.path).unwrap_or(0.01).max(0.01)
+            };
+            let fade_in = segment.fade_in_sec.unwrap_or(0.0).max(0.0);
+            let fade_out = segment.fade_out_sec.unwrap_or(0.0).max(0.0);
+            let has_fades = fade_in > 0.001 || fade_out > 0.001;
+            let (fade_vf, fade_af) = build_segment_fade_filters(seg_dur, fade_in, fade_out);
+
             let is_full = start <= 0.001
                 && (end <= 0.0
                     || get_duration(&segment.path)
@@ -931,11 +994,11 @@ async fn export_queue_job(
 
             let mut made = false;
 
-            // Try stream copy when full file and copy quality (no trim)
-            if is_full && prefer_copy && !strip_audio {
+            // Stream copy only when no soft fades (filters require reencode)
+            if !has_fades && is_full && prefer_copy && !strip_audio {
                 cleaned_paths.push(segment.path.clone());
                 made = true;
-            } else if is_full && prefer_copy && strip_audio {
+            } else if !has_fades && is_full && prefer_copy && strip_audio {
                 // Full file, strip audio only
                 let args = vec![
                     "-y".into(),
@@ -972,12 +1035,12 @@ async fn export_queue_job(
                 args.push(segment.path.clone());
                 if end > 0.0 {
                     // duration-based -t is more reliable after -ss input seek than -to
-                    let dur = (end - start).max(0.01);
                     args.push("-t".into());
-                    args.push(dur.to_string());
+                    args.push(seg_dur.to_string());
                 }
 
-                if prefer_copy {
+                // Stream copy only when no fades
+                if prefer_copy && !has_fades {
                     args.push("-c".into());
                     args.push("copy".into());
                     if strip_audio {
@@ -1000,7 +1063,7 @@ async fn export_queue_job(
                 }
 
                 if !made {
-                    // Reencode fallback (HEVC / keyframe / mixed containers)
+                    // Reencode (HEVC / keyframe / mixed containers / soft fades)
                     let mut rargs: Vec<String> = vec!["-y".into()];
                     if start > 0.001 {
                         rargs.push("-ss".into());
@@ -1009,9 +1072,12 @@ async fn export_queue_job(
                     rargs.push("-i".into());
                     rargs.push(segment.path.clone());
                     if end > 0.0 {
-                        let dur = (end - start).max(0.01);
                         rargs.push("-t".into());
-                        rargs.push(dur.to_string());
+                        rargs.push(seg_dur.to_string());
+                    }
+                    if let Some(ref vf) = fade_vf {
+                        rargs.push("-vf".into());
+                        rargs.push(vf.clone());
                     }
                     rargs.extend([
                         "-c:v".into(),
@@ -1025,6 +1091,10 @@ async fn export_queue_job(
                     ]);
                     if strip_audio {
                         rargs.push("-an".into());
+                    } else if let Some(ref af) = fade_af {
+                        rargs.push("-af".into());
+                        rargs.push(af.clone());
+                        rargs.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
                     } else {
                         rargs.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
                     }

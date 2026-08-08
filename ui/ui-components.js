@@ -44,6 +44,10 @@ document.addEventListener("click", () => {
 	for (const menu of menus) {
 		menu.classList.add("hidden");
 	}
+	// Clean any leftover footer fade portals from older builds
+	for (const m of document.querySelectorAll("body > .clip-fade-menu")) {
+		m.remove();
+	}
 });
 
 document.addEventListener(
@@ -56,6 +60,97 @@ document.addEventListener(
 	},
 	{ passive: true, capture: true },
 );
+
+/**
+ * Badge HTML for clip-edge fade on marker rows (same visual language as loop ##).
+ * @param {number} fadeSec
+ * @returns {string}
+ */
+const fadeBadgeHtml = (fadeSec) => {
+	const label =
+		typeof window.formatFadeBadge === "function"
+			? window.formatFadeBadge(fadeSec)
+			: fadeSec > 0
+				? `${Number(fadeSec).toFixed(1)}s`
+				: "";
+	if (!label) return "";
+	return `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none" title="Clip-edge fade (export)">${label}</span>`;
+};
+
+/**
+ * Apply fade seconds for a queue source (and optionally set marker type to in/out).
+ * Like loop count edit: typing in the menu field commits the bound + duration.
+ * 0 / empty clears the fade (no export filter). Default display when unset is 0.
+ * @param {number} queueIndex
+ * @param {"in"|"out"} edge
+ * @param {unknown} rawValue
+ * @param {number} [markerIndex]
+ * @param {{ reRender?: boolean, setType?: boolean }} [opts]
+ * @returns {number} clamped seconds written
+ */
+const applyMarkerClipFadeEdit = (
+	queueIndex,
+	edge,
+	rawValue,
+	markerIndex = -1,
+	{ reRender = false, setType = true } = {},
+) => {
+	const raw = String(rawValue ?? "")
+		.trim()
+		.replace(",", ".");
+	let parsed = Number.parseFloat(raw);
+	if (raw === "" || !Number.isFinite(parsed) || parsed < 0) {
+		parsed = 0;
+	}
+	let written = 0;
+	if (typeof window.setVideoFadeSec === "function") {
+		written = window.setVideoFadeSec(edge, parsed, queueIndex);
+	} else if (typeof videoQueue !== "undefined" && videoQueue[queueIndex]) {
+		const key = edge === "out" ? "fadeOutSec" : "fadeInSec";
+		const n = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed * 10) / 10 : 0;
+		videoQueue[queueIndex][key] = n;
+		written = n;
+		if (typeof saveLocalState === "function") saveLocalState();
+	}
+
+	if (setType && markerIndex >= 0 && typeof videoQueue !== "undefined") {
+		const list =
+			queueIndex === activeQueueIndex
+				? typeof markers !== "undefined"
+					? markers
+					: videoQueue[queueIndex]?.appState?.markers
+				: videoQueue[queueIndex]?.appState?.markers;
+		if (list?.[markerIndex]) {
+			list[markerIndex].type = edge === "out" ? "out" : "in";
+			if (queueIndex === activeQueueIndex && typeof markers !== "undefined") {
+				// keep queue slot in sync
+				if (videoQueue[queueIndex]?.appState) {
+					videoQueue[queueIndex].appState.markers = markers;
+				}
+			}
+			if (typeof window.syncClipBoundsFromMarkers === "function") {
+				window.syncClipBoundsFromMarkers(queueIndex);
+			}
+		}
+	}
+
+	if (typeof saveLocalState === "function") saveLocalState();
+
+	if (reRender) {
+		if (typeof window.updateMarkersList === "function") {
+			window.updateMarkersList();
+		} else if (typeof updateMarkersList === "function") {
+			updateMarkersList();
+		}
+		if (typeof window.paintTimelineMarkersAndShading === "function") {
+			window.paintTimelineMarkersAndShading();
+		}
+		if (typeof window.scheduleJoinTimelineRebuild === "function") {
+			window.scheduleJoinTimelineRebuild();
+		}
+	}
+	return written;
+};
 
 const updateStickyOffsets = () => {
 	const activeLoggingPanel = document.getElementById("activeLoggingPanel");
@@ -308,6 +403,57 @@ const updateMarkersListImmediate = () => {
 					? `<span class="flex-shrink-0 text-[10px] font-bold text-zinc-400 dark:text-zinc-500" title="Clip ${entry.queueIndex + 1}">${entry.queueIndex + 1}</span>`
 					: "";
 
+			// Clip-edge fade on queue source; badge on in/out bound marker rows (like loop ##)
+			const boundVideo =
+				typeof videoQueue !== "undefined" ? videoQueue[entry.queueIndex] : null;
+			const boundFades =
+				typeof window.getVideoFadeSeconds === "function"
+					? window.getVideoFadeSeconds(boundVideo, entry.queueIndex)
+					: {
+							fadeInSec: Number(boundVideo?.fadeInSec) || 0,
+							fadeOutSec: Number(boundVideo?.fadeOutSec) || 0,
+						};
+			// Prefer raw stored values for badge so display matches menu even if clamp edge-cases
+			const fadeInShow =
+				boundFades.fadeInSec > 0
+					? boundFades.fadeInSec
+					: Math.max(0, Number(boundVideo?.fadeInSec) || 0);
+			const fadeOutShow =
+				boundFades.fadeOutSec > 0
+					? boundFades.fadeOutSec
+					: Math.max(0, Number(boundVideo?.fadeOutSec) || 0);
+			const isInBound = marker.type === "in" || marker.type === "start";
+			const isOutBound = marker.type === "out" || marker.type === "end";
+			// Also match bound by time (syncClipBounds may leave type while time is the out)
+			const clipInBoundT = Math.max(
+				0,
+				Number(boundVideo?.clipInTime) || entry.clipIn || 0,
+			);
+			const clipOutBoundT = Math.max(
+				0,
+				Number(boundVideo?.clipOutTime) || entry.clipOut || 0,
+			);
+			const nearIn =
+				!isInBound &&
+				!isOutBound &&
+				Math.abs((Number(marker.startTime) || 0) - clipInBoundT) < 0.051;
+			const nearOut =
+				!isOutBound &&
+				!isInBound &&
+				clipOutBoundT > 0 &&
+				Math.abs((Number(marker.startTime) || 0) - clipOutBoundT) < 0.051;
+			let boundFadeBadge = "";
+			if ((isInBound || nearIn) && fadeInShow > 0) {
+				boundFadeBadge = fadeBadgeHtml(fadeInShow);
+			} else if ((isOutBound || nearOut) && fadeOutShow > 0) {
+				boundFadeBadge = fadeBadgeHtml(fadeOutShow);
+			}
+			// Menu inputs: show current fade, or 0 when unset (no fade by default)
+			const fadeInInputVal =
+				fadeInShow > 0 ? Number(fadeInShow).toFixed(1) : "0";
+			const fadeOutInputVal =
+				fadeOutShow > 0 ? Number(fadeOutShow).toFixed(1) : "0";
+
 			rows.push(`
         <tr class="marker-row ${rowBgClass} border-b border-zinc-200 dark:border-zinc-700" data-view-index="${i}" data-queue-index="${entry.queueIndex}" data-marker-index="${entry.markerIndex}" data-sequence="${entry.isSequence ? "1" : "0"}">
           <td class="pl-1 sm:pl-2 py-2">
@@ -328,9 +474,10 @@ const updateMarkersListImmediate = () => {
               <div class="relative inline-block text-left marker-type-dropdown">
                 <button type="button" class="inline-flex items-center justify-center p-1 rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors focus:outline-none cursor-pointer gap-1 marker-context-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-view-index="${i}" id="type-btn-${i}">
                   ${marker.type === "loop" ? `<span class="px-1 py-0.5 text-[9px] sm:text-[10px] font-bold rounded bg-cyan-100 dark:bg-cyan-950/40 text-cyan-800 dark:text-cyan-400 border border-cyan-200 dark:border-cyan-800/50 leading-none select-none">${marker.loopCount || 1}</span>` : ""}
-                  ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "in" ? ICONS.inType : ICONS.outType}
+                  ${boundFadeBadge}
+                  ${marker.type === "standard" ? ICONS.standard : marker.type === "jump" ? ICONS.jumpType : marker.type === "loop" ? ICONS.loopType : marker.type === "in" || marker.type === "start" ? ICONS.inType : marker.type === "out" || marker.type === "end" ? ICONS.outType : ICONS.standard}
                 </button>
-                <div id="type-menu-${i}" class="hidden absolute left-0 mt-1 w-40 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
+                <div id="type-menu-${i}" class="hidden absolute left-0 mt-1 w-52 rounded-md shadow-lg bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 focus:outline-none z-50">
                   <div class="py-1">
                     <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="standard">
                       ${ICONS.standard} Standard
@@ -348,11 +495,35 @@ const updateMarkersListImmediate = () => {
                              data-marker-index="${entry.markerIndex}"
                              data-queue-index="${entry.queueIndex}">
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="in">
-                      ${ICONS.inType} Set Clip In
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="in">
+                      <span class="flex items-center gap-2">${ICONS.inType} Set Clip In</span>
+                      <span class="inline-flex items-center gap-0.5" title="Fade-in seconds (0 = none)">
+                        <input type="text" inputmode="decimal"
+                               class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-in-input"
+                               value="${fadeInInputVal}"
+                               placeholder="0"
+                               maxlength="4"
+                               data-marker-index="${entry.markerIndex}"
+                               data-queue-index="${entry.queueIndex}"
+                               data-fade-edge="in"
+                               title="Fade in (s). 0 = none">
+                        <span class="text-[10px] text-zinc-500 font-normal">s</span>
+                      </span>
                     </button>
-                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="out">
-                      ${ICONS.outType} Set Clip Out
+                    <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="out">
+                      <span class="flex items-center gap-2">${ICONS.outType} Set Clip Out</span>
+                      <span class="inline-flex items-center gap-0.5" title="Fade-out seconds (0 = none)">
+                        <input type="text" inputmode="decimal"
+                               class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 clip-fade-out-input"
+                               value="${fadeOutInputVal}"
+                               placeholder="0"
+                               maxlength="4"
+                               data-marker-index="${entry.markerIndex}"
+                               data-queue-index="${entry.queueIndex}"
+                               data-fade-edge="out"
+                               title="Fade out (s). 0 = none">
+                        <span class="text-[10px] text-zinc-500 font-normal">s</span>
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -708,6 +879,58 @@ const updateMarkersListImmediate = () => {
 					input.value = String(finalVal).padStart(2, "0");
 				});
 			});
+
+			// Clip-edge fade inputs on Set Clip In / Set Clip Out (same pattern as loop ##)
+			const bindClipFadeInput = (input, edge) => {
+				const markerIndex = parseInt(
+					input.getAttribute("data-marker-index"),
+					10,
+				);
+				const qIndex = parseInt(
+					input.getAttribute("data-queue-index") ?? activeQueueIndex,
+					10,
+				);
+				const commit = (reRender) => {
+					const written = applyMarkerClipFadeEdit(
+						qIndex,
+						edge,
+						input.value,
+						markerIndex,
+						{ reRender, setType: true },
+					);
+					input.value = written > 0 ? written.toFixed(1) : "0";
+					return written;
+				};
+				input.addEventListener("click", (e) => e.stopPropagation());
+				input.addEventListener("mousedown", (e) => e.stopPropagation());
+				input.addEventListener("mouseup", (e) => e.stopPropagation());
+				input.addEventListener("focus", (e) => e.stopPropagation());
+				input.addEventListener("keydown", (e) => {
+					e.stopPropagation();
+					if (e.key === "Enter") {
+						e.preventDefault();
+						commit(true);
+						// Close type menu after commit
+						const menus = document.querySelectorAll('[id^="type-menu-"]');
+						for (const menu of menus) menu.classList.add("hidden");
+					}
+				});
+				input.addEventListener("blur", (e) => {
+					e.stopPropagation();
+					commit(true);
+				});
+				input.addEventListener("change", (e) => {
+					e.stopPropagation();
+					commit(true);
+				});
+			};
+
+			markerTableBody
+				.querySelectorAll(".clip-fade-in-input")
+				.forEach((input) => bindClipFadeInput(input, "in"));
+			markerTableBody
+				.querySelectorAll(".clip-fade-out-input")
+				.forEach((input) => bindClipFadeInput(input, "out"));
 		}
 
 		DOM.markersTableFoot = document.getElementById("markersTableFoot");
@@ -795,11 +1018,10 @@ const updateVideoTimeSummary = () => {
 		}
 
 		const playerEl = getMarkersPlayer();
-		const activeVideo =
-			(typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) || {};
 
 		// Multi-clip join run: footer reflects SEQUENCE bounds (sum of segment lengths).
 		// Solo / unjoined: keep per-clip Clip In / Out / Duration behaviour.
+		// Fades are NOT edited in the footer — use marker type menu (like Loop).
 		const multi =
 			typeof window.isActiveRunMulti === "function" &&
 			window.isActiveRunMulti();

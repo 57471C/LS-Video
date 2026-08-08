@@ -47,7 +47,7 @@ const LEGACY_PROJECT_STORAGE_KEY = "timeStudyData";
 
 /**
  * Normalize a queue entry: map legacy processStartTime/processEndTime → clipIn/Out,
- * and ensure joinedToNext is a boolean (default false).
+ * ensure joinedToNext is a boolean (default false), and default clip-edge fades to 0.
  * Mutates and returns the video object.
  */
 const normalizeVideoClipBounds = (video) => {
@@ -59,6 +59,19 @@ const normalizeVideoClipBounds = (video) => {
 		video.clipOutTime = video.processEndTime || 0;
 	}
 	video.joinedToNext = !!video.joinedToNext;
+	// Clip-edge fades (seconds); 0 = no fade. Same level as clipIn/Out.
+	if (video.fadeInSec === undefined || video.fadeInSec === null) {
+		video.fadeInSec = 0;
+	} else {
+		const n = Number(video.fadeInSec);
+		video.fadeInSec = Number.isFinite(n) && n > 0 ? Math.round(n * 10) / 10 : 0;
+	}
+	if (video.fadeOutSec === undefined || video.fadeOutSec === null) {
+		video.fadeOutSec = 0;
+	} else {
+		const n = Number(video.fadeOutSec);
+		video.fadeOutSec = Number.isFinite(n) && n > 0 ? Math.round(n * 10) / 10 : 0;
+	}
 	delete video.processStartTime;
 	delete video.processEndTime;
 	return video;
@@ -204,6 +217,8 @@ const loadLocalState = () => {
 						videoFilePath: "",
 						clipInTime: 0,
 						clipOutTime: 0,
+						fadeInSec: 0,
+						fadeOutSec: 0,
 						joinedToNext: false,
 						appState: { markers: [] },
 					},
@@ -240,6 +255,8 @@ const loadLocalState = () => {
 				videoFilePath: "",
 				clipInTime: 0,
 				clipOutTime: 0,
+				fadeInSec: 0,
+				fadeOutSec: 0,
 				joinedToNext: false,
 				appState: { markers: [] },
 			},

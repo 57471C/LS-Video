@@ -651,9 +651,12 @@ const paintTimelineMarkersAndShading = () => {
 			endShade.style.width = `${100 - endPct}%`;
 			fragment.appendChild(endShade);
 		}
+		// Fade zones are painted only on the filmstrip (refreshClipFadeTimelineZones),
+		// not on this marker overlay — avoids double purple stacks.
 	} else {
 		// Multi: per-row grey outside [clipIn, clipOut] lives on each track via
 		// applySegmentWindow (.sequence-row-dim). Overlay only draws flush join cuts.
+		// Fade zones: filmstrip shells only (not overlay).
 		const run = window.getActiveJoinRun?.();
 		if (run?.segments && duration > 0) {
 			for (let i = 1; i < run.segments.length; i += 1) {
@@ -732,6 +735,11 @@ const paintTimelineMarkersAndShading = () => {
 	}
 
 	overlay.appendChild(fragment);
+
+	// Also refresh per-track filmstrip fade zones (join shells + solo tracks)
+	if (typeof window.refreshClipFadeTimelineZones === "function") {
+		window.refreshClipFadeTimelineZones();
+	}
 };
 
 /**

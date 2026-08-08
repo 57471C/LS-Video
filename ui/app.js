@@ -260,6 +260,457 @@ const getClipSegmentDuration = (video, queueIndex) => {
 	return Math.max(0, outT - inT);
 };
 
+/** Default fade duration for Clip In/Out menu (0 = no fade until user sets one). */
+export const FADE_DEFAULT_SEC = 0;
+/** Hard ceiling so fades cannot swallow a long clip. */
+export const FADE_HARD_MAX_SEC = 10;
+
+/**
+ * Normalize a fade duration to one decimal place; non-positive → 0.
+ * @param {unknown} value
+ * @returns {number}
+ */
+export function normalizeFadeSec(value) {
+	const v = Number(value);
+	if (!Number.isFinite(v) || v <= 0) return 0;
+	return Math.round(v * 10) / 10;
+}
+
+/**
+ * Clamp fade seconds: min 0, max min(10, half of clip duration).
+ * @param {unknown} value
+ * @param {number} [clipDurationSec=0]
+ * @returns {number}
+ */
+export function clampFadeSec(value, clipDurationSec = 0) {
+	let v = normalizeFadeSec(value);
+	if (v <= 0) return 0;
+	const dur = Math.max(0, Number(clipDurationSec) || 0);
+	const maxByHalf = dur > 0 ? dur / 2 : FADE_HARD_MAX_SEC;
+	const max = Math.min(FADE_HARD_MAX_SEC, maxByHalf);
+	if (v > max) v = Math.round(max * 10) / 10;
+	return v;
+}
+
+/**
+ * Format fade badge text (e.g. "1.0s", "0.5s"). Empty when no fade.
+ * @param {unknown} sec
+ * @returns {string}
+ */
+export function formatFadeBadge(sec) {
+	const v = normalizeFadeSec(sec);
+	if (v <= 0) return "";
+	return `${v.toFixed(1)}s`;
+}
+
+/**
+ * Read / clamp fade pair for a queue item given its export duration.
+ * @param {object|null|undefined} video
+ * @param {number} [queueIndex]
+ * @returns {{ fadeInSec: number, fadeOutSec: number }}
+ */
+export function getVideoFadeSeconds(video, queueIndex) {
+	const dur =
+		typeof getClipSegmentDuration === "function"
+			? getClipSegmentDuration(video, queueIndex)
+			: 0;
+	return {
+		fadeInSec: clampFadeSec(video?.fadeInSec, dur),
+		fadeOutSec: clampFadeSec(video?.fadeOutSec, dur),
+	};
+}
+
+/**
+ * Set fade on the active (or given) queue item and persist.
+ * @param {"in"|"out"} edge
+ * @param {number|string} seconds
+ * @param {number} [queueIndex]
+ * @returns {number} Clamped value written
+ */
+export function setVideoFadeSec(edge, seconds, queueIndex = activeQueueIndex) {
+	if (
+		typeof videoQueue === "undefined" ||
+		queueIndex < 0 ||
+		!videoQueue[queueIndex]
+	) {
+		return 0;
+	}
+	const video = videoQueue[queueIndex];
+	const dur = getClipSegmentDuration(video, queueIndex);
+	const clamped = clampFadeSec(seconds, dur);
+	if (edge === "out") {
+		video.fadeOutSec = clamped;
+	} else {
+		video.fadeInSec = clamped;
+	}
+	if (typeof saveLocalState === "function") saveLocalState();
+	// Live preview + timeline zones when active clip fades change
+	if (queueIndex === activeQueueIndex) {
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	}
+	if (typeof window.paintTimelineMarkersAndShading === "function") {
+		window.paintTimelineMarkersAndShading();
+	}
+	if (typeof window.refreshClipFadeTimelineZones === "function") {
+		window.refreshClipFadeTimelineZones();
+	}
+	return clamped;
+}
+window.setVideoFadeSec = setVideoFadeSec;
+window.formatFadeBadge = formatFadeBadge;
+window.clampFadeSec = clampFadeSec;
+window.getVideoFadeSeconds = getVideoFadeSeconds;
+window.FADE_DEFAULT_SEC = FADE_DEFAULT_SEC;
+
+/**
+ * Compute linear fade gain (0..1) for local media time within [clipIn, clipOut].
+ * @param {number} localTime
+ * @param {number} clipIn
+ * @param {number} clipOut
+ * @param {number} fadeInSec
+ * @param {number} fadeOutSec
+ * @returns {number}
+ */
+export function computeClipEdgeFadeGain(
+	localTime,
+	clipIn,
+	clipOut,
+	fadeInSec,
+	fadeOutSec,
+) {
+	const t = Number(localTime) || 0;
+	const inT = Math.max(0, Number(clipIn) || 0);
+	let outT = Math.max(0, Number(clipOut) || 0);
+	const fi = Math.max(0, Number(fadeInSec) || 0);
+	const fo = Math.max(0, Number(fadeOutSec) || 0);
+	if (outT > 0 && outT <= inT) outT = inT;
+	let gain = 1;
+	// Outside active clip: fully faded (matches export bounds)
+	if (t < inT - 1e-4) return 0;
+	if (outT > inT && t > outT + 1e-4) return 0;
+	if (fi > 0) {
+		const endIn = inT + fi;
+		if (t <= inT) gain = 0;
+		else if (t < endIn) gain = Math.min(gain, (t - inT) / fi);
+	}
+	if (fo > 0 && outT > inT) {
+		const startOut = outT - fo;
+		if (t >= outT) gain = 0;
+		else if (t > startOut) gain = Math.min(gain, (outT - t) / fo);
+	}
+	if (!Number.isFinite(gain)) return 1;
+	return Math.max(0, Math.min(1, gain));
+}
+window.computeClipEdgeFadeGain = computeClipEdgeFadeGain;
+
+/**
+ * Shared fade-zone time ranges (source-local seconds).
+ * Fade-in: [clipIn, clipIn+fadeInSec]; fade-out: [clipOut-fadeOutSec, clipOut].
+ * Clamped to [clipIn, clipOut]. Returns null ranges when no fade / invalid bounds.
+ * @returns {{ fadeIn: { start: number, end: number }|null, fadeOut: { start: number, end: number }|null, clipIn: number, clipOut: number }}
+ */
+export function computeClipFadeZoneRanges(
+	clipIn,
+	clipOut,
+	fadeInSec,
+	fadeOutSec,
+) {
+	const inT = Math.max(0, Number(clipIn) || 0);
+	let outT = Math.max(0, Number(clipOut) || 0);
+	if (outT <= inT) {
+		return { fadeIn: null, fadeOut: null, clipIn: inT, clipOut: outT };
+	}
+	const activeDur = outT - inT;
+	const fi = Math.min(Math.max(0, Number(fadeInSec) || 0), activeDur);
+	const fo = Math.min(Math.max(0, Number(fadeOutSec) || 0), activeDur);
+	return {
+		clipIn: inT,
+		clipOut: outT,
+		fadeIn: fi > 1e-4 ? { start: inT, end: inT + fi } : null,
+		fadeOut:
+			fo > 1e-4
+				? { start: Math.max(inT, outT - fo), end: outT }
+				: null,
+	};
+}
+window.computeClipFadeZoneRanges = computeClipFadeZoneRanges;
+
+/** RAF id for smooth fade preview while playing. */
+window._clipFadePreviewRaf = null;
+
+/**
+ * Apply live soft-fade preview on the player (opacity + volume).
+ * Does not change volumeLevel / mute preference — only player.volume while fading.
+ */
+window.applyClipEdgeFadePreview = () => {
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		window.player ||
+		document.getElementById("my_video");
+	if (!videoEl) return;
+	if (window._sequenceHandoffInProgress) return;
+
+	const qIndex =
+		typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	const video =
+		typeof videoQueue !== "undefined" ? videoQueue[qIndex] : null;
+	const fades =
+		typeof getVideoFadeSeconds === "function"
+			? getVideoFadeSeconds(video, qIndex)
+			: {
+					fadeInSec: Number(video?.fadeInSec) || 0,
+					fadeOutSec: Number(video?.fadeOutSec) || 0,
+				};
+	const inT =
+		typeof getClipInTime === "function"
+			? getClipInTime(video)
+			: Math.max(0, Number(video?.clipInTime) || 0);
+	let outT =
+		typeof getClipOutTime === "function"
+			? getClipOutTime(video, qIndex)
+			: Math.max(0, Number(video?.clipOutTime) || 0);
+	if (outT <= 0 && videoEl.duration) outT = videoEl.duration;
+
+	const gain = computeClipEdgeFadeGain(
+		videoEl.currentTime,
+		inT,
+		outT,
+		fades.fadeInSec,
+		fades.fadeOutSec,
+	);
+
+	// Video opacity (visual fade)
+	videoEl.style.opacity = String(gain);
+
+	// Audio: scale user volume preference; never leave volumeLevel stuck at 0
+	const baseVol = clampVolume01(
+		typeof volumeLevel !== "undefined" ? volumeLevel : 1,
+		1,
+	);
+	const userMuted = !!videoEl.muted;
+	if (!userMuted) {
+		videoEl.volume = baseVol * gain;
+	}
+	// If muted, leave volume alone (mute handles silence)
+	window._clipFadePreviewGain = gain;
+};
+
+/** Start/stop RAF loop for smooth fade ramps during playback. */
+window.ensureClipFadePreviewLoop = () => {
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		window.player ||
+		document.getElementById("my_video");
+	if (!videoEl) return;
+	const tick = () => {
+		window._clipFadePreviewRaf = null;
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+		if (videoEl && !videoEl.paused && !videoEl.ended) {
+			window._clipFadePreviewRaf = requestAnimationFrame(tick);
+		}
+	};
+	if (!videoEl.paused && !videoEl.ended) {
+		if (!window._clipFadePreviewRaf) {
+			window._clipFadePreviewRaf = requestAnimationFrame(tick);
+		}
+	} else if (window._clipFadePreviewRaf) {
+		cancelAnimationFrame(window._clipFadePreviewRaf);
+		window._clipFadePreviewRaf = null;
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	}
+};
+
+/**
+ * Paint fade-in / fade-out zone overlays on a host (filmstrip only — never audio / marker overlay).
+ * Geometry from computeClipFadeZoneRanges:
+ *   fade-in  [clipIn, clipIn+fi]
+ *   fade-out [clipOut-fo, clipOut]
+ * @param {HTMLElement} host
+ * @param {{ clipIn: number, clipOut: number, fadeInSec: number, fadeOutSec: number, mediaRelative?: boolean, mediaDur?: number }} opts
+ */
+window.paintClipFadeZonesOnHost = (host, opts) => {
+	if (!host) return;
+	for (const old of host.querySelectorAll(".sequence-fade-zone")) {
+		old.remove();
+	}
+	const ranges = computeClipFadeZoneRanges(
+		opts?.clipIn,
+		opts?.clipOut,
+		opts?.fadeInSec,
+		opts?.fadeOutSec,
+	);
+	if (!ranges.fadeIn && !ranges.fadeOut) return;
+
+	const mediaRelative = !!opts?.mediaRelative;
+	const activeDur = Math.max(0, ranges.clipOut - ranges.clipIn);
+	if (activeDur <= 0) return;
+	const mediaDur = Math.max(
+		0.001,
+		Number(opts?.mediaDur) ||
+			(mediaRelative ? ranges.clipOut || activeDur : activeDur),
+	);
+
+	const addZone = (kind, startSec, endSec, title) => {
+		// Hard clamp into [clipIn, clipOut] — never draw past clipOut into grey tail
+		const start = Math.max(ranges.clipIn, Math.min(ranges.clipOut, startSec));
+		const end = Math.max(ranges.clipIn, Math.min(ranges.clipOut, endSec));
+		const span = Math.max(0, end - start);
+		if (span <= 1e-4) return;
+		let leftPct;
+		let widthPct;
+		if (mediaRelative) {
+			// Full media clock (matches out marker + grey shade on timeline)
+			leftPct = (start / mediaDur) * 100;
+			widthPct = (span / mediaDur) * 100;
+		} else {
+			// Host is only the active [clipIn, clipOut] band
+			leftPct = ((start - ranges.clipIn) / activeDur) * 100;
+			widthPct = (span / activeDur) * 100;
+		}
+		if (widthPct <= 0.02) return;
+		// Never let zone extend past clipOut on the host
+		const maxRight =
+			mediaRelative
+				? (ranges.clipOut / mediaDur) * 100
+				: 100;
+		if (leftPct + widthPct > maxRight + 0.001) {
+			widthPct = Math.max(0, maxRight - leftPct);
+		}
+		if (widthPct <= 0.02) return;
+		const el = document.createElement("div");
+		el.className = `sequence-fade-zone sequence-fade-zone-${kind}`;
+		el.title = title;
+		el.dataset.fadeStart = String(start);
+		el.dataset.fadeEnd = String(end);
+		el.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct}%;width:${widthPct}%;pointer-events:none;z-index:5;box-sizing:border-box;`;
+		host.appendChild(el);
+	};
+
+	if (ranges.fadeIn) {
+		const d = ranges.fadeIn.end - ranges.fadeIn.start;
+		addZone(
+			"in",
+			ranges.fadeIn.start,
+			ranges.fadeIn.end,
+			`Fade in ${d.toFixed(1)}s`,
+		);
+	}
+	// Fade-out: start at clipOut - fo (LEFT of out marker), end at clipOut — never start at clipOut
+	if (ranges.fadeOut) {
+		const d = ranges.fadeOut.end - ranges.fadeOut.start;
+		addZone(
+			"out",
+			ranges.fadeOut.start,
+			ranges.fadeOut.end,
+			`Fade out ${d.toFixed(1)}s`,
+		);
+	}
+};
+
+/**
+ * Single paint path for detailed-timeline fade zones.
+ * Video filmstrip hosts only (not waveform/audio, not marker overlay).
+ */
+window.refreshClipFadeTimelineZones = () => {
+	// Clear any stale zones on audio tracks / overlay (older double-paint)
+	for (const stale of document.querySelectorAll(
+		".sequence-audio-track .sequence-fade-zone, #timeline-marker-overlay .sequence-fade-zone",
+	)) {
+		stale.remove();
+	}
+
+	const run =
+		typeof getActiveJoinRun === "function" ? getActiveJoinRun() : null;
+	const multi = !!(run?.segments && run.segments.length > 1);
+
+	if (multi) {
+		for (const seg of run.segments) {
+			const fades =
+				typeof getVideoFadeSeconds === "function"
+					? getVideoFadeSeconds(seg.video, seg.queueIndex)
+					: {
+							fadeInSec: Number(seg.video?.fadeInSec) || 0,
+							fadeOutSec: Number(seg.video?.fadeOutSec) || 0,
+						};
+			// Only video-track shells (class on parent track)
+			const videoTracks = document.querySelectorAll(
+				`.sequence-video-track .sequence-media-shell[data-queue-index="${seg.queueIndex}"]`,
+			);
+			for (const shell of videoTracks) {
+				const mediaDur = Math.max(
+					0.001,
+					Number(shell.dataset.mediaDuration) ||
+						Number(seg.video?.mediaDuration) ||
+						seg.duration ||
+						1,
+				);
+				window.paintClipFadeZonesOnHost(shell, {
+					clipIn: Number(shell.dataset.clipIn) || seg.clipIn || 0,
+					clipOut: Number(shell.dataset.clipOut) || seg.clipOut || 0,
+					fadeInSec: fades.fadeInSec,
+					fadeOutSec: fades.fadeOutSec,
+					mediaRelative: true,
+					mediaDur,
+				});
+			}
+		}
+		return;
+	}
+
+	// Solo: same media clock as out marker + grey tail (full source duration).
+	// Do NOT map zones onto active-only filmstrip % — that parks fade-out at the
+	// right edge of the track (into the post-clipOut grey). Use media-relative
+	// [clipOut - fo, clipOut] so purple ends at the out line, left of the grey.
+	const videoTrack = document.getElementById("timeline-video-track");
+	if (!videoTrack || videoTrack.querySelector(".sequence-segment-fill")) {
+		return;
+	}
+	const video =
+		typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
+	const fades =
+		typeof getVideoFadeSeconds === "function"
+			? getVideoFadeSeconds(video, activeQueueIndex)
+			: {
+					fadeInSec: Number(video?.fadeInSec) || 0,
+					fadeOutSec: Number(video?.fadeOutSec) || 0,
+				};
+	const inT =
+		typeof getClipInTime === "function"
+			? getClipInTime(video)
+			: Number(video?.clipInTime) || 0;
+	let outT =
+		typeof getClipOutTime === "function"
+			? getClipOutTime(video, activeQueueIndex)
+			: Number(video?.clipOutTime) || 0;
+	const p =
+		(typeof player !== "undefined" && player) || window.player || null;
+	if (outT <= inT && p?.duration) outT = p.duration;
+	const mediaDur = Math.max(
+		0.001,
+		Number(video?.mediaDuration) || 0,
+		Number(p?.duration) || 0,
+		outT,
+		inT + 0.001,
+	);
+	if (getComputedStyle(videoTrack).position === "static") {
+		videoTrack.style.position = "relative";
+	}
+	window.paintClipFadeZonesOnHost(videoTrack, {
+		clipIn: inT,
+		clipOut: outT > inT ? outT : inT + 1,
+		fadeInSec: fades.fadeInSec,
+		fadeOutSec: fades.fadeOutSec,
+		mediaRelative: true,
+		mediaDur,
+	});
+};
+
 /**
  * Derive clipIn/clipOut on a queue item from its in/out markers (and media duration).
  * sequenceOffset math depends on these fields staying in sync with marker types.
@@ -304,6 +755,11 @@ const syncClipBoundsFromMarkers = (queueIndex = activeQueueIndex) => {
 	video.clipInTime = newIn;
 	video.clipOutTime = newOut;
 	if (mediaDur > 0) video.mediaDuration = mediaDur;
+
+	// Keep fades within half-duration / 10s after bound changes
+	const segDur = Math.max(0, newOut > newIn ? newOut - newIn : 0);
+	video.fadeInSec = clampFadeSec(video.fadeInSec, segDur);
+	video.fadeOutSec = clampFadeSec(video.fadeOutSec, segDur);
 
 	if (queueIndex === activeQueueIndex) {
 		clipInTime = newIn;
@@ -906,6 +1362,13 @@ const handoffToNextJoinedClip = async () => {
 		window._sequenceContinuePlay = false;
 		window._softHandoffVolumeActive = false;
 		window._softHandoffAudio = null;
+		// Next segment's own fadeInSec/fadeOutSec
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
 	}
 };
 window.handoffToNextJoinedClip = handoffToNextJoinedClip;
@@ -1127,6 +1590,8 @@ window.clearAllPreviousProjectData = () => {
 			videoFilePath: "",
 			clipInTime: 0,
 			clipOutTime: 0,
+			fadeInSec: 0,
+			fadeOutSec: 0,
 			joinedToNext: false,
 			appState: { markers: [] },
 		},
@@ -2382,6 +2847,28 @@ const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	activeBand.style.cssText = `position:absolute;top:0;bottom:0;left:${headFrac * 100}%;width:${Math.max(0, (1 - headFrac - tailFrac) * 100)}%;z-index:2;pointer-events:none;box-sizing:border-box;`;
 	shell.appendChild(activeBand);
 
+	// Clip-edge fade zones: filmstrip (video track) only — not audio/waveform
+	const isVideoTrack =
+		trackEl.classList.contains("sequence-video-track") ||
+		trackEl.id === "timeline-video-track";
+	if (isVideoTrack && typeof window.paintClipFadeZonesOnHost === "function") {
+		const fades =
+			typeof getVideoFadeSeconds === "function"
+				? getVideoFadeSeconds(seg.video, seg.queueIndex)
+				: {
+						fadeInSec: Number(seg.video?.fadeInSec) || 0,
+						fadeOutSec: Number(seg.video?.fadeOutSec) || 0,
+					};
+		window.paintClipFadeZonesOnHost(shell, {
+			clipIn,
+			clipOut,
+			fadeInSec: fades.fadeInSec,
+			fadeOutSec: fades.fadeOutSec,
+			mediaRelative: true,
+			mediaDur,
+		});
+	}
+
 	trackEl.appendChild(shell);
 	return content;
 };
@@ -2515,6 +3002,9 @@ window.loadWaveformTimeline = async () => {
 					}
 					fillFilmstripTrack(videoTrack, thumbnailPaths);
 					window.setupVideoTrack();
+					if (typeof window.refreshClipFadeTimelineZones === "function") {
+						window.refreshClipFadeTimelineZones();
+					}
 				})
 				.catch((err) => {
 					if (isStaleRequest()) return;
@@ -2676,6 +3166,10 @@ window.loadWaveformTimeline = async () => {
 		}
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
+		}
+		// Re-paint fade zones after filmstrip fills (zones are on shells, not content)
+		if (typeof window.refreshClipFadeTimelineZones === "function") {
+			window.refreshClipFadeTimelineZones();
 		}
 	} catch (err) {
 		if (isStaleRequest()) return;
@@ -3469,6 +3963,27 @@ const initializePlayer = () => {
 	}
 
 	player.addEventListener("timeupdate", seektimeupdate);
+	player.addEventListener("play", () => {
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	});
+	player.addEventListener("pause", () => {
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	});
+	player.addEventListener("seeked", () => {
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+	});
 	player.addEventListener("loadedmetadata", () => {
 		const duration = player.duration;
 		configureTimelineTicks(duration);
@@ -4688,6 +5203,14 @@ const seektimeupdate = () => {
 		// Do not fight the player mid-handoff load
 		if (window._sequenceHandoffInProgress) return;
 
+		// Soft clip-edge fade preview (opacity + volume ramp)
+		if (typeof window.applyClipEdgeFadePreview === "function") {
+			window.applyClipEdgeFadePreview();
+		}
+		if (typeof window.ensureClipFadePreviewLoop === "function") {
+			window.ensureClipFadePreviewLoop();
+		}
+
 		const currentTime = player.currentTime;
 		const duration = player.duration;
 		const run = getActiveJoinRun();
@@ -5575,12 +6098,21 @@ const buildBatchJobsFromQueue = () => {
 				if (outM) endT = outM.startTime;
 			}
 			const loopM = (v.appState?.markers || []).find((m) => m.type === "loop");
+			const fades =
+				typeof getVideoFadeSeconds === "function"
+					? getVideoFadeSeconds(v, idx)
+					: {
+							fadeInSec: Number(v.fadeInSec) || 0,
+							fadeOutSec: Number(v.fadeOutSec) || 0,
+						};
 			segs.push({
 				path,
 				start_time: startT,
 				end_time: endT,
 				loop_count: loopM ? loopM.loopCount || 1 : 1,
 				queueIndex: idx,
+				fade_in_sec: fades.fadeInSec,
+				fade_out_sec: fades.fadeOutSec,
 			});
 			const base = (
 				v.videoFileName ||
@@ -5840,6 +6372,9 @@ async function processBatchQueue(presetType) {
 					end_time: Number(s.end_time) || 0,
 					// Serde field is loop_count; alias loopCount — send only one
 					loop_count: Math.max(1, Number(s.loop_count) || 1),
+					// Soft export fades only (no burn-in); 0 omitted as 0.0
+					fade_in_sec: Math.max(0, Number(s.fade_in_sec) || 0),
+					fade_out_sec: Math.max(0, Number(s.fade_out_sec) || 0),
 				}));
 				if (window.TM_DEBUG_MODE || debuggin) {
 					console.log("[export_queue_job] segments", {
@@ -6034,8 +6569,27 @@ async function executeExport(presetType) {
 		);
 		await writeTextFile(tempFilePath, listContent);
 
-		// Build FFmpeg args
-		const isCompression = presetType !== "copy";
+		// Clip-edge fades on the active source (export timeline t=0 / end)
+		const activeFades =
+			typeof getVideoFadeSeconds === "function"
+				? getVideoFadeSeconds(
+						typeof videoQueue !== "undefined"
+							? videoQueue[activeQueueIndex]
+							: null,
+						activeQueueIndex,
+					)
+				: { fadeInSec: 0, fadeOutSec: 0 };
+		const fadeInSec = activeFades.fadeInSec || 0;
+		const fadeOutSec = activeFades.fadeOutSec || 0;
+		const hasFades = fadeInSec > 0 || fadeOutSec > 0;
+
+		const duration = segments.reduce(
+			(sum, seg) => sum + (seg.end - seg.start) * (seg.loopCount || 1),
+			0,
+		);
+
+		// Build FFmpeg args — fades force reencode (cannot stream-copy through fade filters)
+		const isCompression = presetType !== "copy" || hasFades;
 		const args = [
 			"-y",
 			"-nostdin",
@@ -6062,53 +6616,73 @@ async function executeExport(presetType) {
 				targetHeight = inputHeight;
 			}
 
-			if (presetType === "low") {
-				args.push(
-					"-vf",
-					`scale=-2:${targetHeight}`,
-					"-c:v",
-					"libx264",
-					"-pix_fmt",
-					"yuv420p",
-					"-crf",
-					"32",
-					"-preset",
-					"veryfast",
-					"-threads",
-					"4",
-				);
-			} else if (presetType === "high") {
-				args.push(
-					"-vf",
-					`scale=-2:${targetHeight}`,
-					"-c:v",
-					"libx264",
-					"-pix_fmt",
-					"yuv420p",
-					"-crf",
-					"18",
-					"-preset",
-					"medium",
-					"-threads",
-					"4",
-				);
-			} else {
-				args.push(
-					"-vf",
-					`scale=-2:${targetHeight}`,
-					"-c:v",
-					"libx264",
-					"-pix_fmt",
-					"yuv420p",
-					"-crf",
-					"26",
-					"-preset",
-					"fast",
-					"-threads",
-					"4",
+			const vfParts = [];
+			// Copy quality with fades only: no scale; compress presets keep scale
+			if (presetType !== "copy") {
+				vfParts.push(`scale=-2:${targetHeight}`);
+			}
+			if (fadeInSec > 0) {
+				const d = Math.min(fadeInSec, Math.max(0.01, duration));
+				vfParts.push(`fade=t=in:st=0:d=${d.toFixed(4)}`);
+			}
+			if (fadeOutSec > 0) {
+				const d = Math.min(fadeOutSec, Math.max(0.01, duration));
+				// Reach solid black slightly before the cut (frame rounding otherwise
+				// leaves the last frame mid-grey). Black holds through the remaining samples.
+				const early = Math.min(0.08, d * 0.2, Math.max(0, duration * 0.5));
+				const st = Math.max(0, duration - d - early);
+				vfParts.push(
+					`fade=t=out:st=${st.toFixed(4)}:d=${d.toFixed(4)}:color=black`,
 				);
 			}
-			args.push("-c:a", "copy", "-max_muxing_queue_size", "4096");
+
+			let crf = "26";
+			let preset = "fast";
+			if (presetType === "low") {
+				crf = "32";
+				preset = "veryfast";
+			} else if (presetType === "high") {
+				crf = "18";
+				preset = "medium";
+			} else if (presetType === "copy" && hasFades) {
+				// Light reencode just for soft fade filters
+				crf = "18";
+				preset = "fast";
+			}
+
+			if (vfParts.length) {
+				args.push("-vf", vfParts.join(","));
+			}
+			args.push(
+				"-c:v",
+				"libx264",
+				"-pix_fmt",
+				"yuv420p",
+				"-crf",
+				crf,
+				"-preset",
+				preset,
+				"-threads",
+				"4",
+			);
+
+			const afParts = [];
+			if (fadeInSec > 0) {
+				const d = Math.min(fadeInSec, Math.max(0.01, duration));
+				afParts.push(`afade=t=in:st=0:d=${d.toFixed(4)}`);
+			}
+			if (fadeOutSec > 0) {
+				const d = Math.min(fadeOutSec, Math.max(0.01, duration));
+				const early = Math.min(0.08, d * 0.2, Math.max(0, duration * 0.5));
+				const st = Math.max(0, duration - d - early);
+				afParts.push(`afade=t=out:st=${st.toFixed(4)}:d=${d.toFixed(4)}`);
+			}
+			if (afParts.length) {
+				args.push("-af", afParts.join(","), "-c:a", "aac", "-b:a", "128k");
+			} else {
+				args.push("-c:a", "copy");
+			}
+			args.push("-max_muxing_queue_size", "4096");
 		}
 
 		args.push(actualOutputPath);
@@ -6124,10 +6698,6 @@ async function executeExport(presetType) {
 		progressBar.style.width = "0%";
 		progressText.textContent = "0%";
 
-		const duration = segments.reduce(
-			(sum, seg) => sum + (seg.end - seg.start) * (seg.loopCount || 1),
-			0,
-		);
 		let lastPct = -1;
 
 		const WATCHDOG_MS = 30_000;
@@ -6588,6 +7158,8 @@ const addVideoToQueue = async () => {
 				videoFilePath: "",
 				clipInTime: 0,
 				clipOutTime: 0,
+				fadeInSec: 0,
+				fadeOutSec: 0,
 				joinedToNext: false,
 				appState: { markers: [] },
 			};
@@ -6662,6 +7234,8 @@ async function addNewVideoToQueue(event) {
 			videoFilePath: filePath,
 			clipInTime: 0,
 			clipOutTime: 0,
+			fadeInSec: 0,
+			fadeOutSec: 0,
 			joinedToNext: false,
 			appState: { markers: [] },
 		};
@@ -7608,5 +8182,12 @@ if (typeof module !== "undefined" && module.exports) {
 		parseVttTimestamp,
 		shiftWebVttForTrim,
 		collectBatchExportCaptionCues,
+		normalizeFadeSec,
+		clampFadeSec,
+		formatFadeBadge,
+		computeClipEdgeFadeGain,
+		computeClipFadeZoneRanges,
+		FADE_DEFAULT_SEC,
+		FADE_HARD_MAX_SEC,
 	};
 }
