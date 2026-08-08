@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
 	buildSpeedRanges,
 	clampSpeedValue,
+	effectiveTimeToSource,
 	formatSpeedBadge,
 	getActiveSpeedMarker,
+	getSpeedWarpedDuration,
+	sourceTimeToEffective,
 	SPEED_DEFAULT,
 	SPEED_MAX,
 	SPEED_MIN,
@@ -59,5 +62,24 @@ describe("Speed marker helpers", () => {
 			{ start: 0, end: 3, rate: 1 },
 			{ start: 3, end: 10, rate: 2 },
 		]);
+	});
+
+	it("10s / 2x@0 / 1x@5 → export duration 7.5s and correct runs", () => {
+		const markers = [
+			{ type: "speed", startTime: 0, speedValue: 2 },
+			{ type: "speed", startTime: 5, speedValue: 1 },
+		];
+		const runs = buildSpeedRanges(markers, 0, 10);
+		expect(runs).toEqual([
+			{ start: 0, end: 5, rate: 2 },
+			{ start: 5, end: 10, rate: 1 },
+		]);
+		expect(getSpeedWarpedDuration(markers, 0, 10)).toBeCloseTo(7.5, 5);
+		// first half of output (0..2.5) is source 0..5; second (2.5..7.5) is source 5..10
+		expect(sourceTimeToEffective(0, runs)).toBeCloseTo(0, 5);
+		expect(sourceTimeToEffective(5, runs)).toBeCloseTo(2.5, 5);
+		expect(sourceTimeToEffective(10, runs)).toBeCloseTo(7.5, 5);
+		expect(effectiveTimeToSource(2.5, runs)).toBeCloseTo(5, 5);
+		expect(effectiveTimeToSource(7.5, runs)).toBeCloseTo(10, 5);
 	});
 });

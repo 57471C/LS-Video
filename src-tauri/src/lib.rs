@@ -555,6 +555,74 @@ fn speed_output_duration(source_span: f64, rate: f64) -> f64 {
     (source_span / r).max(0.01)
 }
 
+/// Sort/clamp/fill speed ranges so they form a contiguous partition of [start, end].
+/// Gaps filled at rate 1.0. Overlaps resolved by later range winning at the boundary.
+fn normalize_speed_ranges(start: f64, end: f64, raw: &[SpeedRange]) -> Vec<SpeedRange> {
+    let mut pts: Vec<(f64, f64)> = raw
+        .iter()
+        .map(|sr| {
+            let a = sr.start.max(start).min(end);
+            (a, sr.rate.clamp(0.25, 4.0))
+        })
+        .filter(|(a, _)| *a < end - 1e-6)
+        .collect();
+    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Dedupe same start — keep last rate
+    let mut dedup: Vec<(f64, f64)> = Vec::new();
+    for p in pts {
+        if let Some(last) = dedup.last_mut() {
+            if (last.0 - p.0).abs() < 1e-4 {
+                *last = p;
+                continue;
+            }
+        }
+        dedup.push(p);
+    }
+    let mut out: Vec<SpeedRange> = Vec::new();
+    let mut cursor = start;
+    let mut rate = 1.0;
+    if let Some(&(t0, r0)) = dedup.first() {
+        if (t0 - start).abs() < 1e-4 {
+            rate = r0;
+        }
+    }
+    for (t, r) in &dedup {
+        if *t > cursor + 1e-4 {
+            out.push(SpeedRange {
+                start: cursor,
+                end: *t,
+                rate,
+            });
+            cursor = *t;
+        }
+        rate = *r;
+        cursor = cursor.max(*t);
+    }
+    if cursor < end - 1e-4 {
+        out.push(SpeedRange {
+            start: cursor,
+            end,
+            rate,
+        });
+    }
+    if out.is_empty() {
+        out.push(SpeedRange {
+            start,
+            end,
+            rate: 1.0,
+        });
+    }
+    println!(
+        "[export_queue_job] speed ranges [{:.3}..{:.3}]: {:?}",
+        start,
+        end,
+        out.iter()
+            .map(|s| format!("[{:.3},{:.3})@{:.3}", s.start, s.end, s.rate))
+            .collect::<Vec<_>>()
+    );
+    out
+}
+
 /// Build ffmpeg video/audio fade filter strings for a trimmed segment (timeline t=0..dur).
 /// Soft filters only — no titles, burn-in, or ASS.
 ///
@@ -1022,34 +1090,9 @@ async fn export_queue_job(
             let fade_in = segment.fade_in_sec.unwrap_or(0.0).max(0.0);
             let fade_out = segment.fade_out_sec.unwrap_or(0.0).max(0.0);
 
-            // Normalize speed ranges to [start, end]; empty → single 1x span
-            let mut speed_ranges: Vec<SpeedRange> = segment
-                .speed_ranges
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|mut sr| {
-                    sr.start = sr.start.max(start);
-                    sr.end = if sr.end > start {
-                        sr.end.min(end)
-                    } else {
-                        end
-                    };
-                    sr.rate = sr.rate.clamp(0.25, 4.0);
-                    if sr.end > sr.start + 0.001 {
-                        Some(sr)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if speed_ranges.is_empty() {
-                speed_ranges.push(SpeedRange {
-                    start,
-                    end,
-                    rate: 1.0,
-                });
-            }
+            // Contiguous partition of [start, end] on Speed marker times
+            let raw_ranges = segment.speed_ranges.clone().unwrap_or_default();
+            let speed_ranges = normalize_speed_ranges(start, end, &raw_ranges);
             let has_variable_speed = speed_ranges
                 .iter()
                 .any(|sr| (sr.rate - 1.0).abs() > 0.01);
@@ -1106,6 +1149,8 @@ async fn export_queue_job(
             if !made {
                 // --- Variable speed path: split on Speed markers, setpts/atempo, concat, then fade ---
                 if has_variable_speed {
+                    // Each run: trim ONLY [sr.start, sr.end), then speed that piece alone.
+                    // Output piece duration MUST be span/rate (explicit -t after filters).
                     let mut speed_temps: Vec<std::path::PathBuf> = Vec::new();
                     for (ri, sr) in speed_ranges.iter().enumerate() {
                         let piece = temp_dir.join(format!(
@@ -1115,19 +1160,33 @@ async fn export_queue_job(
                         let piece_str = piece.to_string_lossy().to_string();
                         let span = (sr.end - sr.start).max(0.01);
                         let rate = sr.rate.clamp(0.25, 4.0);
-                        // Video: setpts=PTS/rate (2x → half duration). Audio: atempo chain.
-                        let vf = format!("setpts=PTS/{:.6}", rate);
+                        let out_dur = speed_output_duration(span, rate);
+                        println!(
+                            "[export_queue_job] seg{} run{} trim [{:.3},{:.3}) span={:.3} rate={:.3} -> out_dur={:.3}",
+                            i, ri, sr.start, sr.end, span, rate, out_dur
+                        );
+                        // Input seek + duration first, then setpts/atempo on that slice only.
+                        // setpts alone does not drop frames; -t out_dur caps the encode length.
                         let mut rargs: Vec<String> = vec![
                             "-y".into(),
                             "-ss".into(),
-                            sr.start.to_string(),
+                            format!("{:.6}", sr.start),
                             "-i".into(),
                             segment.path.clone(),
                             "-t".into(),
-                            span.to_string(),
-                            "-vf".into(),
-                            vf,
+                            format!("{:.6}", span),
                         ];
+                        if (rate - 1.0).abs() > 0.01 {
+                            rargs.push("-vf".into());
+                            rargs.push(format!(
+                                "setpts=(PTS-STARTPTS)/{:.6}",
+                                rate
+                            ));
+                        } else {
+                            // 1x: reset PTS only (no time stretch)
+                            rargs.push("-vf".into());
+                            rargs.push("setpts=PTS-STARTPTS".into());
+                        }
                         rargs.extend([
                             "-c:v".into(),
                             "libx264".into(),
@@ -1140,7 +1199,7 @@ async fn export_queue_job(
                         ]);
                         if strip_audio {
                             rargs.push("-an".into());
-                        } else {
+                        } else if (rate - 1.0).abs() > 0.01 {
                             rargs.push("-af".into());
                             rargs.push(build_atempo_filter(rate));
                             rargs.extend([
@@ -1149,7 +1208,17 @@ async fn export_queue_job(
                                 "-b:a".into(),
                                 "128k".into(),
                             ]);
+                        } else {
+                            rargs.extend([
+                                "-c:a".into(),
+                                "aac".into(),
+                                "-b:a".into(),
+                                "128k".into(),
+                            ]);
                         }
+                        // Force output length = source_span / rate (prevents ~10s from 5s@2x frame count)
+                        rargs.push("-t".into());
+                        rargs.push(format!("{:.6}", out_dur));
                         rargs.push(piece_str.clone());
                         let out = tauri::async_runtime::block_on(
                             app.shell()
