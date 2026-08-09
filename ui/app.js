@@ -601,7 +601,14 @@ export function effectiveTimeToSource(effectiveTime, ranges) {
 }
 
 /**
- * Active clip speed ranges + warped duration (shared playback / export / timeline).
+ * Solo detailed-timeline speed model.
+ *
+ * Ruler / filmstrip / playhead use FULL media length (0..mediaDuration),
+ * speed-warped only — clipIn/clipOut must NOT shrink the timeline so users can
+ * drag bounds and markers into head/tail outside the active clip window.
+ *
+ * Export / join segment math still call buildSpeedRanges(markers, clipIn, clipOut)
+ * separately; this model is for detailed-timeline layout + source↔effective maps.
  */
 window.getActiveSpeedTimelineModel = () => {
 	const qIndex = typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
@@ -610,26 +617,35 @@ window.getActiveSpeedTimelineModel = () => {
 		typeof markers !== "undefined" && Array.isArray(markers)
 			? markers
 			: video?.appState?.markers || [];
-	const inT =
+	const p = (typeof player !== "undefined" && player) || window.player || null;
+	// Real clip window (for grey shading / fades only — not timeline length)
+	const clipIn =
 		typeof getClipInTime === "function"
 			? getClipInTime(video)
-			: Number(video?.clipInTime) || 0;
-	let outT =
+			: Math.max(0, Number(video?.clipInTime) || 0);
+	let clipOut =
 		typeof getClipOutTime === "function"
 			? getClipOutTime(video, qIndex)
-			: Number(video?.clipOutTime) || 0;
-	const p = (typeof player !== "undefined" && player) || window.player || null;
-	if (outT <= inT && p?.duration) outT = p.duration;
-	const ranges = buildSpeedRanges(list, inT, outT > inT ? outT : inT);
-	const effectiveDuration = getSpeedWarpedDuration(
-		list,
-		inT,
-		outT > inT ? outT : inT,
-	);
+			: Math.max(0, Number(video?.clipOutTime) || 0);
+	// Full media length for the timeline
+	let mediaDur =
+		typeof getMediaDurationForQueueIndex === "function"
+			? getMediaDurationForQueueIndex(video, qIndex)
+			: Number(video?.mediaDuration) || 0;
+	if (mediaDur <= 0 && p?.duration > 0) mediaDur = p.duration;
+	if (mediaDur <= 0 && clipOut > clipIn) mediaDur = clipOut;
+	if (mediaDur <= 0) mediaDur = 0.001;
+	if (clipOut <= clipIn) clipOut = mediaDur;
+	if (clipOut > mediaDur) clipOut = mediaDur;
+
+	// Speed ranges over FULL source so timeline length = video length (warped)
+	const ranges = buildSpeedRanges(list, 0, mediaDur);
+	const effectiveDuration = getSpeedWarpedDuration(list, 0, mediaDur);
 	return {
 		queueIndex: qIndex,
-		clipIn: inT,
-		clipOut: outT > inT ? outT : inT,
+		clipIn,
+		clipOut,
+		mediaDuration: mediaDur,
 		ranges,
 		effectiveDuration: Math.max(0.001, effectiveDuration),
 		hasSpeedMarkers: list.some((m) => m?.type === "speed"),
@@ -3520,17 +3536,20 @@ window.loadWaveformTimeline = async () => {
 
 	try {
 		if (!multi) {
-			// -------- Solo path (speed-warped output timebase when Speed markers active) --------
+			// -------- Solo path: full media length; speed-warp only (clipIn/Out do not shrink) --------
 			const videoEl = document.querySelector("video") || player;
-			const mediaDuration = videoEl.duration || player.duration || 0;
+			const mediaDuration = Math.max(
+				0.001,
+				videoEl?.duration || player?.duration || 0,
+			);
 			const speedModel =
 				typeof window.getActiveSpeedTimelineModel === "function"
 					? window.getActiveSpeedTimelineModel()
 					: null;
-			// Ruler / zoom use OUTPUT duration (∫ dt/rate), not raw source duration
+			// Ruler / zoom = full video OUTPUT duration (∫ dt/rate over 0..media), never clip window
 			const timelineDur = Math.max(
 				0.001,
-				speedModel?.effectiveDuration || mediaDuration || 0.001,
+				speedModel?.effectiveDuration || mediaDuration,
 			);
 			if (typeof window.applyTimelineZoomLayout === "function") {
 				window.applyTimelineZoomLayout();
@@ -3560,10 +3579,12 @@ window.loadWaveformTimeline = async () => {
 			const audioTrack =
 				rows[0]?.audioTrack || document.getElementById("timeline-audio-track");
 
-			const soloIn = speedModel?.clipIn ?? (clipInTime || 0);
-			const soloOut =
-				speedModel?.clipOut ||
-				(clipOutTime > 0 ? clipOutTime : mediaDuration || 0);
+			// Full-file span for filmstrip/waveform; clipIn/Out only drive grey shading
+			const mediaStart = 0;
+			const mediaEnd =
+				speedModel?.mediaDuration > 0
+					? speedModel.mediaDuration
+					: mediaDuration;
 
 			if (isAudioOnlyMedia(requestPath)) {
 				if (videoTrack) {
@@ -3578,8 +3599,8 @@ window.loadWaveformTimeline = async () => {
 						audioTrack,
 						peakArray,
 						speedModel.ranges,
-						soloIn,
-						soloOut,
+						mediaStart,
+						mediaEnd,
 						mediaDuration,
 					);
 				} else {
@@ -3611,8 +3632,9 @@ window.loadWaveformTimeline = async () => {
 				.invoke("generate_timeline_thumbnails", {
 					videoPath: requestPath,
 					tileCount: requiredTileCount,
-					startSeconds: soloIn,
-					endSeconds: soloOut > soloIn ? soloOut : undefined,
+					// Full media — clip bounds must not crop the filmstrip
+					startSeconds: mediaStart,
+					endSeconds: mediaEnd > mediaStart ? mediaEnd : undefined,
 				})
 				.then((thumbnailPaths) => {
 					if (isStaleRequest()) return;
@@ -3624,16 +3646,16 @@ window.loadWaveformTimeline = async () => {
 							videoTrack,
 							thumbnailPaths,
 							speedModel.ranges,
-							soloIn,
-							soloOut,
+							mediaStart,
+							mediaEnd,
 						);
 						if (audioTrack) {
 							window.layoutSpeedWarpedWaveform(
 								audioTrack,
 								peakArray,
 								speedModel.ranges,
-								soloIn,
-								soloOut,
+								mediaStart,
+								mediaEnd,
 								mediaDuration,
 							);
 						}

@@ -49,16 +49,19 @@ const getTimelineDuration = () => {
 	if (isSequenceMode()) {
 		if (typeof window.getActiveJoinRun === "function") {
 			const run = window.getActiveJoinRun();
-			// totalDuration is already speed-warped per segment
+			// totalDuration is already speed-warped per segment (join spine)
 			if (run?.totalDuration > 0) return run.totalDuration;
 		}
 		return Math.max(window._sequenceMode?.totalDuration || 0, 0.001);
 	}
-	// Solo: effective duration (integral dt/rate) so 2x regions are shorter on the ruler
+	// Solo: FULL media length, speed-warped only — never clipIn..clipOut window
 	if (typeof window.getActiveSpeedTimelineModel === "function") {
 		const model = window.getActiveSpeedTimelineModel();
 		if (model?.effectiveDuration > 0) {
 			return Math.max(model.effectiveDuration, 0.001);
+		}
+		if (model?.mediaDuration > 0) {
+			return Math.max(model.mediaDuration, 0.001);
 		}
 	}
 	const p = getPlayer();
@@ -647,11 +650,24 @@ const getTimelineMarkerEntries = () => {
 		return { entries, duration };
 	}
 	// Solo: source-local times; paint maps to effective % when speed-warped
+	// Timeline length is full media; clipIn/Out only for clamp of non-bound markers + shading
 	const list = markers || [];
-	const soloIn = typeof clipInTime !== "undefined" ? clipInTime : 0;
-	const soloOut = typeof clipOutTime !== "undefined" ? clipOutTime : 0;
 	const p = getPlayer();
-	const mediaDur = Math.max(0, p?.duration || 0);
+	const speedModel =
+		typeof window.getActiveSpeedTimelineModel === "function"
+			? window.getActiveSpeedTimelineModel()
+			: null;
+	const mediaDur = Math.max(
+		0,
+		Number(speedModel?.mediaDuration) || 0,
+		p?.duration || 0,
+	);
+	const soloIn =
+		typeof clipInTime !== "undefined" ? Math.max(0, clipInTime) : 0;
+	const soloOut =
+		typeof clipOutTime !== "undefined" && clipOutTime > 0
+			? clipOutTime
+			: mediaDur;
 	const entries = list.map((marker, mi) => ({
 		...marker,
 		startTime: marker.startTime,
