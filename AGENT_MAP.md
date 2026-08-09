@@ -39,12 +39,16 @@ Living map for agents and humans. Read this before large refactors. Update when 
 - `window.loadVideo`, `window.cycleViewMode`
 - Marker handlers: `jumpToMarkerTime`, `playFromMarkerTime`, `deleteMarker`, `updateMarkerName`, …
 - `window.updateMarkersList`, `window.updateVideoTimeSummary`
-- Join / sequence: `getActiveJoinRun`, `isActiveRunMulti`, `seekSequenceTime`, `sourceTimeToSequence`, `scheduleJoinTimelineRebuild`, `syncClipBoundsFromMarkers`
+- Join / sequence: `getActiveJoinRun`, `isActiveRunMulti`, `seekSequenceTime`, `sourceTimeToSequence`, `scheduleJoinTimelineRebuild`, `syncClipBoundsFromMarkers`, `canJoinQueueIndices`, `normalizeInvalidJoins`, `toggleJoinedToNext`
+- Media kind / pickers: `isAudioOnlyMedia`, `isVideoMedia`, `getMediaKindForPath`, `getQueueMediaKind`, `getOpenMediaDialogFilters` (empty → audio+video; audio-only queue → audio filters; video present → video only)
+- Title bar queue: `hasProjectMediaLoaded`, `updateTitlebarQueueControls` (`+` muted until media loaded; playlist badge count)
 - Timeline zoom: `applyTimelineZoomLayout`, `setTimelineZoom`, `getTimelineContentWidth`, `initTimelineZoomControls`
+- Timeline marker drag: handles on `#timeline-marker-overlay` (ew-resize); write-back via `writeMarkerLocalTime` / sort + `updateMarkersListImmediate` on drop; clamp non-bound markers to clipIn..clipOut; in/out use Set Clip In/Out bounds over full media
 - CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`, `buildWebVttFromCues`
-- Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt` (soft `.vtt` next to each job output; failure never fails the video job)
-- Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge`, `computeClipEdgeFadeGain`, `applyClipEdgeFadePreview`, `paintClipFadeZonesOnHost` / `refreshClipFadeTimelineZones`. `FADE_DEFAULT_SEC = 0`, hard max 10s (also half clip). UX is **marker type menu** (Set Clip In / Out + `#.#s` like Loop); badge on in/out **row**. Live preview ramps opacity/volume; detailed timeline shows purple fade zones.
-- Speed markers: type `speed` + `speedValue` (0.25–4). Badge `1.5x` (no orange tint at exactly 1×). Helpers: `getActiveSpeedMarker`, `buildSpeedRanges`, `applyActiveSpeedPlayback`, `sourceTimeToEffective`, `effectiveTimeToSource`, `scheduleSpeedTimelineRebuild`, `layoutSpeedWarpedFilmstrip` / `layoutSpeedWarpedWaveform`. Live `playbackRate`; slider snaps to active range and drag updates that marker’s rate. Detailed timeline is **output-time** warped (∫ dt/rate). Export: `speed_ranges` on `VideoSegment` → setpts + chained atempo, then edge fades on output time.
+- Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt`, `humanizeExportError`, `jobHasMixedMedia` (soft `.vtt` next to each job output; failure never fails the video job)
+- Dialogs: `asyncConfirm` / `asyncPrompt` (`ui-modals.js`) — opts `confirmLabel`, `cancelLabel`, `danger`, `focusCancel`; Esc cancels
+- Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge`, `computeClipEdgeFadeGain`, `fadeOutEarlyBlackSec`, `applyClipEdgeFadePreview`, `paintClipFadeZonesOnHost` / `refreshClipFadeTimelineZones`. `FADE_DEFAULT_SEC = 0`, hard max 10s (also half clip). UX is **marker type menu** (Set Clip In / Out + `#.#s` like Loop); badge on in/out **row**. Live preview ramps opacity/volume and reaches solid black slightly **before** clipOut (export parity). Detailed timeline shows purple fade zones.
+- Speed markers: type `speed` + `speedValue` (0.25–4). Badge `1.5x` (no orange tint at exactly 1×). Helpers: `getActiveSpeedMarker`, `buildSpeedRanges`, `applyActiveSpeedPlayback`, `sourceTimeToEffective`, `effectiveTimeToSource`, `scheduleSpeedTimelineRebuild`, `layoutSpeedWarpedFilmstrip` / `layoutSpeedWarpedWaveform`. Live `playbackRate`; slider snaps to active range and drag updates that marker’s rate. Detailed timeline is **output-time** warped (∫ dt/rate) over **full media length** (clipIn/Out do not shrink the ruler). Export: `speed_ranges` on `VideoSegment` → setpts + chained atempo, then edge fades on output time.
 
 If something “does nothing” in the markers table, check window exports first.
 
@@ -120,11 +124,24 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 ## Queue, joins, sequence timeline
 
 - `joinedToNext` on item `i` joins `i` → `i+1` (list order).
-- **Active join run:** contiguous chain containing `activeQueueIndex`.
-- Sequence math: `offset(0)=0`, `duration(i)=max(0, clipOut−clipIn)`, `offset(i+1)=offset(i)+duration(i)` so clip N’s sequence out meets clip N+1’s in (flush boundary).
+- **Join class rule:** only **audio+audio** or **video+video**. Audio+video (either order) is blocked (`canJoinQueueIndices` → toast “Can't join audio and video.”; join chip disabled). `normalizeInvalidJoins()` clears illegal flags on load / reorder / sidebar render.
+- **Active join run:** contiguous chain containing `activeQueueIndex` (same-class only after normalize).
+- Sequence math: `offset(0)=0`, `duration(i)=max(0, clipOut−clipIn)` (speed-warped when ranges exist), `offset(i+1)=offset(i)+duration(i)` so clip N’s sequence out meets clip N+1’s in (flush boundary).
 - `syncClipBoundsFromMarkers` keeps `clipInTime`/`clipOutTime` aligned with in/out markers; join rebuild after bound changes.
 - Multi-clip detailed timeline: one row per segment; full-source filmstrip/waveform with **tint outside clipIn/Out**; playhead/ruler in sequence time.
+- Solo detailed timeline: **full media length** (0..mediaDuration), speed-warped only — clipIn/Out are grey bounds + stop, not timeline length.
 - Transport seek bar: multi = sequence `0..total`; solo = local media + clip grey tails.
+- **Playback stop:** solo / last-in-run pause at effective clipOut (`enforceClipOutStopOrHandoff`); middle joined clips hand off.
+
+### File pickers (queue media kind)
+
+| Queue state | Open / “+” dialog filters |
+|-------------|---------------------------|
+| Empty (no paths) | Media = video + audio common types |
+| All loaded items audio | Audio only |
+| Any video present | Video only (no mixed playlist via picker) |
+
+Helpers: `getQueueMediaKind()`, `getOpenMediaDialogFilters()`. Title-bar **+** stays muted until first media is loaded (`hasProjectMediaLoaded`).
 
 ---
 
@@ -145,8 +162,9 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 - Per-video thumbnail cache dir in Rust.
 - **Skip** filmstrip/thumb generation for audio-only files.
 - **Detailed timeline zoom** (`#timelineZoomSlider`): factor `1` = fit width; `>1` = `fitWidth * zoom` + horizontal scroll on `#timeline-h-scroll` (ruler + tracks share scrollLeft). Debounce filmstrip regen on slider change.
-- **Speed-warped timeline (solo detailed):** ruler, playhead, scrub, filmstrip cells, and waveform use **output time** (`∫ dt / rate` over clip). Source→effective / effective→source via `sourceTimeToEffective` / `effectiveTimeToSource` + `buildSpeedRanges`. Filmstrip/waveform cells sized by `outSpan = sourceSpan / rate`. Call `scheduleSpeedTimelineRebuild` after speed/marker/clip edits. Join multi-clip sequence time is still unwarped per segment durations (clipOut−clipIn); speed warp applies inside each solo layout path when ranges exist.
-- Purple **clip-edge fade zones** on the detailed host: fade-in over `[clipIn, clipIn+fi)`; fade-out over `[clipOut−fo, clipOut)` (not past the out marker).
+- **Speed-warped timeline (solo detailed):** ruler, playhead, scrub, filmstrip cells, and waveform use **output time** (`∫ dt / rate` over **full media** 0..mediaDuration — not the clipIn..clipOut window). Source→effective / effective→source via `sourceTimeToEffective` / `effectiveTimeToSource` + `buildSpeedRanges`. Filmstrip/waveform cells sized by `outSpan = sourceSpan / rate`. Call `scheduleSpeedTimelineRebuild` after speed/marker/clip edits. Join multi-clip sequence offsets still use per-segment clip spans; speed warp applies inside each solo layout path when ranges exist.
+- **Marker drag (detailed overlay):** horizontal drag on stem/flag handles; live table + paint; persist on mouseup (`updateMarkersListImmediate`). End/out handles stay grabable at the right edge (not clipped at 100%).
+- Purple **clip-edge fade zones** on the detailed host: fade-in over `[clipIn, clipIn+fi)`; fade-out ramps to solid black slightly **before** clipOut (`fadeOutEarlyBlackSec`, export parity).
 
 ---
 
@@ -156,10 +174,11 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 
 | Job type | Output |
 |----------|--------|
-| Contiguous `joinedToNext` run | One concat MP4 (each segment `[clipIn, clipOut]`, speed-warped + fades) + optional soft `.vtt` |
+| Contiguous same-class `joinedToNext` run | One concat (video → `.mp4`; **audio-only → `.m4a`**) + optional soft `.vtt` for video jobs |
 | Unjoined item | Solo trim/export + optional soft `.vtt` |
 
-- Folder pick once; names like `sequence_001_…mp4` / `basename_export.mp4`.
+- Folder pick once; names like `sequence_001_…mp4` / `basename_export.mp4` (or `.m4a` for audio).
+- **Mixed audio+video joins never export:** cleared by `normalizeInvalidJoins` / `canJoinQueueIndices`; `export_queue_job` rejects mixed segment lists; UI toasts short human text via `humanizeExportError` (never dump full ffmpeg logs as the only feedback).
 - Soft captions sidecar (no burn-in): same basename as the video, `.vtt`, same folder.
   - **Solo:** markers (or existing source VTT) with times relative to export trim (`clipIn → 0`).
   - **Join:** all markers in the run, sequence-shifted by sum of prior segment durations; cue text = marker name; end = next cue / +3s / clip end (same policy as Generate CC).
@@ -167,14 +186,14 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 - Clip-edge fades (soft export filters only):
   - Per queue item: `fadeInSec` / `fadeOutSec` (default **0**).
   - UX (same family as Loop): marker row type menu → **Set Clip In** / **Set Clip Out** with `#.#s` duration input (UI placeholder may show `1.0`; stored default is `0`; `0` clears). Cyan badge on the in/out **marker row** when fade > 0. **No** footer Fade button; **no** playlist fade UI.
-  - Live preview: opacity + volume ramp via `computeClipEdgeFadeGain` / `applyClipEdgeFadePreview`.
-  - Export: ffmpeg `fade` / `afade` on **output** segment time after speed; join keeps per-segment fades; `0` → no filter. Forces reencode when fade > 0.
+  - Live preview: opacity + volume ramp via `computeClipEdgeFadeGain` / `applyClipEdgeFadePreview`; fade-out hits solid black slightly before clipOut.
+  - Export: ffmpeg `fade` / `afade` on **output** segment time after speed; join keeps per-segment fades; `0` → no filter. Forces reencode when fade > 0. **Audio-only:** video fade filters skipped (`-vn`); `afade` only.
 - Speed markers (export):
   - Frontend builds `speed_ranges: [{ start, end, rate }, …]` covering `[clipIn, clipOut]` via `buildSpeedRanges` (gaps default rate 1).
   - Per range: `setpts=(PTS-STARTPTS)/rate` + chained `atempo` (ffmpeg 0.5–2 per stage); `-t` caps piece length at `span/rate`.
   - Pieces concat’d then fade applied on that output timeline. 1×-only ranges can skip speed filter when whole segment is flat 1×.
-- Rust: `export_queue_job` pipeline order: **trim → speed pieces → concat pieces → edge fade → quality**. Also `save_vtt_file` for sidecar write.
-- **IPC `VideoSegment`:** send **one** of `loop_count` / `loopCount`, never both (serde duplicate field). Fade: `fade_in_sec` / `fade_out_sec` (aliases `fadeInSec` / `fadeOutSec`). Speed: `speed_ranges` array of `{ start, end, rate }` (snake_case preferred).
+- Rust: `export_queue_job` pipeline order: **trim → speed pieces → concat pieces → edge fade → quality**. Audio-only segments: no libx264 / no `-vf`; AAC/`-vn`. Also `save_vtt_file` for sidecar write.
+- **IPC `VideoSegment`:** send **one** of `loop_count` / `loopCount`, never both (serde duplicate field). Fade: `fade_in_sec` / `fade_out_sec` (aliases `fadeInSec` / `fadeOutSec`). Speed: `speed_ranges` array of `{ start, end, rate }` (snake_case preferred). Optional `audio_only` / `audioOnly` flag.
 - Also: `join_and_compress_videos` (legacy single-shot join UI path).
 - Out of scope for batch captions: burn-in, ASS/SSA styling, titles.
 
@@ -212,7 +231,8 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 - VLC / libmpv experimental branches (orphaned; proxy is the supported H.265 path)
 - Shipping without ffmpeg sidecar in the NSIS bundle
 - Batch export: titles, burn-in captions, dip-to-black as a separate fade **mode**, fancy re-encode UI beyond quality presets
-- (Done, do not re-litigate:) soft VTT sidecars, clip-edge fades + live preview, Speed markers + export + speed-warped solo timeline
+- Mixed audio+video playlists via the file picker once a video is present (policy: video filter only)
+- (Done, do not re-litigate:) soft VTT sidecars, clip-edge fades + live preview, Speed markers + export + speed-warped solo timeline, audio queue pickers/join guards, detailed timeline marker drag, full-media solo timeline length
 
 ---
 
