@@ -29,19 +29,110 @@ import {
 	stopVisualizer,
 } from "./js/visualizer-engine.js";
 
+/** Audio container extensions (no video stream expected). */
+const AUDIO_MEDIA_EXTENSIONS = [
+	"mp3",
+	"wav",
+	"flac",
+	"aac",
+	"m4a",
+	"ogg",
+	"wma",
+];
+/** Video container extensions. */
+const VIDEO_MEDIA_EXTENSIONS = ["mp4", "mkv", "avi", "mov", "webm", "m4v"];
+
 const isAudioOnlyMedia = (pathOrName) => {
 	if (!pathOrName) return false;
-	const lower = pathOrName.toLowerCase();
-	return (
-		lower.endsWith(".mp3") ||
-		lower.endsWith(".wav") ||
-		lower.endsWith(".flac") ||
-		lower.endsWith(".aac") ||
-		lower.endsWith(".m4a") ||
-		lower.endsWith(".ogg") ||
-		lower.endsWith(".wma")
-	);
+	const lower = String(pathOrName).toLowerCase();
+	return AUDIO_MEDIA_EXTENSIONS.some((ext) => lower.endsWith(`.${ext}`));
 };
+
+const isVideoMedia = (pathOrName) => {
+	if (!pathOrName) return false;
+	const lower = String(pathOrName).toLowerCase();
+	return VIDEO_MEDIA_EXTENSIONS.some((ext) => lower.endsWith(`.${ext}`));
+};
+
+/**
+ * Kind for a queue item path: "audio" | "video" | "unknown".
+ * Unknown (empty path) is treated as neutral for join/filter policy.
+ */
+const getMediaKindForPath = (pathOrName) => {
+	if (!pathOrName) return "unknown";
+	if (isAudioOnlyMedia(pathOrName)) return "audio";
+	if (isVideoMedia(pathOrName)) return "video";
+	// Default: treat as video-like media so unknown containers stay in video filters
+	return "video";
+};
+
+/**
+ * Overall queue media policy for file pickers.
+ * @returns {"empty"|"audio"|"video"|"mixed"}
+ */
+const getQueueMediaKind = () => {
+	if (typeof videoQueue === "undefined" || !Array.isArray(videoQueue)) {
+		return "empty";
+	}
+	let hasAudio = false;
+	let hasVideo = false;
+	for (const v of videoQueue) {
+		const path = v?.videoFilePath || v?.videoFileName || "";
+		if (!path) continue;
+		const kind = getMediaKindForPath(path);
+		if (kind === "audio") hasAudio = true;
+		else if (kind === "video") hasVideo = true;
+	}
+	if (!hasAudio && !hasVideo) return "empty";
+	if (hasAudio && hasVideo) return "mixed";
+	if (hasAudio) return "audio";
+	return "video";
+};
+
+/**
+ * Tauri dialog filters for open / add-to-queue based on current queue kind.
+ * empty → audio + video; audio-only → audio; video (or mixed) → video only.
+ */
+const getOpenMediaDialogFilters = () => {
+	const kind = getQueueMediaKind();
+	if (kind === "audio") {
+		return [
+			{
+				name: "Audio",
+				extensions: [...AUDIO_MEDIA_EXTENSIONS],
+			},
+		];
+	}
+	if (kind === "video" || kind === "mixed") {
+		return [
+			{
+				name: "Video",
+				extensions: [...VIDEO_MEDIA_EXTENSIONS],
+			},
+		];
+	}
+	// Empty project: both classes allowed
+	return [
+		{
+			name: "Media",
+			extensions: [...VIDEO_MEDIA_EXTENSIONS, ...AUDIO_MEDIA_EXTENSIONS],
+		},
+		{
+			name: "Video",
+			extensions: [...VIDEO_MEDIA_EXTENSIONS],
+		},
+		{
+			name: "Audio",
+			extensions: [...AUDIO_MEDIA_EXTENSIONS],
+		},
+	];
+};
+
+window.isAudioOnlyMedia = isAudioOnlyMedia;
+window.isVideoMedia = isVideoMedia;
+window.getMediaKindForPath = getMediaKindForPath;
+window.getQueueMediaKind = getQueueMediaKind;
+window.getOpenMediaDialogFilters = getOpenMediaDialogFilters;
 
 // ---------------------------------------------------------------------------
 // Queue join / active-run sequence helpers (Phase 1)
@@ -5301,24 +5392,8 @@ const initializePlayer = () => {
 			try {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
-					filters: [
-						{
-							name: "Media Files",
-							extensions: [
-								"mp4",
-								"webm",
-								"ogg",
-								"mov",
-								"avi",
-								"mkv",
-								"mp3",
-								"wav",
-								"flac",
-								"aac",
-								"m4a",
-							],
-						},
-					],
+					title: "Open media",
+					filters: getOpenMediaDialogFilters(),
 				});
 				if (selected) {
 					await processNewVideoFile(selected, true);
@@ -5345,24 +5420,8 @@ const initializePlayer = () => {
 			try {
 				const selected = await window.__TAURI__.dialog.open({
 					multiple: false,
-					filters: [
-						{
-							name: "Media Files",
-							extensions: [
-								"mp4",
-								"webm",
-								"ogg",
-								"mov",
-								"avi",
-								"mkv",
-								"mp3",
-								"wav",
-								"flac",
-								"aac",
-								"m4a",
-							],
-						},
-					],
+					title: "Open media",
+					filters: getOpenMediaDialogFilters(),
 				});
 				if (selected) {
 					await processNewVideoFile(selected, true);
@@ -8220,7 +8279,7 @@ async function addNewVideoToQueue(event) {
 
 	if (!hasProjectMediaLoaded()) {
 		if (typeof showToast === "function") {
-			showToast("Load a video before adding to the queue.", "info");
+			showToast("Load media before adding to the queue.", "info");
 		}
 		return;
 	}
@@ -8242,16 +8301,18 @@ async function addNewVideoToQueue(event) {
 	}
 
 	try {
-		// 2. Call the file selector securely using standard Tauri filter options
+		// 2. Filters follow queue kind (audio playlist → audio types only)
+		const kind = getQueueMediaKind();
+		const pickerTitle =
+			kind === "audio"
+				? "Add audio to queue"
+				: kind === "video" || kind === "mixed"
+					? "Add video to queue"
+					: "Add media to queue";
 		const selectedFilePathFile = await nativeTauriOpenDialog({
 			multiple: false,
-			title: "Select Target Video Asset for Processing Queue",
-			filters: [
-				{
-					name: "Media Containers",
-					extensions: ["mp4", "mkv", "avi", "mov", "webm"],
-				},
-			],
+			title: pickerTitle,
+			filters: getOpenMediaDialogFilters(),
 		});
 
 		if (!selectedFilePathFile) {
