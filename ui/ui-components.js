@@ -108,7 +108,8 @@ const applyMarkerClipFadeEdit = (
 		written = window.setVideoFadeSec(edge, parsed, queueIndex);
 	} else if (typeof videoQueue !== "undefined" && videoQueue[queueIndex]) {
 		const key = edge === "out" ? "fadeOutSec" : "fadeInSec";
-		const n = Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed * 10) / 10 : 0;
+		const n =
+			Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed * 10) / 10 : 0;
 		videoQueue[queueIndex][key] = n;
 		written = n;
 		if (typeof saveLocalState === "function") saveLocalState();
@@ -521,7 +522,14 @@ const updateMarkersListImmediate = () => {
                       <span class="inline-flex items-center gap-0.5" title="Playback rate (0.25–4)">
                         <input type="text" inputmode="decimal"
                                class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 speed-value-input"
-                               value="${typeof window.clampSpeedValue === "function" ? window.clampSpeedValue(marker.speedValue ?? 1).toFixed(2).replace(/\.?0+$/, "") || "1" : String(marker.speedValue || 1)}"
+                               value="${
+																	typeof window.clampSpeedValue === "function"
+																		? window
+																				.clampSpeedValue(marker.speedValue ?? 1)
+																				.toFixed(2)
+																				.replace(/\.?0+$/, "") || "1"
+																		: String(marker.speedValue || 1)
+}"
                                placeholder="1"
                                maxlength="5"
                                data-marker-index="${entry.markerIndex}"
@@ -1012,45 +1020,49 @@ const updateMarkersListImmediate = () => {
 				return rate;
 			};
 
-			markerTableBody.querySelectorAll(".speed-value-input").forEach((input) => {
-				const markerIndex = parseInt(
-					input.getAttribute("data-marker-index"),
-					10,
-				);
-				const qIndex = parseInt(
-					input.getAttribute("data-queue-index") ?? activeQueueIndex,
-					10,
-				);
-				const commit = (reRender) => {
-					const rate = applySpeedValueEdit(qIndex, markerIndex, input.value, {
-						reRender,
-					});
-					input.value = String(rate);
-					return rate;
-				};
-				input.addEventListener("click", (e) => e.stopPropagation());
-				input.addEventListener("mousedown", (e) => e.stopPropagation());
-				input.addEventListener("mouseup", (e) => e.stopPropagation());
-				input.addEventListener("focus", (e) => e.stopPropagation());
-				input.addEventListener("keydown", (e) => {
-					e.stopPropagation();
-					if (e.key === "Enter") {
-						e.preventDefault();
-						commit(true);
-						for (const menu of document.querySelectorAll('[id^="type-menu-"]')) {
-							menu.classList.add("hidden");
+			markerTableBody
+				.querySelectorAll(".speed-value-input")
+				.forEach((input) => {
+					const markerIndex = parseInt(
+						input.getAttribute("data-marker-index"),
+						10,
+					);
+					const qIndex = parseInt(
+						input.getAttribute("data-queue-index") ?? activeQueueIndex,
+						10,
+					);
+					const commit = (reRender) => {
+						const rate = applySpeedValueEdit(qIndex, markerIndex, input.value, {
+							reRender,
+						});
+						input.value = String(rate);
+						return rate;
+					};
+					input.addEventListener("click", (e) => e.stopPropagation());
+					input.addEventListener("mousedown", (e) => e.stopPropagation());
+					input.addEventListener("mouseup", (e) => e.stopPropagation());
+					input.addEventListener("focus", (e) => e.stopPropagation());
+					input.addEventListener("keydown", (e) => {
+						e.stopPropagation();
+						if (e.key === "Enter") {
+							e.preventDefault();
+							commit(true);
+							for (const menu of document.querySelectorAll(
+								'[id^="type-menu-"]',
+							)) {
+								menu.classList.add("hidden");
+							}
 						}
-					}
+					});
+					input.addEventListener("blur", (e) => {
+						e.stopPropagation();
+						commit(true);
+					});
+					input.addEventListener("change", (e) => {
+						e.stopPropagation();
+						commit(true);
+					});
 				});
-				input.addEventListener("blur", (e) => {
-					e.stopPropagation();
-					commit(true);
-				});
-				input.addEventListener("change", (e) => {
-					e.stopPropagation();
-					commit(true);
-				});
-			});
 		}
 
 		DOM.markersTableFoot = document.getElementById("markersTableFoot");
@@ -1110,7 +1122,13 @@ const updateMarkersListImmediate = () => {
 	}
 };
 
-const updateMarkersList = () => {
+const updateMarkersList = (opts = {}) => {
+	// Timeline marker drop needs a guaranteed rebuild after the final write
+	if (opts?.immediate) {
+		_updateMarkersListScheduled = false;
+		updateMarkersListImmediate();
+		return;
+	}
 	if (_updateMarkersListScheduled) return;
 	_updateMarkersListScheduled = true;
 	requestAnimationFrame(() => {
@@ -1120,6 +1138,7 @@ const updateMarkersList = () => {
 };
 // Classic-script globals + window aliases for module consumers
 window.updateMarkersList = updateMarkersList;
+window.updateMarkersListImmediate = updateMarkersListImmediate;
 
 const updateVideoTimeSummary = () => {
 	try {

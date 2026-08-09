@@ -798,15 +798,20 @@ const endTimelineMarkerDrag = (persist) => {
 		else if (typeof window.saveLocalState === "function") {
 			window.saveLocalState();
 		}
-		// Final paint + table after clamp/sort settled
-		if (typeof window.updateMarkersList === "function") {
-			window.updateMarkersList();
+		// Drop must always refresh the marker table (bypass rAF debounce)
+		if (typeof window.updateMarkersListImmediate === "function") {
+			window.updateMarkersListImmediate();
+		} else if (typeof window.updateMarkersList === "function") {
+			window.updateMarkersList({ immediate: true });
 		}
 		if (typeof window.updateSliderTicks === "function") {
 			window.updateSliderTicks();
 		}
 		if (typeof window.paintTimelineMarkersAndShading === "function") {
 			window.paintTimelineMarkersAndShading();
+		}
+		if (typeof window.updateVideoTimeSummary === "function") {
+			window.updateVideoTimeSummary();
 		}
 		const type = drag.type || "";
 		const isBound =
@@ -907,9 +912,33 @@ const onTimelineMarkerPointerUp = (e) => {
 	) {
 		return;
 	}
-	// Final position from last move; optional one more sample
+	// Final position from release coordinates (write synchronously — do not rely on rAF)
 	if (e?.clientX != null) {
-		onTimelineMarkerPointerMove(e);
+		const overlay = document.getElementById("timeline-marker-overlay");
+		const timelineTime = timeFromTimelineClick(e.clientX, overlay);
+		let localTime = timelineTimeToMarkerLocal(timelineTime, drag.entry);
+		localTime = clampMarkerLocalTime(drag.entry, localTime);
+		const { list, index } = resolveMarkerListIndex(
+			drag.queueIndex,
+			drag.markerId,
+			drag.markerIndex,
+		);
+		if (index >= 0 && list[index]) {
+			list[index].startTime = localTime;
+			list.sort((a, b) => a.startTime - b.startTime);
+			const aq =
+				typeof activeQueueIndex !== "undefined"
+					? activeQueueIndex
+					: window.activeQueueIndex || 0;
+			if (
+				drag.queueIndex === aq &&
+				typeof videoQueue !== "undefined" &&
+				videoQueue[drag.queueIndex]?.appState
+			) {
+				videoQueue[drag.queueIndex].appState.markers = markers;
+			}
+			drag.entry._localStartTime = localTime;
+		}
 	}
 	// Sync clip bounds for in/out now that drag finished
 	const type = drag.type || "";
@@ -929,13 +958,29 @@ const beginTimelineMarkerDrag = (e, entry) => {
 	if (window._timelineMarkerDrag) {
 		endTimelineMarkerDrag(false);
 	}
+	// Ensure stable id so post-sort resolve still finds this marker on drop
+	let markerId = entry.id;
+	if (markerId == null || markerId === "") {
+		const { list, index } = resolveMarkerListIndex(
+			entry._queueIndex,
+			null,
+			entry._markerIndex,
+		);
+		if (index >= 0 && list[index]) {
+			if (list[index].id == null || list[index].id === "") {
+				list[index].id = Date.now() + index;
+			}
+			markerId = list[index].id;
+			entry.id = markerId;
+		}
+	}
 	window._timelineMarkerDrag = {
 		queueIndex: entry._queueIndex,
 		markerIndex: entry._markerIndex,
-		markerId: entry.id,
+		markerId,
 		type: entry.type || "standard",
 		pointerId: e.pointerId,
-		entry: { ...entry },
+		entry: { ...entry, id: markerId },
 	};
 	document.body.classList.add("timeline-marker-dragging");
 	document.addEventListener("pointermove", onTimelineMarkerPointerMove);
