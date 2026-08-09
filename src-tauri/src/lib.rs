@@ -531,6 +531,18 @@ struct VideoSegment {
     /// When empty / all rate≈1, treated as a normal trim.
     #[serde(default, alias = "speedRanges")]
     speed_ranges: Option<Vec<SpeedRange>>,
+    /// True when this segment is audio-only (no video stream / audio export path).
+    #[serde(default, alias = "audioOnly")]
+    audio_only: Option<bool>,
+}
+
+fn is_audio_only_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    [
+        ".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".wma",
+    ]
+    .iter()
+    .any(|e| lower.ends_with(e))
 }
 
 /// atempo only accepts 0.5–2.0; chain for rates outside that band.
@@ -1019,6 +1031,22 @@ async fn export_queue_job(
         if output_path.trim().is_empty() {
             return Err("Output path is empty.".to_string());
         }
+        // Reject mixed audio+video join jobs up front (clear error, not ffmpeg dump)
+        {
+            let mut has_audio = false;
+            let mut has_video = false;
+            for s in &video_segments {
+                let ao = s.audio_only.unwrap_or(false) || is_audio_only_path(&s.path);
+                if ao {
+                    has_audio = true;
+                } else {
+                    has_video = true;
+                }
+            }
+            if has_audio && has_video {
+                return Err("Can't join audio and video in one export.".to_string());
+            }
+        }
 
         let get_duration = |path: &str| -> Option<f64> {
             if let Ok(sidecar) = app.shell().sidecar("ffmpeg") {
@@ -1089,6 +1117,8 @@ async fn export_queue_job(
             };
             let fade_in = segment.fade_in_sec.unwrap_or(0.0).max(0.0);
             let fade_out = segment.fade_out_sec.unwrap_or(0.0).max(0.0);
+            let audio_only = segment.audio_only.unwrap_or(false)
+                || is_audio_only_path(&segment.path);
 
             // Contiguous partition of [start, end] on Speed marker times
             let raw_ranges = segment.speed_ranges.clone().unwrap_or_default();
@@ -1102,8 +1132,14 @@ async fn export_queue_job(
                 .sum();
             // Fades apply on OUTPUT timeline after speed (correct export length first)
             let has_fades = fade_in > 0.001 || fade_out > 0.001;
-            let (fade_vf, fade_af) =
+            let (fade_vf_full, fade_af) =
                 build_segment_fade_filters(output_seg_dur.max(0.01), fade_in, fade_out);
+            // Never apply video fade filters on audio-only sources (no video stream)
+            let fade_vf: Option<String> = if audio_only {
+                None
+            } else {
+                fade_vf_full
+            };
 
             let is_full = start <= 0.001
                 && (end <= 0.0
@@ -1111,16 +1147,96 @@ async fn export_queue_job(
                         .map(|d| (end - d).abs() < 0.15)
                         .unwrap_or(false));
 
-            let temp_out = temp_dir.join(format!("batch_seg_{}_{}.mp4", i, unique_id));
+            let temp_ext = if audio_only { "m4a" } else { "mp4" };
+            let temp_out =
+                temp_dir.join(format!("batch_seg_{}_{}.{}", i, unique_id, temp_ext));
             let temp_out_str = temp_out.to_string_lossy().to_string();
 
             let mut made = false;
 
+            // --- Audio-only path: no video filters / no libx264 ---
+            if audio_only && !made {
+                let mut aargs: Vec<String> = vec!["-y".into()];
+                if start > 0.001 {
+                    aargs.push("-ss".into());
+                    aargs.push(start.to_string());
+                }
+                aargs.push("-i".into());
+                aargs.push(segment.path.clone());
+                if end > 0.0 {
+                    aargs.push("-t".into());
+                    aargs.push(seg_dur.to_string());
+                }
+                aargs.push("-vn".into());
+                if let Some(ref af) = fade_af {
+                    aargs.push("-af".into());
+                    aargs.push(af.clone());
+                } else if has_variable_speed {
+                    // atempo only (no video setpts)
+                    let mut af_parts: Vec<String> = Vec::new();
+                    // Simple: if single non-1 rate, apply atempo; multi-rate audio is rare
+                    if speed_ranges.len() == 1 {
+                        let rate = speed_ranges[0].rate.clamp(0.25, 4.0);
+                        if (rate - 1.0).abs() > 0.01 {
+                            af_parts.push(build_atempo_filter(rate));
+                        }
+                    }
+                    if !af_parts.is_empty() {
+                        aargs.push("-af".into());
+                        aargs.push(af_parts.join(","));
+                    }
+                }
+                if prefer_copy && !has_fades && !has_variable_speed {
+                    aargs.extend(["-c:a".into(), "copy".into()]);
+                } else {
+                    aargs.extend([
+                        "-c:a".into(),
+                        "aac".into(),
+                        "-b:a".into(),
+                        "192k".into(),
+                    ]);
+                }
+                aargs.push(temp_out_str.clone());
+                let out = tauri::async_runtime::block_on(
+                    app.shell()
+                        .sidecar("ffmpeg")
+                        .map_err(|e| e.to_string())?
+                        .args(aargs)
+                        .output(),
+                )
+                .map_err(|e| e.to_string())?;
+                if out.status.success() {
+                    temp_clips.push(temp_out.clone());
+                    cleaned_paths.push(temp_out_str.clone());
+                    made = true;
+                } else {
+                    for c in &temp_clips {
+                        let _ = std::fs::remove_file(c);
+                    }
+                    return Err(format_ffmpeg_output_error(
+                        &format!("Audio export failed for segment {}", i),
+                        &out,
+                    ));
+                }
+            }
+
             // Stream copy only when no soft fades and no speed changes
-            if !has_fades && !has_variable_speed && is_full && prefer_copy && !strip_audio {
+            if !audio_only
+                && !has_fades
+                && !has_variable_speed
+                && is_full
+                && prefer_copy
+                && !strip_audio
+            {
                 cleaned_paths.push(segment.path.clone());
                 made = true;
-            } else if !has_fades && !has_variable_speed && is_full && prefer_copy && strip_audio {
+            } else if !audio_only
+                && !has_fades
+                && !has_variable_speed
+                && is_full
+                && prefer_copy
+                && strip_audio
+            {
                 // Full file, strip audio only
                 let args = vec![
                     "-y".into(),
@@ -1146,7 +1262,7 @@ async fn export_queue_job(
                 }
             }
 
-            if !made {
+            if !made && !audio_only {
                 // --- Variable speed path: split on Speed markers, setpts/atempo, concat, then fade ---
                 if has_variable_speed {
                     // Each run: trim ONLY [sr.start, sr.end), then speed that piece alone.
@@ -1437,7 +1553,7 @@ async fn export_queue_job(
                 }
             }
 
-            if !made {
+            if !made && !audio_only {
                 // Trim (and optionally reencode). Prefer reencode for HEVC/proxy safety.
                 let mut args: Vec<String> = vec!["-y".into()];
                 if start > 0.001 {
@@ -1550,6 +1666,8 @@ async fn export_queue_job(
         // --- Step 2: single clip → copy/move to output; multi → concat ---
         if cleaned_paths.len() == 1 {
             let src = &cleaned_paths[0];
+            let single_audio = video_segments[0].audio_only.unwrap_or(false)
+                || is_audio_only_path(&video_segments[0].path);
             // If source is original full file, re-mux/copy to output path
             if Path::new(src) == Path::new(&video_segments[0].path)
                 || !prefer_copy
@@ -1561,7 +1679,19 @@ async fn export_queue_job(
                     "-i".into(),
                     src.clone(),
                 ];
-                if prefer_copy && !strip_audio {
+                if single_audio {
+                    args.push("-vn".into());
+                    if prefer_copy {
+                        args.extend(["-c:a".into(), "copy".into()]);
+                    } else {
+                        args.extend([
+                            "-c:a".into(),
+                            "aac".into(),
+                            "-b:a".into(),
+                            "192k".into(),
+                        ]);
+                    }
+                } else if prefer_copy && !strip_audio {
                     args.extend(["-c".into(), "copy".into()]);
                 } else if prefer_copy && strip_audio {
                     args.extend(["-c:v".into(), "copy".into(), "-an".into()]);
@@ -1613,8 +1743,13 @@ async fn export_queue_job(
             }
         } else {
             // Concat multiple processed segments
+            let all_audio = video_segments.iter().all(|s| {
+                s.audio_only.unwrap_or(false) || is_audio_only_path(&s.path)
+            });
             let list_path = temp_dir.join(format!("batch_concat_{}.txt", unique_id));
-            let intermediate = temp_dir.join(format!("batch_inter_{}.mp4", unique_id));
+            let inter_ext = if all_audio { "m4a" } else { "mp4" };
+            let intermediate =
+                temp_dir.join(format!("batch_inter_{}.{}", unique_id, inter_ext));
             {
                 use std::io::Write;
                 let mut list_file =
@@ -1663,42 +1798,66 @@ async fn export_queue_job(
                 let mut args = vec!["-y".to_string()];
                 let mut fc = String::new();
                 let n = cleaned_paths.len();
-                for (i, p) in cleaned_paths.iter().enumerate() {
-                    args.push("-i".into());
-                    args.push(p.clone());
-                    if strip_audio {
-                        fc.push_str(&format!("[{}:v]", i));
-                    } else {
-                        fc.push_str(&format!("[{}:v][{}:a]", i, i));
+                if all_audio {
+                    for (i, p) in cleaned_paths.iter().enumerate() {
+                        args.push("-i".into());
+                        args.push(p.clone());
+                        fc.push_str(&format!("[{}:a]", i));
                     }
-                }
-                if strip_audio {
-                    fc.push_str(&format!("concat=n={}:v=1:a=0[v]", n));
-                } else {
-                    fc.push_str(&format!("concat=n={}:v=1:a=1[v][a]", n));
-                }
-                args.push("-filter_complex".into());
-                args.push(fc);
-                args.push("-map".into());
-                args.push("[v]".into());
-                if !strip_audio {
+                    fc.push_str(&format!("concat=n={}:v=0:a=1[a]", n));
+                    args.push("-filter_complex".into());
+                    args.push(fc);
                     args.push("-map".into());
                     args.push("[a]".into());
-                }
-                args.extend([
-                    "-c:v".into(),
-                    "libx264".into(),
-                    "-pix_fmt".into(),
-                    "yuv420p".into(),
-                    "-crf".into(),
-                    crf.into(),
-                    "-preset".into(),
-                    preset.into(),
-                ]);
-                if !strip_audio {
-                    args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
+                    args.extend([
+                        "-c:a".into(),
+                        "aac".into(),
+                        "-b:a".into(),
+                        "192k".into(),
+                    ]);
                 } else {
-                    args.push("-an".into());
+                    for (i, p) in cleaned_paths.iter().enumerate() {
+                        args.push("-i".into());
+                        args.push(p.clone());
+                        if strip_audio {
+                            fc.push_str(&format!("[{}:v]", i));
+                        } else {
+                            fc.push_str(&format!("[{}:v][{}:a]", i, i));
+                        }
+                    }
+                    if strip_audio {
+                        fc.push_str(&format!("concat=n={}:v=1:a=0[v]", n));
+                    } else {
+                        fc.push_str(&format!("concat=n={}:v=1:a=1[v][a]", n));
+                    }
+                    args.push("-filter_complex".into());
+                    args.push(fc);
+                    args.push("-map".into());
+                    args.push("[v]".into());
+                    if !strip_audio {
+                        args.push("-map".into());
+                        args.push("[a]".into());
+                    }
+                    args.extend([
+                        "-c:v".into(),
+                        "libx264".into(),
+                        "-pix_fmt".into(),
+                        "yuv420p".into(),
+                        "-crf".into(),
+                        crf.into(),
+                        "-preset".into(),
+                        preset.into(),
+                    ]);
+                    if !strip_audio {
+                        args.extend([
+                            "-c:a".into(),
+                            "aac".into(),
+                            "-b:a".into(),
+                            "128k".into(),
+                        ]);
+                    } else {
+                        args.push("-an".into());
+                    }
                 }
                 args.push(inter_str.clone());
                 let out = tauri::async_runtime::block_on(
@@ -1724,7 +1883,19 @@ async fn export_queue_job(
                 "-i".into(),
                 inter_str.clone(),
             ];
-            if prefer_copy && !strip_audio {
+            if all_audio {
+                if prefer_copy {
+                    fargs.extend(["-c".into(), "copy".into()]);
+                } else {
+                    fargs.extend([
+                        "-c:a".into(),
+                        "aac".into(),
+                        "-b:a".into(),
+                        "192k".into(),
+                    ]);
+                }
+                fargs.push("-vn".into());
+            } else if prefer_copy && !strip_audio {
                 fargs.extend(["-c".into(), "copy".into()]);
             } else {
                 fargs.extend([
@@ -1757,7 +1928,6 @@ async fn export_queue_job(
             let _ = std::fs::remove_file(&intermediate);
 
             if !out.status.success() {
-                // intermediate may have been consumed; try copy intermediate if still there
                 for c in &temp_clips {
                     let _ = std::fs::remove_file(c);
                 }

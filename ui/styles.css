@@ -531,6 +531,18 @@ body.cinema-mode #toastContainer {
 	transform: scale(1.05);
 }
 
+.queue-join-control.is-disabled,
+.queue-join-control:disabled {
+	opacity: 0.35;
+	cursor: not-allowed;
+	pointer-events: auto;
+}
+.queue-join-control.is-disabled:hover,
+.queue-join-control:disabled:hover {
+	transform: none;
+	background: transparent;
+}
+
 /* Rotational animation for toggle chevron */
 .timeline-expanded #timeline-toggle-btn svg {
 	transform: rotate(180deg);

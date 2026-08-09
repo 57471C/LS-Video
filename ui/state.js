@@ -280,6 +280,10 @@ const loadLocalState = () => {
 	// (verify_and_prepare_video proxy). Avoid convertFileSrc here so H.265 works.
 	if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 	if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+	// Drop mixed audio/video joins restored from older projects
+	if (typeof window.normalizeInvalidJoins === "function") {
+		window.normalizeInvalidJoins();
+	}
 	// Join chips must refresh after rehydrate (do not wait for panel open/close)
 	if (typeof window.refreshSidebarPlaylist === "function") {
 		window.refreshSidebarPlaylist();
@@ -433,6 +437,9 @@ const importFromJSON = async (jsonText, options = {}) => {
 
 		if (DOM.projectNameInput) DOM.projectNameInput.value = projectName;
 		if (typeof renderVideoQueueSelect === "function") renderVideoQueueSelect();
+		if (typeof window.normalizeInvalidJoins === "function") {
+			window.normalizeInvalidJoins();
+		}
 		// Force playlist Join UI refresh immediately after project import
 		if (typeof window.refreshSidebarPlaylist === "function") {
 			window.refreshSidebarPlaylist();
