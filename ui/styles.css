@@ -538,16 +538,29 @@ body.cinema-mode #toastContainer {
 
 /* Detailed-timeline marker drag handles (stem + flag; wide hit target) */
 .timeline-marker-handle {
-	width: 12px;
-	margin-left: -6px; /* center on time */
-	background: transparent !important; /* color is on stem/flag only */
+	width: 14px;
+	/* Center on time without overflowing the right edge when left≈100% */
+	transform: translateX(-50%);
+	margin-left: 0;
+	background: transparent !important;
 	border: none !important;
 	touch-action: none;
 	user-select: none;
 }
-.timeline-marker-handle:hover .absolute,
-.timeline-marker-handle:focus-visible .absolute {
-	filter: brightness(1.15);
+.timeline-marker-handle[data-clip-bound="out"],
+.timeline-marker-handle[data-clip-bound="in"] {
+	width: 16px;
+	z-index: 30;
+}
+.timeline-marker-handle:hover .timeline-marker-stem,
+.timeline-marker-handle:hover .timeline-marker-flag,
+.timeline-marker-handle:focus-visible .timeline-marker-stem,
+.timeline-marker-handle:focus-visible .timeline-marker-flag {
+	filter: brightness(1.2);
+}
+/* Ensure overlay can paint end handles (parent may clip at 100%) */
+#timeline-marker-overlay {
+	overflow: visible;
 }
 body.timeline-marker-dragging {
 	cursor: ew-resize !important;

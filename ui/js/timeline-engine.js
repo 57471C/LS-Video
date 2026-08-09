@@ -266,8 +266,15 @@ function syncTimelinePlayheadSmoothly() {
 		const currentVideoTime = player.currentTime;
 		const duration = getTimelineDuration();
 
-		// Look-ahead intersection delta calculation for jump markers (source-local)
-		if (currentVideoTime > window.lastCheckedVideoTime) {
+		// Solo / last-in-run: stop at clipOut even when timeupdate is sparse
+		if (
+			typeof window.enforceClipOutStopOrHandoff === "function" &&
+			window.enforceClipOutStopOrHandoff()
+		) {
+			window.lastCheckedVideoTime = player.currentTime;
+			// Still update playhead % below after park
+		} else if (currentVideoTime > window.lastCheckedVideoTime) {
+			// Look-ahead intersection for jump markers (source-local)
 			if (markers && markers.length > 0) {
 				const activeVideo =
 					(typeof videoQueue !== "undefined" && videoQueue[activeQueueIndex]) ||
@@ -831,7 +838,7 @@ const onTimelineMarkerPointerMove = (e) => {
 	);
 	if (index < 0 || !list[index]) return;
 
-	// Write without full join rebuild mid-drag (bounds only on mouseup)
+	// Write without full join rebuild mid-drag (spine rebuild on mouseup for in/out)
 	list[index].startTime = localTime;
 	list.sort((a, b) => a.startTime - b.startTime);
 	const aq =
@@ -845,8 +852,28 @@ const onTimelineMarkerPointerMove = (e) => {
 	) {
 		videoQueue[drag.queueIndex].appState.markers = markers;
 	}
-	// Keep entry clip bounds snapshot for continued clamping (in/out still use prior window mid-drag)
+	// Keep entry clip bounds snapshot for continued clamping
 	drag.entry._localStartTime = localTime;
+
+	// Live-sync clipIn/Out so solo/last-in-run stop + grey zones track the drag
+	const dragType = drag.type || list[index]?.type || "";
+	const isBound =
+		dragType === "in" ||
+		dragType === "out" ||
+		dragType === "start" ||
+		dragType === "end";
+	if (isBound && typeof window.syncClipBoundsFromMarkers === "function") {
+		window.syncClipBoundsFromMarkers(drag.queueIndex);
+		// Refresh clamp window from live globals after sync
+		if (drag.queueIndex === aq) {
+			if (typeof clipInTime !== "undefined") {
+				drag.entry._clipIn = clipInTime;
+			}
+			if (typeof clipOutTime !== "undefined") {
+				drag.entry._clipOut = clipOutTime;
+			}
+		}
+	}
 
 	// Coalesce live table + timeline paint to animation frames
 	if (!drag._raf) {
@@ -1063,7 +1090,7 @@ const paintTimelineMarkersAndShading = () => {
 		}
 
 		// Create draggable handle — marker times mapped to effective % when speed-warped
-		const lineLeftPct = (() => {
+		let lineLeftPct = (() => {
 			if (
 				!isSequenceMode() &&
 				typeof window.getActiveSpeedTimelineModel === "function" &&
@@ -1080,55 +1107,70 @@ const paintTimelineMarkersAndShading = () => {
 			}
 			return markerLeft;
 		})();
+		// Keep end/out handles inside the scrollport (100% + centered box was fully clipped)
+		const isInBound = marker.type === "in" || marker.type === "start";
+		const isOutBound = marker.type === "out" || marker.type === "end";
+		if (isOutBound || lineLeftPct >= 99.5) {
+			lineLeftPct = Math.min(lineLeftPct, 99.2);
+		}
+		if (isInBound || lineLeftPct <= 0.5) {
+			lineLeftPct = Math.max(lineLeftPct, 0.8);
+		}
+		lineLeftPct = Math.max(0, Math.min(100, lineLeftPct));
 
-		let lineColorClass =
-			"bg-amber-500 dark:bg-yellow-400 border-amber-500 dark:border-yellow-400";
-		if (
-			marker.type === "in" ||
-			marker.type === "start" ||
-			marker.type === "out" ||
-			marker.type === "end" ||
-			marker.type === "jump"
-		) {
-			lineColorClass =
-				"bg-zinc-400 dark:bg-zinc-500 border-zinc-400 dark:border-zinc-500";
+		let stemBg = "bg-amber-500 dark:bg-yellow-400";
+		let flagBorder = "border-amber-500 dark:border-yellow-400";
+		let flagBg = "bg-amber-500 dark:bg-yellow-400";
+		let handleZ = "z-20";
+		if (isInBound || isOutBound) {
+			// Clip bounds: distinct blue (matches seek-bar in/out ticks), above join lines
+			stemBg = "bg-blue-500 dark:bg-blue-400";
+			flagBorder = "border-blue-500 dark:border-blue-400";
+			flagBg = "bg-blue-500 dark:bg-blue-400";
+			handleZ = "z-30";
+		} else if (marker.type === "jump") {
+			stemBg = "bg-zinc-400 dark:bg-zinc-500";
+			flagBorder = "border-zinc-400 dark:border-zinc-500";
+			flagBg = "bg-zinc-400 dark:bg-zinc-500";
 		} else if (marker.type === "loop") {
-			lineColorClass =
-				"bg-cyan-500 dark:bg-cyan-400 border-cyan-500 dark:border-cyan-400";
+			stemBg = "bg-cyan-500 dark:bg-cyan-400";
+			flagBorder = "border-cyan-500 dark:border-cyan-400";
+			flagBg = "bg-cyan-500 dark:bg-cyan-400";
 		} else if (marker.type === "speed") {
-			lineColorClass =
-				"bg-orange-500 dark:bg-orange-400 border-orange-500 dark:border-orange-400";
+			stemBg = "bg-orange-500 dark:bg-orange-400";
+			flagBorder = "border-orange-500 dark:border-orange-400";
+			flagBg = "bg-orange-500 dark:bg-orange-400";
 		}
 
 		const handle = document.createElement("div");
-		handle.className = `timeline-marker-handle absolute top-0 bottom-0 z-20 ${lineColorClass}`;
+		handle.className = `timeline-marker-handle absolute top-0 bottom-0 ${handleZ}`;
 		handle.style.left = `${lineLeftPct}%`;
 		handle.style.pointerEvents = "auto";
 		handle.style.cursor = "ew-resize";
-		handle.title = marker.name
-			? `Drag to adjust: ${marker.name}`
-			: "Drag to adjust marker time";
+		const boundLabel = isInBound
+			? "Clip In"
+			: isOutBound
+				? "Clip Out"
+				: marker.name || "marker";
+		handle.title = `Drag to adjust: ${boundLabel}`;
 		handle.setAttribute("role", "slider");
-		handle.setAttribute(
-			"aria-label",
-			marker.name ? `Marker ${marker.name}` : "Timeline marker",
-		);
+		handle.setAttribute("aria-label", `Timeline marker ${boundLabel}`);
 		handle.dataset.queueIndex = String(marker._queueIndex);
 		handle.dataset.markerIndex = String(marker._markerIndex);
 		if (marker.id != null) handle.dataset.markerId = String(marker.id);
 		handle.dataset.markerType = marker.type || "standard";
+		if (isOutBound) handle.dataset.clipBound = "out";
+		if (isInBound) handle.dataset.clipBound = "in";
 
 		// Vertical stem (visual only)
 		const stem = document.createElement("div");
-		stem.className = `absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] ${lineColorClass
-			.split(" ")
-			.filter((c) => c.startsWith("bg-"))
-			.join(" ")} pointer-events-none`;
+		stem.className = `timeline-marker-stem absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] ${stemBg} pointer-events-none`;
 		handle.appendChild(stem);
 
-		// Flag head for hit target
+		// Flag head for hit target — larger for in/out so edge bounds stay grabable
 		const flag = document.createElement("div");
-		flag.className = `absolute top-0 left-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-sm border ${lineColorClass} pointer-events-none`;
+		const flagSize = isInBound || isOutBound ? "w-3 h-3" : "w-2.5 h-2.5";
+		flag.className = `timeline-marker-flag absolute top-0 left-1/2 -translate-x-1/2 ${flagSize} rounded-sm border-2 ${flagBorder} ${flagBg} pointer-events-none shadow-sm`;
 		handle.appendChild(flag);
 
 		const entrySnapshot = { ...marker };
