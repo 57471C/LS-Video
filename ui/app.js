@@ -1649,6 +1649,56 @@ const scheduleJoinTimelineRebuild = () => {
 };
 window.scheduleJoinTimelineRebuild = scheduleJoinTimelineRebuild;
 
+/**
+ * True when item i may join to item i+1 (same media class: audio+audio or video+video).
+ * Empty path on either side is not joinable.
+ */
+const canJoinQueueIndices = (upperIndex) => {
+	if (
+		typeof videoQueue === "undefined" ||
+		upperIndex < 0 ||
+		upperIndex >= videoQueue.length - 1
+	) {
+		return false;
+	}
+	const a = videoQueue[upperIndex];
+	const b = videoQueue[upperIndex + 1];
+	if (!a || !b) return false;
+	const pathA = a.videoFilePath || a.videoFileName || "";
+	const pathB = b.videoFilePath || b.videoFileName || "";
+	if (!pathA || !pathB) return false;
+	const kindA = getMediaKindForPath(pathA);
+	const kindB = getMediaKindForPath(pathB);
+	if (kindA === "unknown" || kindB === "unknown") return false;
+	return kindA === kindB;
+};
+window.canJoinQueueIndices = canJoinQueueIndices;
+
+/**
+ * Clear joinedToNext between mixed audio/video neighbours (and past end).
+ * Call after load / reorder / project import.
+ * @returns {number} number of flags cleared
+ */
+const normalizeInvalidJoins = () => {
+	if (typeof videoQueue === "undefined" || !videoQueue.length) return 0;
+	let cleared = 0;
+	const n = videoQueue.length;
+	// Tail never joins forward
+	if (videoQueue[n - 1]?.joinedToNext) {
+		videoQueue[n - 1].joinedToNext = false;
+		cleared += 1;
+	}
+	for (let i = 0; i < n - 1; i += 1) {
+		if (!videoQueue[i]?.joinedToNext) continue;
+		if (!canJoinQueueIndices(i)) {
+			videoQueue[i].joinedToNext = false;
+			cleared += 1;
+		}
+	}
+	return cleared;
+};
+window.normalizeInvalidJoins = normalizeInvalidJoins;
+
 const toggleJoinedToNext = (upperIndex) => {
 	if (
 		typeof videoQueue === "undefined" ||
@@ -1659,6 +1709,27 @@ const toggleJoinedToNext = (upperIndex) => {
 	}
 	const item = videoQueue[upperIndex];
 	if (!item) return;
+
+	// Turning join ON only when both sides same media class
+	if (!item.joinedToNext && !canJoinQueueIndices(upperIndex)) {
+		const a = videoQueue[upperIndex];
+		const b = videoQueue[upperIndex + 1];
+		const kindA = getMediaKindForPath(a?.videoFilePath || a?.videoFileName);
+		const kindB = getMediaKindForPath(b?.videoFilePath || b?.videoFileName);
+		const mixed =
+			(kindA === "audio" && kindB === "video") ||
+			(kindA === "video" && kindB === "audio");
+		if (typeof showToast === "function") {
+			showToast(
+				mixed
+					? "Can't join audio and video."
+					: "Can't join these items (load media on both first).",
+				"error",
+			);
+		}
+		return;
+	}
+
 	item.joinedToNext = !item.joinedToNext;
 	// Join does not change which clip is current
 	if (typeof saveLocalState === "function") saveLocalState();
@@ -7067,12 +7138,24 @@ const buildBatchJobsFromQueue = () => {
 		}
 	}
 
+	// Defensive: clear mixed joins before grouping jobs
+	if (typeof normalizeInvalidJoins === "function") {
+		normalizeInvalidJoins();
+	}
+
 	let i = 0;
 	let jobNum = 0;
 	while (i < videoQueue.length) {
 		const start = i;
-		// Grow while this item joins to the next
+		// Grow while this item joins to the next (same media class only)
 		while (i < videoQueue.length - 1 && videoQueue[i]?.joinedToNext) {
+			if (
+				typeof canJoinQueueIndices === "function" &&
+				!canJoinQueueIndices(i)
+			) {
+				videoQueue[i].joinedToNext = false;
+				break;
+			}
 			i += 1;
 		}
 		const end = i;
@@ -7081,10 +7164,19 @@ const buildBatchJobsFromQueue = () => {
 
 		const segs = [];
 		const names = [];
+		let jobIsAudioOnly = true;
+		let jobHasVideo = false;
 		for (const idx of indices) {
 			const v = videoQueue[idx];
 			if (!v?.videoFilePath) continue;
 			const path = v.videoFilePath;
+			const kind = getMediaKindForPath(path);
+			if (kind === "audio") {
+				// stay audio-only
+			} else {
+				jobIsAudioOnly = false;
+				jobHasVideo = true;
+			}
 			const startT =
 				typeof getClipInTime === "function"
 					? getClipInTime(v)
@@ -7138,9 +7230,19 @@ const buildBatchJobsFromQueue = () => {
 			i += 1;
 			continue;
 		}
+		// Mixed audio+video join (should already be broken by normalize)
+		const kinds = segs.map((s) => getMediaKindForPath(s.path));
+		const hasAudio = kinds.includes("audio");
+		const hasVideo = kinds.some((k) => k !== "audio");
+		if (hasAudio && hasVideo) {
+			i += 1;
+			continue;
+		}
 
 		jobNum += 1;
 		const multi = segs.length > 1;
+		const audioOnly = jobIsAudioOnly && !jobHasVideo;
+		const outExt = audioOnly ? "m4a" : "mp4";
 		let fileName;
 		if (multi) {
 			const first = names[0] || "clip";
@@ -7149,9 +7251,9 @@ const buildBatchJobsFromQueue = () => {
 				first === last
 					? first
 					: `${first.slice(0, 24)}_to_${last.slice(0, 24)}`;
-			fileName = `sequence_${String(jobNum).padStart(3, "0")}_${short}.mp4`;
+			fileName = `sequence_${String(jobNum).padStart(3, "0")}_${short}.${outExt}`;
 		} else {
-			fileName = `${names[0] || `video_${jobNum}`}_export.mp4`;
+			fileName = `${names[0] || `clip_${jobNum}`}_export.${outExt}`;
 		}
 		// Sanitize filename
 		fileName = fileName.replace(/[<>:"/\\|?*]/g, "_");
@@ -7167,12 +7269,58 @@ const buildBatchJobsFromQueue = () => {
 			segments: segs,
 			fileName,
 			multi,
+			audioOnly,
 		});
 		i += 1;
 	}
 	return jobs;
 };
 window.buildBatchJobsFromQueue = buildBatchJobsFromQueue;
+
+/** Short user-facing export error (never dump full ffmpeg logs). */
+const humanizeExportError = (err) => {
+	const raw = String(err?.message || err || "Export failed");
+	const lines = raw
+		.split(/\r?\n/)
+		.map((l) => l.trim())
+		.filter(Boolean);
+	// Prefer first non-noise line
+	const useful =
+		lines.find(
+			(l) =>
+				!/^ffmpeg version/i.test(l) &&
+				!/^configuration:/i.test(l) &&
+				!/^built with/i.test(l) &&
+				!/^libav/i.test(l) &&
+				l.length < 220,
+		) || lines[0] || raw;
+	const short = useful.length > 160 ? `${useful.slice(0, 157)}…` : useful;
+	if (/audio and video|mixed/i.test(raw)) {
+		return "Can't export a join that mixes audio and video.";
+	}
+	if (/no video|does not contain any stream|Stream map/i.test(raw)) {
+		return "This export needs a video stream (or use audio-only export).";
+	}
+	if (/Source not found/i.test(raw)) {
+		return "A source file is missing on disk.";
+	}
+	return short || "Export failed.";
+};
+window.humanizeExportError = humanizeExportError;
+
+/** True if job segments mix audio-only and video paths. */
+const jobHasMixedMedia = (job) => {
+	if (!job?.segments?.length) return false;
+	let hasA = false;
+	let hasV = false;
+	for (const s of job.segments) {
+		const k = getMediaKindForPath(s.path);
+		if (k === "audio") hasA = true;
+		else hasV = true;
+	}
+	return hasA && hasV;
+};
+window.jobHasMixedMedia = jobHasMixedMedia;
 
 /** Calculates contiguous logical segments to retain based on marker states. */
 const getExportSegments = (markersList, videoDuration) => {
@@ -7368,40 +7516,54 @@ async function processBatchQueue(presetType) {
 				if (missing.length || job.segments.length === 0) {
 					throw new Error("Missing source path for one or more clips.");
 				}
+				if (jobHasMixedMedia(job)) {
+					throw new Error("Can't join audio and video in one export.");
+				}
 
 				toConsole(
 					"Batch export job",
-					{ job: job.label, path: actualOutputPath, quality, stripAudio },
+					{
+						job: job.label,
+						path: actualOutputPath,
+						quality,
+						stripAudio,
+						audioOnly: !!job.audioOnly,
+					},
 					debuggin,
 				);
 
 				if (specificProgressBar) specificProgressBar.value = 35;
 
+				const audioOnly = !!job.audioOnly;
 				// Flat segments: one key per Rust VideoSegment field (no loop_count + loopCount).
-				const videoSegments = job.segments.map((s) => ({
-					path: s.path,
-					start_time: Number(s.start_time) || 0,
-					end_time: Number(s.end_time) || 0,
-					// Serde field is loop_count; alias loopCount — send only one
-					loop_count: Math.max(1, Number(s.loop_count) || 1),
-					// Soft export fades only (no burn-in); 0 omitted as 0.0
-					fade_in_sec: Math.max(0, Number(s.fade_in_sec) || 0),
-					fade_out_sec: Math.max(0, Number(s.fade_out_sec) || 0),
-					// Speed marker ranges (source time → setpts/atempo)
-					speed_ranges: Array.isArray(s.speed_ranges)
-						? s.speed_ranges.map((r) => ({
-								start: Number(r.start) || 0,
-								end: Number(r.end) || 0,
-								rate: clampSpeedValue(r.rate ?? 1),
-							}))
-						: [
-								{
-									start: Number(s.start_time) || 0,
-									end: Number(s.end_time) || 0,
-									rate: 1,
-								},
-							],
-				}));
+				const videoSegments = job.segments.map((s) => {
+					const pathIsAudio = isAudioOnlyMedia(s.path);
+					return {
+						path: s.path,
+						start_time: Number(s.start_time) || 0,
+						end_time: Number(s.end_time) || 0,
+						// Serde field is loop_count; alias loopCount — send only one
+						loop_count: Math.max(1, Number(s.loop_count) || 1),
+						// Soft export fades; video fade filters skipped on audio-only in Rust
+						fade_in_sec: Math.max(0, Number(s.fade_in_sec) || 0),
+						fade_out_sec: Math.max(0, Number(s.fade_out_sec) || 0),
+						// Speed marker ranges (source time → setpts/atempo)
+						speed_ranges: Array.isArray(s.speed_ranges)
+							? s.speed_ranges.map((r) => ({
+									start: Number(r.start) || 0,
+									end: Number(r.end) || 0,
+									rate: clampSpeedValue(r.rate ?? 1),
+								}))
+							: [
+									{
+										start: Number(s.start_time) || 0,
+										end: Number(s.end_time) || 0,
+										rate: 1,
+									},
+								],
+						audio_only: pathIsAudio || audioOnly,
+					};
+				});
 				if (window.TM_DEBUG_MODE || debuggin) {
 					console.log("[export_queue_job] segments", {
 						job: job.label,
@@ -7410,14 +7572,17 @@ async function processBatchQueue(presetType) {
 							start: s.start_time,
 							end: s.end_time,
 							loop: s.loop_count,
+							audio: s.audio_only,
 						})),
 					});
 				}
+				// Strip-audio makes no sense for audio-only jobs
+				const jobStripAudio = audioOnly ? false : stripAudio;
 				await window.__TAURI__.core.invoke("export_queue_job", {
 					videoSegments,
 					outputPath: actualOutputPath,
 					quality,
-					stripAudio,
+					stripAudio: jobStripAudio,
 				});
 
 				// Soft-caption sidecar next to the video (never fails the video job)
@@ -7462,10 +7627,8 @@ async function processBatchQueue(presetType) {
             <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
           `;
 				}
-				showToast(
-					`Failed: ${job.label} — ${fileErr?.message || fileErr}`,
-					"error",
-				);
+				const human = humanizeExportError(fileErr);
+				showToast(`Failed: ${job.label} — ${human}`, "error");
 			} finally {
 				if (rowContainer) {
 					rowContainer.classList.remove("border-blue-500", "bg-blue-50/10");
@@ -7973,11 +8136,13 @@ async function executeExport(presetType) {
 	} catch (err) {
 		toConsole("FFmpeg process failed or aborted", err, debuggin);
 		if (isAborted) {
-			alert("Export aborted by user.");
+			showToast("Export aborted.", "warning");
 		} else {
 			const fullErrLogs = stderrLogs ? stderrLogs.join("\n") : "";
-			alert(
-				`Export failed: ${err.message || err}\n\nFFmpeg Logs:\n${fullErrLogs || "(no stderr output)"}`,
+			toConsole("Export failed (full log)", fullErrLogs || err, debuggin);
+			showToast(
+				`Export failed: ${humanizeExportError(err)}`,
+				"error",
 			);
 		}
 	} finally {
@@ -8520,8 +8685,10 @@ window.renderSidebarPlaylist = () => {
 					activeQueueIndex = idx;
 				}
 
-				// Tail cannot stay joined forward after reorder
-				if (videoQueue.length > 0) {
+				// Tail cannot stay joined forward after reorder; drop mixed joins
+				if (typeof normalizeInvalidJoins === "function") {
+					normalizeInvalidJoins();
+				} else if (videoQueue.length > 0) {
 					videoQueue[videoQueue.length - 1].joinedToNext = false;
 				}
 
@@ -8560,7 +8727,9 @@ window.renderSidebarPlaylist = () => {
 					activeQueueIndex = idx;
 				}
 
-				if (videoQueue.length > 0) {
+				if (typeof normalizeInvalidJoins === "function") {
+					normalizeInvalidJoins();
+				} else if (videoQueue.length > 0) {
 					videoQueue[videoQueue.length - 1].joinedToNext = false;
 				}
 
@@ -8614,12 +8783,18 @@ window.renderSidebarPlaylist = () => {
 				lastActive: null,
 				lastIndex: -1,
 				lastJoined: null,
+				lastJoinAllowed: null,
 			});
 
 			fragment.appendChild(group);
 		}
 
 		container.appendChild(fragment);
+	}
+
+	// Drop invalid joins (mixed audio/video) before painting chips
+	if (typeof normalizeInvalidJoins === "function") {
+		normalizeInvalidJoins();
 	}
 
 	// Update cached nodes conditionally
@@ -8630,13 +8805,25 @@ window.renderSidebarPlaylist = () => {
 		const isActive = index === activeQueueIndex;
 		const videoName = video.videoFileName || "Unknown File";
 		const isJoined = !!video.joinedToNext && index < queueLen - 1;
+		const joinAllowed =
+			index < queueLen - 1 &&
+			(typeof canJoinQueueIndices === "function"
+				? canJoinQueueIndices(index)
+				: true);
 
 		const videoChanged = els.lastVideoName !== videoName;
 		const activeChanged = els.lastActive !== isActive;
 		const indexChanged = els.lastIndex !== index;
 		const joinedChanged = els.lastJoined !== isJoined;
+		const joinAllowedChanged = els.lastJoinAllowed !== joinAllowed;
 
-		if (!videoChanged && !activeChanged && !indexChanged && !joinedChanged) {
+		if (
+			!videoChanged &&
+			!activeChanged &&
+			!indexChanged &&
+			!joinedChanged &&
+			!joinAllowedChanged
+		) {
 			continue;
 		}
 
@@ -8669,11 +8856,24 @@ window.renderSidebarPlaylist = () => {
 			}
 		}
 
-		if (els.joinBtn && (joinedChanged || indexChanged)) {
+		if (els.joinBtn && (joinedChanged || indexChanged || joinAllowedChanged)) {
 			els.joinBtn.dataset.index = index;
 			els.joinBtn.classList.toggle("is-joined", isJoined);
-			els.joinBtn.title = isJoined ? "Unjoin" : "Join";
-			els.joinBtn.setAttribute("aria-label", isJoined ? "Unjoin" : "Join");
+			els.joinBtn.classList.toggle("is-disabled", !joinAllowed && !isJoined);
+			els.joinBtn.disabled = !joinAllowed && !isJoined;
+			els.joinBtn.title = !joinAllowed
+				? "Can't join audio and video"
+				: isJoined
+					? "Unjoin"
+					: "Join";
+			els.joinBtn.setAttribute(
+				"aria-label",
+				!joinAllowed
+					? "Can't join audio and video"
+					: isJoined
+						? "Unjoin"
+						: "Join",
+			);
 			els.joinBtn.setAttribute("aria-pressed", isJoined ? "true" : "false");
 		}
 
@@ -8681,6 +8881,7 @@ window.renderSidebarPlaylist = () => {
 		els.lastActive = isActive;
 		els.lastIndex = index;
 		els.lastJoined = isJoined;
+		els.lastJoinAllowed = joinAllowed;
 	}
 
 	// Disable load control while the active row is part of a join
