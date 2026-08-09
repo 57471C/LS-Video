@@ -81,56 +81,121 @@ const showToast = (message, type = "error") => {
 // Intercept native alerts to use our sleek Toast system
 window.alert = (message) => showToast(message, "error");
 
-const asyncConfirm = (message, title = "Confirm") => {
+/**
+ * App confirm dialog.
+ * @param {string} message
+ * @param {string} [title="Confirm"]
+ * @param {{
+ *   confirmLabel?: string,
+ *   cancelLabel?: string,
+ *   danger?: boolean,
+ *   focusCancel?: boolean,
+ * }} [opts]
+ * @returns {Promise<boolean>}
+ */
+const asyncConfirm = (message, title = "Confirm", opts = {}) => {
+	const {
+		confirmLabel = "Confirm",
+		cancelLabel = "Cancel",
+		danger = false,
+		focusCancel = false,
+	} = opts && typeof opts === "object" ? opts : {};
+
 	return new Promise((resolve) => {
 		const modal = document.getElementById("confirmModal");
-		document.getElementById("confirmTitle").textContent = title;
-		document.getElementById("confirmMessage").textContent = message;
-
+		const titleEl = document.getElementById("confirmTitle");
+		const messageEl = document.getElementById("confirmMessage");
 		const btnOk = document.getElementById("confirmOkBtn");
 		const btnCancel = document.getElementById("confirmCancelBtn");
+		if (!modal || !btnOk || !btnCancel) {
+			resolve(false);
+			return;
+		}
+
+		if (titleEl) titleEl.textContent = title;
+		if (messageEl) messageEl.textContent = message;
+
+		btnOk.textContent = confirmLabel;
+		btnCancel.textContent = cancelLabel;
+		// Primary right, cancel left (HTML order). Destructive uses danger styling.
+		btnOk.className = danger
+			? "btn btn-danger shrink-0"
+			: "btn btn-primary shrink-0";
+		btnCancel.className = "btn btn-outline-secondary shrink-0";
 
 		let resolved = false;
 
 		const cleanup = () => {
 			btnOk.removeEventListener("click", onOk);
 			btnCancel.removeEventListener("click", onCancel);
+			modal.removeEventListener("cancel", onDialogCancel);
 			if (modal.open) modal.close();
 		};
 
-		const onOk = () => {
+		const finish = (value) => {
 			if (resolved) return;
 			resolved = true;
 			cleanup();
-			resolve(true);
+			resolve(value);
 		};
-		const onCancel = () => {
-			if (resolved) return;
-			resolved = true;
-			cleanup();
-			resolve(false);
+
+		const onOk = () => finish(true);
+		const onCancel = () => finish(false);
+		// Esc / dialog cancel → safest path (cancel)
+		const onDialogCancel = (e) => {
+			e.preventDefault();
+			finish(false);
 		};
 
 		btnOk.addEventListener("click", onOk);
 		btnCancel.addEventListener("click", onCancel);
+		modal.addEventListener("cancel", onDialogCancel);
 		modal.showModal();
-		btnOk.focus();
+		if (focusCancel) btnCancel.focus();
+		else btnOk.focus();
 	});
 };
 
+/**
+ * App prompt dialog.
+ * @param {string} message
+ * @param {string} [defaultValue=""]
+ * @param {string} [title="Input"]
+ * @param {string[]} [suggestions=[]]
+ * @param {{
+ *   confirmLabel?: string,
+ *   cancelLabel?: string,
+ * }} [opts]
+ * @returns {Promise<string|null>}
+ */
 const asyncPrompt = (
 	message,
 	defaultValue = "",
-	title = "Input Needed",
+	title = "Input",
 	suggestions = [],
+	opts = {},
 ) => {
+	const { confirmLabel = "OK", cancelLabel = "Cancel" } =
+		opts && typeof opts === "object" ? opts : {};
+
 	return new Promise((resolve) => {
 		const modal = document.getElementById("promptModal");
-		document.getElementById("promptTitle").textContent = title;
-		document.getElementById("promptMessage").textContent = message;
-
+		const titleEl = document.getElementById("promptTitle");
+		const messageEl = document.getElementById("promptMessage");
 		const input = document.getElementById("promptInput");
-		input.value = defaultValue;
+		const btnOk = document.getElementById("promptOkBtn");
+		const btnCancel = document.getElementById("promptCancelBtn");
+		if (!modal || !input || !btnOk || !btnCancel) {
+			resolve(null);
+			return;
+		}
+
+		if (titleEl) titleEl.textContent = title;
+		if (messageEl) {
+			messageEl.textContent = message;
+			messageEl.classList.toggle("hidden", !message);
+		}
+		input.value = defaultValue ?? "";
 
 		const datalist = document.getElementById("promptDatalist");
 		if (datalist) {
@@ -148,8 +213,10 @@ const asyncPrompt = (
 			}
 		}
 
-		const btnOk = document.getElementById("promptOkBtn");
-		const btnCancel = document.getElementById("promptCancelBtn");
+		btnOk.textContent = confirmLabel;
+		btnCancel.textContent = cancelLabel;
+		btnOk.className = "btn btn-primary shrink-0";
+		btnCancel.className = "btn btn-outline-secondary shrink-0";
 
 		let resolved = false;
 
@@ -157,20 +224,22 @@ const asyncPrompt = (
 			btnOk.removeEventListener("click", onOk);
 			btnCancel.removeEventListener("click", onCancel);
 			input.removeEventListener("keydown", onKeydown);
+			modal.removeEventListener("cancel", onDialogCancel);
 			if (modal.open) modal.close();
 		};
 
-		const onOk = () => {
+		const finish = (value) => {
 			if (resolved) return;
 			resolved = true;
 			cleanup();
-			resolve(input.value);
+			resolve(value);
 		};
-		const onCancel = () => {
-			if (resolved) return;
-			resolved = true;
-			cleanup();
-			resolve(null);
+
+		const onOk = () => finish(input.value);
+		const onCancel = () => finish(null);
+		const onDialogCancel = (e) => {
+			e.preventDefault();
+			finish(null);
 		};
 		const onKeydown = (e) => {
 			if (e.key === "Enter") {
@@ -185,8 +254,13 @@ const asyncPrompt = (
 		btnOk.addEventListener("click", onOk);
 		btnCancel.addEventListener("click", onCancel);
 		input.addEventListener("keydown", onKeydown);
+		modal.addEventListener("cancel", onDialogCancel);
 		modal.showModal();
 		input.focus();
 		input.select();
 	});
 };
+
+window.showToast = showToast;
+window.asyncConfirm = asyncConfirm;
+window.asyncPrompt = asyncPrompt;

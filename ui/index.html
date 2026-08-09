@@ -112,7 +112,7 @@
             <circle cx="12" cy="12" r="3"></circle>
           </svg>
         </button>
-        <button type="button" id="openHelpBtn" class="btn btn-sm border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700">Help / Shortcuts</button>
+        <button type="button" id="openHelpBtn" class="btn btn-sm border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700">Help</button>
       </div>
     </header>
 
@@ -417,7 +417,7 @@
                 Batch export queue
               </label>
               <p class="text-[11px] text-zinc-500 dark:text-zinc-400 leading-snug pl-6">
-                Joined runs → one concat file; unjoined items → individual trims. Uses each clip’s Clip In / Out.
+                Joined clips export as one file; others export separately. Uses each clip’s In / Out.
               </p>
               <label for="batchStripAudioToggle" class="text-sm font-medium text-zinc-700 dark:text-zinc-300 cursor-pointer flex items-center gap-2 pl-6">
                 <input type="checkbox" id="batchStripAudioToggle" class="rounded text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-4 h-4 cursor-pointer" />
@@ -435,7 +435,7 @@
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
-                  <span>Processing Video...</span>
+                  <span>Processing…</span>
                 </div>
                 <span id="trimProgressText">0%</span>
               </div>
@@ -446,10 +446,10 @@
           </div>
 
           <!-- Normal Footer / Buttons -->
-          <div id="trimNormalFooter" class="pt-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-wrap gap-2 justify-end">
-            <button type="button" id="cancelTrimBtn" class="btn btn-outline-secondary">Cancel</button>
-            <button type="button" id="trimOnlyBtn" class="btn btn-outline-primary">Trim Only (Copy)</button>
-            <button type="button" id="trimCompressBtn" class="btn btn-primary">Trim & Compress</button>
+          <div id="trimNormalFooter" class="pt-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-2">
+            <button type="button" id="cancelTrimBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+            <button type="button" id="trimOnlyBtn" class="btn btn-outline-primary shrink-0">Trim only</button>
+            <button type="button" id="trimCompressBtn" class="btn btn-primary shrink-0">Trim &amp; compress</button>
           </div>
 
           <!-- Tetris Easter Egg Screen -->
@@ -516,7 +516,7 @@
           <div id="pkgDoneIcon" class="shrink-0 hidden">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
           </div>
-          <h5 id="pkgModalTitle" class="text-base font-semibold">Packaging Project…</h5>
+          <h5 id="pkgModalTitle" class="text-base font-semibold tracking-tight">Packaging project…</h5>
         </div>
 
         <!-- Status message -->
@@ -534,88 +534,88 @@
         </div>
 
         <!-- Footer — only shown on completion -->
-        <div id="pkgDoneFooter" class="hidden flex justify-end">
-          <button type="button" id="pkgCloseBtn" class="btn btn-primary">Close</button>
+        <div id="pkgDoneFooter" class="hidden flex flex-nowrap items-center justify-end gap-3">
+          <button type="button" id="pkgCloseBtn" class="btn btn-primary shrink-0">Done</button>
         </div>
       </div>
     </dialog>
 
     <!-- Confirm Modal -->
-    <dialog id="confirmModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto">
+    <dialog id="confirmModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
       <div class="p-5">
-        <h5 class="text-lg font-semibold mb-2" id="confirmTitle">Confirm Action</h5>
-        <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-6" id="confirmMessage">Are you sure?</p>
-        <div class="flex justify-end gap-3">
-          <button type="button" id="confirmCancelBtn" class="btn btn-outline-secondary">Cancel</button>
-          <button type="button" id="confirmOkBtn" class="btn btn-danger">Yes, I'm sure</button>
+        <h5 class="text-lg font-semibold tracking-tight mb-1.5" id="confirmTitle">Confirm</h5>
+        <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-6 leading-relaxed" id="confirmMessage">Continue?</p>
+        <div class="flex flex-nowrap items-center justify-end gap-3">
+          <button type="button" id="confirmCancelBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+          <button type="button" id="confirmOkBtn" class="btn btn-primary shrink-0">Confirm</button>
         </div>
       </div>
     </dialog>
 
     <!-- Prompt Modal -->
-    <dialog id="promptModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto">
+    <dialog id="promptModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto" aria-labelledby="promptTitle" aria-describedby="promptMessage">
       <div class="p-5">
-        <h5 class="text-lg font-semibold mb-2" id="promptTitle">Input Required</h5>
-        <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-4" id="promptMessage"></p>
+        <h5 class="text-lg font-semibold tracking-tight mb-1.5" id="promptTitle">Input</h5>
+        <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-3 leading-relaxed" id="promptMessage"></p>
         <input type="text" id="promptInput" class="form-control w-full mb-6" autocomplete="off" list="promptDatalist">
         <datalist id="promptDatalist"></datalist>
-        <div class="flex justify-end gap-3">
-          <button type="button" id="promptCancelBtn" class="btn btn-outline-secondary">Cancel</button>
-          <button type="button" id="promptOkBtn" class="btn btn-primary">OK</button>
+        <div class="flex flex-nowrap items-center justify-end gap-3">
+          <button type="button" id="promptCancelBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+          <button type="button" id="promptOkBtn" class="btn btn-primary shrink-0">OK</button>
         </div>
       </div>
     </dialog>
 
     <!-- Help Modal -->
-    <dialog id="helpModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-lg fixed inset-0 m-auto">
+    <dialog id="helpModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-lg fixed inset-0 m-auto" aria-labelledby="helpModalLabel">
       <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
-        <h5 class="text-lg font-semibold" id="helpModalLabel">Help / Keyboard Shortcuts</h5>
-        <button type="button" id="closeHelpBtnX" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none">&times;</button>
+        <h5 class="text-lg font-semibold tracking-tight" id="helpModalLabel">Help &amp; shortcuts</h5>
+        <button type="button" id="closeHelpBtnX" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none" aria-label="Close">&times;</button>
       </div>
       <div class="p-4 space-y-4">
-        <h6 class="font-medium text-zinc-800 dark:text-zinc-200">Keyboard Shortcuts</h6>
+        <h6 class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Keyboard</h6>
         <div class="overflow-x-auto [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
           <table class="table w-full">
             <tbody>
-              <tr><td><strong>Space</strong></td><td>Play / Pause</td></tr>
-              <tr><td><strong>Left Arrow</strong></td><td>Rewind 1s</td></tr>
-              <tr><td><strong>Right Arrow</strong></td><td>Forward 1s</td></tr>
-              <tr><td><strong>Down Arrow</strong></td><td>Rewind 5s</td></tr>
-              <tr><td><strong>Up Arrow</strong></td><td>Forward 5s</td></tr>
-              <tr><td><strong>Enter / m</strong></td><td>Add Marker</td></tr>
-              <tr><td><strong>, (Comma)</strong></td><td>Previous Marker</td></tr>
-              <tr><td><strong>. (Period)</strong></td><td>Next Marker</td></tr>
-              <tr><td><strong>l</strong></td><td>Load Video</td></tr>
-              <tr><td><strong>` (Backtick)</strong></td><td>0.5x Speed</td></tr>
-              <tr><td><strong>1 - 8</strong></td><td>1x to 8x Speed</td></tr>
-              <tr><td><strong>=</strong></td><td>Zoom In</td></tr>
-              <tr><td><strong>-</strong></td><td>Zoom Out</td></tr>
-              <tr><td><strong>Backspace</strong></td><td>Reset Zoom</td></tr>
-              <tr><td><strong>s / S</strong></td><td>Take Snapshot</td></tr>
-              <tr><td><strong>\</strong></td><td>Toggle Cinema Mode</td></tr>
+              <tr><td><strong>Space</strong></td><td>Play / pause</td></tr>
+              <tr><td><strong>Left arrow</strong></td><td>Back 1s</td></tr>
+              <tr><td><strong>Right arrow</strong></td><td>Forward 1s</td></tr>
+              <tr><td><strong>Down arrow</strong></td><td>Back 5s</td></tr>
+              <tr><td><strong>Up arrow</strong></td><td>Forward 5s</td></tr>
+              <tr><td><strong>Enter / M</strong></td><td>Add marker</td></tr>
+              <tr><td><strong>, (comma)</strong></td><td>Previous marker</td></tr>
+              <tr><td><strong>. (period)</strong></td><td>Next marker</td></tr>
+              <tr><td><strong>L</strong></td><td>Load video</td></tr>
+              <tr><td><strong>` (backtick)</strong></td><td>0.5× speed</td></tr>
+              <tr><td><strong>1 – 8</strong></td><td>1× – 8× speed</td></tr>
+              <tr><td><strong>=</strong></td><td>Zoom in</td></tr>
+              <tr><td><strong>-</strong></td><td>Zoom out</td></tr>
+              <tr><td><strong>Backspace</strong></td><td>Reset zoom</td></tr>
+              <tr><td><strong>S</strong></td><td>Snapshot</td></tr>
+              <tr><td><strong>\</strong></td><td>Cinema mode</td></tr>
             </tbody>
           </table>
         </div>
-        <h6 class="font-medium text-zinc-800 dark:text-zinc-200">Mouse Actions</h6>
-        <p class="text-sm text-zinc-600 dark:text-zinc-400"><strong>Click and drag</strong> on the video to draw a marquee box and zoom into that area.</p>
+        <h6 class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Mouse</h6>
+        <p class="text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">Drag on the video to draw a box and zoom into that area.</p>
       </div>
-      <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex justify-end">
-        <button type="button" id="closeHelpBtn" class="btn btn-secondary">Close</button>
+      <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-3">
+        <button type="button" id="closeHelpBtn" class="btn btn-primary shrink-0">Close</button>
       </div>
     </dialog>
 
     <!-- Reorder Videos Modal -->
-    <dialog id="reorder-videos-modal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-md fixed inset-0 m-auto" style="display: none;">
+    <dialog id="reorder-videos-modal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-md fixed inset-0 m-auto" style="display: none;" aria-labelledby="reorderModalTitle">
       <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
-        <h5 class="text-lg font-semibold">Reorder Playlist</h5>
-        <button type="button" id="close-reorder-modal-x" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none">&times;</button>
+        <h5 class="text-lg font-semibold tracking-tight" id="reorderModalTitle">Reorder playlist</h5>
+        <button type="button" id="close-reorder-modal-x" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none" aria-label="Close">&times;</button>
       </div>
       <div class="p-4 overflow-y-auto max-h-[50vh] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
         <div id="modal-queue-list" class="flex flex-col gap-2"></div>
       </div>
-      <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex justify-end gap-2">
-        <button type="button" id="closeReorderVideosBtn" class="btn btn-secondary">Cancel</button>
-        <button type="button" id="save-reorder-btn" class="btn btn-primary">Save Changes</button>
+      <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-3">
+        <button type="button" id="closeReorderVideosBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+        <button type="button" id="save-reorder-btn" class="btn btn-primary shrink-0">Save order</button>
       </div>
     </dialog>
 
