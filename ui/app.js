@@ -188,29 +188,88 @@ const waitForPlayerReadyToSeek = (videoEl, timeoutMs = 12000) =>
 
 /**
  * Effective local end of the current clip for handoff/stop:
- * clipOut if set, else media duration.
+ * prefer Set Clip Out marker, then clipOutTime, then media duration.
+ * Marker wins so a stale clipOutTime (e.g. full-file default) cannot ignore an out bound.
  */
 const getEffectiveClipOut = () => {
+	const list =
+		typeof markers !== "undefined" && Array.isArray(markers) ? markers : null;
+	if (list?.length) {
+		const endMarker = list.find((m) => m.type === "out" || m.type === "end");
+		const mt = endMarker != null ? Number(endMarker.startTime) : NaN;
+		if (Number.isFinite(mt) && mt > 0) return mt;
+	}
 	if (clipOutTime > 0) return clipOutTime;
+	const q =
+		typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
+	const qOut = Number(q?.clipOutTime) || 0;
+	if (qOut > 0) return qOut;
 	if (typeof player !== "undefined" && player?.duration > 0) {
 		return player.duration;
 	}
-	const q =
-		typeof videoQueue !== "undefined" ? videoQueue[activeQueueIndex] : null;
 	return Number(q?.mediaDuration) || 0;
 };
+window.getEffectiveClipOut = getEffectiveClipOut;
 
 /** True if playhead is at/past clip out or true media end (with small epsilon). */
 const isAtOrPastClipOut = (currentTime) => {
 	const out = getEffectiveClipOut();
 	const mediaDur =
 		typeof player !== "undefined" && player?.duration > 0 ? player.duration : 0;
+	const t = Number(currentTime) || 0;
 	const epsilon = 0.05;
-	if (out > 0 && currentTime >= out - epsilon) return true;
-	if (mediaDur > 0 && currentTime >= mediaDur - epsilon) return true;
+	if (out > 0 && t >= out - epsilon) return true;
+	if (mediaDur > 0 && t >= mediaDur - epsilon) return true;
 	if (typeof player !== "undefined" && player?.ended) return true;
 	return false;
 };
+window.isAtOrPastClipOut = isAtOrPastClipOut;
+
+/**
+ * Solo / last-in-sequence: pause and park at clipOut while playing.
+ * Joined middle clips hand off via shouldHandoffToNextJoined instead.
+ * Safe to call from timeupdate or RAF. Does not re-seek when already paused
+ * (allows scrubbing the post-out grey region).
+ * @returns {boolean} true if at/past out (handoff started, stopped, or already there)
+ */
+const enforceClipOutStopOrHandoff = () => {
+	if (window._sequenceHandoffInProgress) return false;
+	const p =
+		(typeof player !== "undefined" && player) ||
+		window.player ||
+		document.getElementById("my_video");
+	if (!p) return false;
+	const currentTime = Number(p.currentTime) || 0;
+	if (!isAtOrPastClipOut(currentTime)) return false;
+
+	const playingThrough =
+		!p.paused || !!p.ended || !!window._sequenceContinuePlay;
+	if (shouldHandoffToNextJoined() && playingThrough) {
+		window._sequenceContinuePlay = true;
+		void handoffToNextJoinedClip();
+		return true;
+	}
+
+	// Only video or last in join run — stop transport at out
+	window._sequenceContinuePlay = false;
+	if (!p.paused) {
+		p.pause();
+		const out = getEffectiveClipOut();
+		if (out > 0 && Number.isFinite(out) && currentTime > out + 0.001) {
+			try {
+				p.currentTime = Math.min(out, p.duration > 0 ? p.duration : out);
+			} catch (_) {
+				/* ignore seek on dead element */
+			}
+		}
+	}
+	// Ensure solid black at rest (fade-out completes before cut)
+	if (typeof window.applyClipEdgeFadePreview === "function") {
+		window.applyClipEdgeFadePreview();
+	}
+	return true;
+};
+window.enforceClipOutStopOrHandoff = enforceClipOutStopOrHandoff;
 
 /** Whether current queue item should sequence-continue into the next. */
 const shouldHandoffToNextJoined = () => {
@@ -391,7 +450,9 @@ export function clampSpeedValue(value) {
  */
 export function formatSpeedBadge(value) {
 	const v = clampSpeedValue(value);
-	const s = Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+	const s = Number.isInteger(v)
+		? String(v)
+		: v.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 	return `${s}x`;
 }
 
@@ -411,7 +472,7 @@ export function getActiveSpeedMarker(
 ) {
 	const t = Number(localTime) || 0;
 	const inT = Math.max(0, Number(clipIn) || 0);
-	let outT = Math.max(0, Number(clipOut) || 0);
+	const outT = Math.max(0, Number(clipOut) || 0);
 	const list = Array.isArray(markersList) ? markersList : [];
 	let best = null;
 	let bestIdx = -1;
@@ -420,7 +481,10 @@ export function getActiveSpeedMarker(
 		if (!m || m.type !== "speed") continue;
 		const mt = Number(m.startTime) || 0;
 		if (outT > inT && (mt < inT - 1e-3 || mt > outT + 1e-3)) continue;
-		if (mt <= t + 1e-4 && (best == null || mt >= (Number(best.startTime) || 0))) {
+		if (
+			mt <= t + 1e-4 &&
+			(best == null || mt >= (Number(best.startTime) || 0))
+		) {
 			best = m;
 			bestIdx = i;
 		}
@@ -440,7 +504,7 @@ export function getActiveSpeedMarker(
  */
 export function buildSpeedRanges(markersList, clipIn, clipOut) {
 	const inT = Math.max(0, Number(clipIn) || 0);
-	let outT = Math.max(0, Number(clipOut) || 0);
+	const outT = Math.max(0, Number(clipOut) || 0);
 	if (outT <= inT) return [{ start: inT, end: inT, rate: 1 }];
 	const speeds = (Array.isArray(markersList) ? markersList : [])
 		.filter((m) => m?.type === "speed")
@@ -452,7 +516,10 @@ export function buildSpeedRanges(markersList, clipIn, clipOut) {
 	// Dedupe same-time markers (keep last)
 	const deduped = [];
 	for (const s of speeds) {
-		if (deduped.length && Math.abs(deduped[deduped.length - 1].t - s.t) < 1e-4) {
+		if (
+			deduped.length &&
+			Math.abs(deduped[deduped.length - 1].t - s.t) < 1e-4
+		) {
 			deduped[deduped.length - 1] = s;
 		} else {
 			deduped.push(s);
@@ -538,38 +605,51 @@ export function effectiveTimeToSource(effectiveTime, ranges) {
 }
 
 /**
- * Active clip speed ranges + warped duration (shared playback / export / timeline).
+ * Solo detailed-timeline speed model.
+ *
+ * Ruler / filmstrip / playhead use FULL media length (0..mediaDuration),
+ * speed-warped only — clipIn/clipOut must NOT shrink the timeline so users can
+ * drag bounds and markers into head/tail outside the active clip window.
+ *
+ * Export / join segment math still call buildSpeedRanges(markers, clipIn, clipOut)
+ * separately; this model is for detailed-timeline layout + source↔effective maps.
  */
 window.getActiveSpeedTimelineModel = () => {
-	const qIndex =
-		typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
-	const video =
-		typeof videoQueue !== "undefined" ? videoQueue[qIndex] : null;
+	const qIndex = typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	const video = typeof videoQueue !== "undefined" ? videoQueue[qIndex] : null;
 	const list =
 		typeof markers !== "undefined" && Array.isArray(markers)
 			? markers
 			: video?.appState?.markers || [];
-	const inT =
+	const p = (typeof player !== "undefined" && player) || window.player || null;
+	// Real clip window (for grey shading / fades only — not timeline length)
+	const clipIn =
 		typeof getClipInTime === "function"
 			? getClipInTime(video)
-			: Number(video?.clipInTime) || 0;
-	let outT =
+			: Math.max(0, Number(video?.clipInTime) || 0);
+	let clipOut =
 		typeof getClipOutTime === "function"
 			? getClipOutTime(video, qIndex)
-			: Number(video?.clipOutTime) || 0;
-	const p =
-		(typeof player !== "undefined" && player) || window.player || null;
-	if (outT <= inT && p?.duration) outT = p.duration;
-	const ranges = buildSpeedRanges(list, inT, outT > inT ? outT : inT);
-	const effectiveDuration = getSpeedWarpedDuration(
-		list,
-		inT,
-		outT > inT ? outT : inT,
-	);
+			: Math.max(0, Number(video?.clipOutTime) || 0);
+	// Full media length for the timeline
+	let mediaDur =
+		typeof getMediaDurationForQueueIndex === "function"
+			? getMediaDurationForQueueIndex(video, qIndex)
+			: Number(video?.mediaDuration) || 0;
+	if (mediaDur <= 0 && p?.duration > 0) mediaDur = p.duration;
+	if (mediaDur <= 0 && clipOut > clipIn) mediaDur = clipOut;
+	if (mediaDur <= 0) mediaDur = 0.001;
+	if (clipOut <= clipIn) clipOut = mediaDur;
+	if (clipOut > mediaDur) clipOut = mediaDur;
+
+	// Speed ranges over FULL source so timeline length = video length (warped)
+	const ranges = buildSpeedRanges(list, 0, mediaDur);
+	const effectiveDuration = getSpeedWarpedDuration(list, 0, mediaDur);
 	return {
 		queueIndex: qIndex,
-		clipIn: inT,
-		clipOut: outT > inT ? outT : inT,
+		clipIn,
+		clipOut,
+		mediaDuration: mediaDur,
 		ranges,
 		effectiveDuration: Math.max(0.001, effectiveDuration),
 		hasSpeedMarkers: list.some((m) => m?.type === "speed"),
@@ -630,8 +710,7 @@ window.applyActiveSpeedPlayback = (opts = {}) => {
 	if (!videoEl) return 1;
 	if (window._sequenceHandoffInProgress) return videoEl.playbackRate || 1;
 
-	const qIndex =
-		typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	const qIndex = typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
 	const list =
 		typeof markers !== "undefined" && Array.isArray(markers)
 			? markers
@@ -699,7 +778,22 @@ window.SPEED_MAX = SPEED_MAX;
 window.SPEED_DEFAULT = SPEED_DEFAULT;
 
 /**
+ * Early completion of fade-out before the cut (seconds).
+ * Matches export (lib.rs build_segment_fade_filters): solid black a few frames
+ * before clipOut so the last visible frame is not mid-grey when transport stops.
+ * ~2 frames @ 24fps, capped to 20% of fade and half the active span.
+ */
+export function fadeOutEarlyBlackSec(fadeOutSec, activeDur) {
+	const fo = Math.max(0, Number(fadeOutSec) || 0);
+	const span = Math.max(0, Number(activeDur) || 0);
+	if (fo <= 0 || span <= 0) return 0;
+	return Math.min(0.08, fo * 0.2, span * 0.5);
+}
+window.fadeOutEarlyBlackSec = fadeOutEarlyBlackSec;
+
+/**
  * Compute linear fade gain (0..1) for local media time within [clipIn, clipOut].
+ * Fade-out reaches full black slightly *before* clipOut (export parity).
  * @param {number} localTime
  * @param {number} clipIn
  * @param {number} clipOut
@@ -730,9 +824,17 @@ export function computeClipEdgeFadeGain(
 		else if (t < endIn) gain = Math.min(gain, (t - inT) / fi);
 	}
 	if (fo > 0 && outT > inT) {
-		const startOut = outT - fo;
-		if (t >= outT) gain = 0;
-		else if (t > startOut) gain = Math.min(gain, (outT - t) / fo);
+		const activeDur = outT - inT;
+		const d = Math.min(fo, activeDur);
+		// Reach solid black early so park-at-clipOut / epsilon still shows black
+		const early = fadeOutEarlyBlackSec(d, activeDur);
+		const blackAt = Math.max(inT, outT - early);
+		const startOut = Math.max(inT, blackAt - d);
+		if (t >= blackAt - 1e-6) gain = 0;
+		else if (t > startOut) {
+			const span = Math.max(1e-6, blackAt - startOut);
+			gain = Math.min(gain, (blackAt - t) / span);
+		}
 	}
 	if (!Number.isFinite(gain)) return 1;
 	return Math.max(0, Math.min(1, gain));
@@ -741,7 +843,9 @@ window.computeClipEdgeFadeGain = computeClipEdgeFadeGain;
 
 /**
  * Shared fade-zone time ranges (source-local seconds).
- * Fade-in: [clipIn, clipIn+fadeInSec]; fade-out: [clipOut-fadeOutSec, clipOut].
+ * Fade-in: [clipIn, clipIn+fadeInSec].
+ * Fade-out: ramps over fadeOutSec and hits solid black slightly before clipOut
+ * (same early-black as export / computeClipEdgeFadeGain).
  * Clamped to [clipIn, clipOut]. Returns null ranges when no fade / invalid bounds.
  * @returns {{ fadeIn: { start: number, end: number }|null, fadeOut: { start: number, end: number }|null, clipIn: number, clipOut: number }}
  */
@@ -752,21 +856,22 @@ export function computeClipFadeZoneRanges(
 	fadeOutSec,
 ) {
 	const inT = Math.max(0, Number(clipIn) || 0);
-	let outT = Math.max(0, Number(clipOut) || 0);
+	const outT = Math.max(0, Number(clipOut) || 0);
 	if (outT <= inT) {
 		return { fadeIn: null, fadeOut: null, clipIn: inT, clipOut: outT };
 	}
 	const activeDur = outT - inT;
 	const fi = Math.min(Math.max(0, Number(fadeInSec) || 0), activeDur);
 	const fo = Math.min(Math.max(0, Number(fadeOutSec) || 0), activeDur);
+	const early = fadeOutEarlyBlackSec(fo, activeDur);
+	const blackAt = Math.max(inT, outT - early);
+	const fadeOutStart = fo > 1e-4 ? Math.max(inT, blackAt - fo) : inT;
 	return {
 		clipIn: inT,
 		clipOut: outT,
 		fadeIn: fi > 1e-4 ? { start: inT, end: inT + fi } : null,
-		fadeOut:
-			fo > 1e-4
-				? { start: Math.max(inT, outT - fo), end: outT }
-				: null,
+		// end = when solid black is reached (≤ clipOut); not past the cut
+		fadeOut: fo > 1e-4 ? { start: fadeOutStart, end: blackAt } : null,
 	};
 }
 window.computeClipFadeZoneRanges = computeClipFadeZoneRanges;
@@ -786,10 +891,8 @@ window.applyClipEdgeFadePreview = () => {
 	if (!videoEl) return;
 	if (window._sequenceHandoffInProgress) return;
 
-	const qIndex =
-		typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
-	const video =
-		typeof videoQueue !== "undefined" ? videoQueue[qIndex] : null;
+	const qIndex = typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	const video = typeof videoQueue !== "undefined" ? videoQueue[qIndex] : null;
 	const fades =
 		typeof getVideoFadeSeconds === "function"
 			? getVideoFadeSeconds(video, qIndex)
@@ -909,10 +1012,7 @@ window.paintClipFadeZonesOnHost = (host, opts) => {
 		}
 		if (widthPct <= 0.02) return;
 		// Never let zone extend past clipOut on the host
-		const maxRight =
-			mediaRelative
-				? (ranges.clipOut / mediaDur) * 100
-				: 100;
+		const maxRight = mediaRelative ? (ranges.clipOut / mediaDur) * 100 : 100;
 		if (leftPct + widthPct > maxRight + 0.001) {
 			widthPct = Math.max(0, maxRight - leftPct);
 		}
@@ -1017,8 +1117,7 @@ window.refreshClipFadeTimelineZones = () => {
 			: null;
 	const inT = model?.clipIn ?? (Number(video?.clipInTime) || 0);
 	let outT = model?.clipOut ?? (Number(video?.clipOutTime) || 0);
-	const p =
-		(typeof player !== "undefined" && player) || window.player || null;
+	const p = (typeof player !== "undefined" && player) || window.player || null;
 	if (outT <= inT && p?.duration) outT = p.duration;
 
 	if (getComputedStyle(videoTrack).position === "static") {
@@ -3189,10 +3288,7 @@ window.layoutSpeedWarpedFilmstrip = (
 		cell.dataset.srcEnd = String(b);
 		cell.style.cssText = `position:absolute;top:0;bottom:0;left:${leftPct}%;width:${widthPct}%;overflow:hidden;display:flex;align-items:stretch;box-sizing:border-box;`;
 		// Slice thumbs covering this source span within [clipIn, clipOut]
-		const i0 = Math.max(
-			0,
-			Math.floor(((a - inT) / srcSpan) * n - 1e-9),
-		);
+		const i0 = Math.max(0, Math.floor(((a - inT) / srcSpan) * n - 1e-9));
 		const i1 = Math.min(n, Math.ceil(((b - inT) / srcSpan) * n + 1e-9));
 		const slice = thumbnailPaths.slice(i0, Math.max(i0 + 1, i1));
 		for (const pathString of slice) {
@@ -3473,17 +3569,20 @@ window.loadWaveformTimeline = async () => {
 
 	try {
 		if (!multi) {
-			// -------- Solo path (speed-warped output timebase when Speed markers active) --------
+			// -------- Solo path: full media length; speed-warp only (clipIn/Out do not shrink) --------
 			const videoEl = document.querySelector("video") || player;
-			const mediaDuration = videoEl.duration || player.duration || 0;
+			const mediaDuration = Math.max(
+				0.001,
+				videoEl?.duration || player?.duration || 0,
+			);
 			const speedModel =
 				typeof window.getActiveSpeedTimelineModel === "function"
 					? window.getActiveSpeedTimelineModel()
 					: null;
-			// Ruler / zoom use OUTPUT duration (∫ dt/rate), not raw source duration
+			// Ruler / zoom = full video OUTPUT duration (∫ dt/rate over 0..media), never clip window
 			const timelineDur = Math.max(
 				0.001,
-				speedModel?.effectiveDuration || mediaDuration || 0.001,
+				speedModel?.effectiveDuration || mediaDuration,
 			);
 			if (typeof window.applyTimelineZoomLayout === "function") {
 				window.applyTimelineZoomLayout();
@@ -3513,12 +3612,12 @@ window.loadWaveformTimeline = async () => {
 			const audioTrack =
 				rows[0]?.audioTrack || document.getElementById("timeline-audio-track");
 
-			const soloIn = speedModel?.clipIn ?? (clipInTime || 0);
-			const soloOut =
-				speedModel?.clipOut ||
-				(clipOutTime > 0
-					? clipOutTime
-					: mediaDuration || 0);
+			// Full-file span for filmstrip/waveform; clipIn/Out only drive grey shading
+			const mediaStart = 0;
+			const mediaEnd =
+				speedModel?.mediaDuration > 0
+					? speedModel.mediaDuration
+					: mediaDuration;
 
 			if (isAudioOnlyMedia(requestPath)) {
 				if (videoTrack) {
@@ -3533,8 +3632,8 @@ window.loadWaveformTimeline = async () => {
 						audioTrack,
 						peakArray,
 						speedModel.ranges,
-						soloIn,
-						soloOut,
+						mediaStart,
+						mediaEnd,
 						mediaDuration,
 					);
 				} else {
@@ -3566,8 +3665,9 @@ window.loadWaveformTimeline = async () => {
 				.invoke("generate_timeline_thumbnails", {
 					videoPath: requestPath,
 					tileCount: requiredTileCount,
-					startSeconds: soloIn,
-					endSeconds: soloOut > soloIn ? soloOut : undefined,
+					// Full media — clip bounds must not crop the filmstrip
+					startSeconds: mediaStart,
+					endSeconds: mediaEnd > mediaStart ? mediaEnd : undefined,
 				})
 				.then((thumbnailPaths) => {
 					if (isStaleRequest()) return;
@@ -3579,16 +3679,16 @@ window.loadWaveformTimeline = async () => {
 							videoTrack,
 							thumbnailPaths,
 							speedModel.ranges,
-							soloIn,
-							soloOut,
+							mediaStart,
+							mediaEnd,
 						);
 						if (audioTrack) {
 							window.layoutSpeedWarpedWaveform(
 								audioTrack,
 								peakArray,
 								speedModel.ranges,
-								soloIn,
-								soloOut,
+								mediaStart,
+								mediaEnd,
 								mediaDuration,
 							);
 						}
@@ -3684,13 +3784,10 @@ window.loadWaveformTimeline = async () => {
 				// Waveform for full source so head/tail outside clip bounds are visible under tint
 				let segPeaks = null;
 				try {
-					segPeaks = await window.__TAURI__.core.invoke(
-						"get_waveform_data",
-						{
-							videoPath: path,
-							durationSeconds: mediaDur,
-						},
-					);
+					segPeaks = await window.__TAURI__.core.invoke("get_waveform_data", {
+						videoPath: path,
+						durationSeconds: mediaDur,
+					});
 					if (isStaleRequest()) return;
 					const hasSpeedW = (seg.speedRanges || []).some(
 						(r) => Math.abs((Number(r.rate) || 1) - 1) > 0.01,
@@ -3754,10 +3851,7 @@ window.loadWaveformTimeline = async () => {
 					);
 					if (hasSpeed && videoFill) {
 						// Active [clipIn,clipOut] thumbs laid out in OUTPUT time (2x half width)
-						const activeTiles = Math.max(
-							Math.floor(activeWidthPx / 80),
-							4,
-						);
+						const activeTiles = Math.max(Math.floor(activeWidthPx / 80), 4);
 						const thumbnailPaths = await window.__TAURI__.core.invoke(
 							"generate_timeline_thumbnails",
 							{
@@ -4453,7 +4547,20 @@ const initializePlayer = () => {
 		});
 	}
 	if (DOM.addVideoQueueBtn) {
-		DOM.addVideoQueueBtn.addEventListener("click", addNewVideoToQueue);
+		DOM.addVideoQueueBtn.addEventListener("click", (e) => {
+			if (
+				DOM.addVideoQueueBtn.getAttribute("aria-disabled") === "true" ||
+				!hasProjectMediaLoaded()
+			) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (typeof showToast === "function") {
+					showToast("Load a video before adding to the queue.", "info");
+				}
+				return;
+			}
+			addNewVideoToQueue(e);
+		});
 	}
 	if (DOM.editVideoQueueBtn) {
 		DOM.editVideoQueueBtn.addEventListener("click", editVideoInQueue);
@@ -4470,6 +4577,7 @@ const initializePlayer = () => {
 			const mainGrid = document.getElementById("mainLayoutGrid");
 			if (mainGrid) {
 				const isOpen = mainGrid.classList.toggle("playlist-sidebar-open");
+				reorderBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
 				if (isOpen && typeof window.renderSidebarPlaylist === "function") {
 					window.renderSidebarPlaylist();
 				}
@@ -4484,7 +4592,13 @@ const initializePlayer = () => {
 			if (mainGrid) {
 				mainGrid.classList.remove("playlist-sidebar-open");
 			}
+			const qBtn = document.getElementById("reorder-videos-btn");
+			if (qBtn) qBtn.setAttribute("aria-expanded", "false");
 		});
+	}
+	// Initial muted state for + until media is present
+	if (typeof updateTitlebarQueueControls === "function") {
+		updateTitlebarQueueControls();
 	}
 
 	const toggleMiniPlayerBtn = document.getElementById("toggleMiniPlayerBtn");
@@ -5350,10 +5464,14 @@ const initializePlayer = () => {
 					if (typeof window.scheduleSpeedTimelineRebuild === "function") {
 						window.scheduleSpeedTimelineRebuild();
 					}
-					toConsole("Speed slider → active Speed marker", {
-						index: activeIdx,
-						speed,
-					}, debuggin);
+					toConsole(
+						"Speed slider → active Speed marker",
+						{
+							index: activeIdx,
+							speed,
+						},
+						debuggin,
+					);
 				} else {
 					if (player) player.playbackRate = speed;
 					playbackSpeed = speed;
@@ -5397,10 +5515,7 @@ const initializePlayer = () => {
 					? window.getActiveSpeedTimelineModel()
 					: null;
 			if (speedModel?.hasSpeedMarkers) {
-				const eff = Math.max(
-					0,
-					Math.min(speedModel.effectiveDuration, time),
-				);
+				const eff = Math.max(0, Math.min(speedModel.effectiveDuration, time));
 				time = effectiveTimeToSource(eff, speedModel.ranges);
 			}
 			// Constrain to clipIn/Out on local media clock
@@ -6075,28 +6190,8 @@ const seektimeupdate = () => {
 			return;
 		}
 
-		// At clipOut / media end: hand off to next joined clip, or stop as today
-		if (isAtOrPastClipOut(currentTime)) {
-			const playingThrough =
-				!player.paused || !!player.ended || !!window._sequenceContinuePlay;
-			if (shouldHandoffToNextJoined() && playingThrough) {
-				// Sequence-continue — do not treat as "video ended / stop"
-				window._sequenceContinuePlay = true;
-				void handoffToNextJoinedClip();
-				return;
-			}
-			// Solo (or unjoined): stop once while playing; avoid seek-loop when already parked
-			if (!player.paused) {
-				player.pause();
-				const out = getEffectiveClipOut();
-				if (out > 0 && Number.isFinite(out) && currentTime > out + 0.001) {
-					try {
-						player.currentTime = Math.min(out, player.duration || out);
-					} catch (_) {
-						/* ignore */
-					}
-				}
-			}
+		// At clipOut / media end: hand off to next joined clip, or stop (solo / last)
+		if (enforceClipOutStopOrHandoff()) {
 			return;
 		}
 	}
@@ -6223,6 +6318,80 @@ const positionControls = () => {
 	}
 };
 
+/**
+ * True when the project has loadable media (active path / player src / any queue item).
+ * Used to gate title-bar "add to queue" until a first file is open.
+ */
+const hasProjectMediaLoaded = () => {
+	if (typeof videoQueue !== "undefined" && Array.isArray(videoQueue)) {
+		for (const v of videoQueue) {
+			if (v?.videoFilePath || v?.videoFileName) return true;
+		}
+	}
+	const p =
+		(typeof player !== "undefined" && player) ||
+		document.getElementById("my_video") ||
+		document.querySelector("video");
+	const src = p?.getAttribute?.("src") || p?.src || "";
+	if (src && typeof isEmptyOrOriginOnlyMediaSrc === "function") {
+		return !isEmptyOrOriginOnlyMediaSrc(src);
+	}
+	return !!src;
+};
+
+/** Enable/mute title-bar "+" until media is loaded; refresh playlist-queue badge. */
+const updateTitlebarQueueControls = () => {
+	const addBtn =
+		DOM.addVideoQueueBtn || document.getElementById("addVideoQueueBtn");
+	const mediaReady = hasProjectMediaLoaded();
+	if (addBtn) {
+		// Use aria-disabled (not HTML disabled) so a muted click can still toast.
+		addBtn.setAttribute("aria-disabled", mediaReady ? "false" : "true");
+		addBtn.title = mediaReady
+			? "Add Video"
+			: "Load a video before adding to the queue";
+		addBtn.classList.toggle("opacity-40", !mediaReady);
+		addBtn.classList.toggle("cursor-not-allowed", !mediaReady);
+		addBtn.classList.toggle("pointer-events-auto", true);
+	}
+
+	const badge = document.getElementById("playlist-queue-badge");
+	const reorderBtn =
+		DOM.reorderVideosBtn || document.getElementById("reorder-videos-btn");
+	let count = 0;
+	if (typeof videoQueue !== "undefined" && Array.isArray(videoQueue)) {
+		count = videoQueue.filter(
+			(v) => v?.videoFilePath || v?.videoFileName,
+		).length;
+	}
+	if (badge) {
+		if (count > 0) {
+			badge.textContent = count > 99 ? "99+" : String(count);
+			badge.classList.remove("hidden");
+		} else {
+			badge.classList.add("hidden");
+		}
+	}
+	if (reorderBtn) {
+		const open = document
+			.getElementById("mainLayoutGrid")
+			?.classList.contains("playlist-sidebar-open");
+		reorderBtn.title = "Playlist queue";
+		reorderBtn.setAttribute("aria-label", "Playlist queue");
+		reorderBtn.setAttribute("aria-expanded", open ? "true" : "false");
+		if (count > 0) {
+			reorderBtn.setAttribute(
+				"aria-description",
+				`${count} item${count === 1 ? "" : "s"} in playlist queue`,
+			);
+		} else {
+			reorderBtn.removeAttribute("aria-description");
+		}
+	}
+};
+window.updateTitlebarQueueControls = updateTitlebarQueueControls;
+window.hasProjectMediaLoaded = hasProjectMediaLoaded;
+
 /** Updates the load video button visual styling based on player load state. */
 const updateLoadButtonColor = () => {
 	if (loadVideoButton && player && playPauseButton) {
@@ -6259,6 +6428,10 @@ const updateLoadButtonColor = () => {
 			muteButton.disabled = false;
 			volumeSlider.disabled = false;
 		}
+	}
+	// Keep title-bar add/queue affordances in sync with load state
+	if (typeof updateTitlebarQueueControls === "function") {
+		updateTitlebarQueueControls();
 	}
 };
 // Exposed for classic scripts (state.js) and loadVideo post-load UI sync
@@ -7137,7 +7310,13 @@ async function processBatchQueue(presetType) {
 								end: Number(r.end) || 0,
 								rate: clampSpeedValue(r.rate ?? 1),
 							}))
-						: [{ start: Number(s.start_time) || 0, end: Number(s.end_time) || 0, rate: 1 }],
+						: [
+								{
+									start: Number(s.start_time) || 0,
+									end: Number(s.end_time) || 0,
+									rate: 1,
+								},
+							],
 				}));
 				if (window.TM_DEBUG_MODE || debuggin) {
 					console.log("[export_queue_job] segments", {
@@ -7360,7 +7539,10 @@ async function executeExport(presetType) {
 				quality,
 				stripAudio: false,
 			});
-			showToast(`Exported: ${actualOutputPath.split(/[/\\]/).pop()}`, "success");
+			showToast(
+				`Exported: ${actualOutputPath.split(/[/\\]/).pop()}`,
+				"success",
+			);
 			return;
 		}
 
@@ -7754,6 +7936,9 @@ const renderVideoQueueSelect = () => {
 		DOM.videoQueueSelect.appendChild(option);
 	}
 	DOM.videoQueueSelect.selectedIndex = activeQueueIndex;
+	if (typeof updateTitlebarQueueControls === "function") {
+		updateTitlebarQueueControls();
+	}
 };
 
 /** Switches the active video to the specified index in the queue. */
@@ -7994,6 +8179,13 @@ const addVideoToQueue = async () => {
 
 async function addNewVideoToQueue(event) {
 	if (event) event.preventDefault();
+
+	if (!hasProjectMediaLoaded()) {
+		if (typeof showToast === "function") {
+			showToast("Load a video before adding to the queue.", "info");
+		}
+		return;
+	}
 
 	console.log("[Queue Subsystem] Invoking system native file selector...");
 
@@ -8469,9 +8661,7 @@ export function buildWebVttFromCues(cues, endLimit = 0) {
 				endSec = startSec + VTT_DEFAULT_CUE_HOLD_SEC;
 			}
 		}
-		const cueText = escapeVttText(
-			sorted[idx].name || `Marker ${idx + 1}`,
-		);
+		const cueText = escapeVttText(sorted[idx].name || `Marker ${idx + 1}`);
 		vttContent += `${formatVttTimestamp(startSec)} --> ${formatVttTimestamp(endSec)}\n${cueText}\n\n`;
 	}
 	return vttContent;

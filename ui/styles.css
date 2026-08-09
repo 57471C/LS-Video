@@ -536,6 +536,40 @@ body.cinema-mode #toastContainer {
 	transform: rotate(180deg);
 }
 
+/* Detailed-timeline marker drag handles (stem + flag; wide hit target) */
+.timeline-marker-handle {
+	width: 14px;
+	/* Center on time without overflowing the right edge when left≈100% */
+	transform: translateX(-50%);
+	margin-left: 0;
+	background: transparent !important;
+	border: none !important;
+	touch-action: none;
+	user-select: none;
+}
+.timeline-marker-handle[data-clip-bound="out"],
+.timeline-marker-handle[data-clip-bound="in"] {
+	width: 16px;
+	z-index: 30;
+}
+.timeline-marker-handle:hover .timeline-marker-stem,
+.timeline-marker-handle:hover .timeline-marker-flag,
+.timeline-marker-handle:focus-visible .timeline-marker-stem,
+.timeline-marker-handle:focus-visible .timeline-marker-flag {
+	filter: brightness(1.2);
+}
+/* Ensure overlay can paint end handles (parent may clip at 100%) */
+#timeline-marker-overlay {
+	overflow: visible;
+}
+body.timeline-marker-dragging {
+	cursor: ew-resize !important;
+	user-select: none !important;
+}
+body.timeline-marker-dragging * {
+	cursor: ew-resize !important;
+}
+
 /* Ensure the media panel locks flawlessly to the dead-center bottom in cinema mode */
 .cinema-mode #media-controls-container,
 .cinema-mode .media-controls-panel-class,

@@ -4,6 +4,7 @@ import {
 	clampFadeSec,
 	computeClipEdgeFadeGain,
 	computeClipFadeZoneRanges,
+	fadeOutEarlyBlackSec,
 	FADE_DEFAULT_SEC,
 	FADE_HARD_MAX_SEC,
 	formatFadeBadge,
@@ -49,9 +50,19 @@ describe("clip-edge fade helpers", () => {
 			expect(computeClipEdgeFadeGain(20, 10, 40, 2, 0)).toBe(1);
 		});
 
-		it("ramps 1→0 over fade-out into clipOut", () => {
-			expect(computeClipEdgeFadeGain(38, 10, 40, 0, 2)).toBe(1);
-			expect(computeClipEdgeFadeGain(39, 10, 40, 0, 2)).toBeCloseTo(0.5, 5);
+		it("ramps 1→0 over fade-out and is solid black before clipOut", () => {
+			// early black = min(0.08, 2*0.2, 15) = 0.08 → blackAt = 39.92
+			const early = fadeOutEarlyBlackSec(2, 30);
+			expect(early).toBeCloseTo(0.08, 5);
+			const blackAt = 40 - early;
+			const startOut = blackAt - 2;
+			expect(computeClipEdgeFadeGain(startOut - 0.01, 10, 40, 0, 2)).toBe(1);
+			// Mid-ramp (linear into blackAt, not into outT)
+			const mid = (startOut + blackAt) / 2;
+			expect(computeClipEdgeFadeGain(mid, 10, 40, 0, 2)).toBeCloseTo(0.5, 5);
+			// Fully black slightly before cut
+			expect(computeClipEdgeFadeGain(blackAt, 10, 40, 0, 2)).toBe(0);
+			expect(computeClipEdgeFadeGain(39.95, 10, 40, 0, 2)).toBe(0);
 			expect(computeClipEdgeFadeGain(40, 10, 40, 0, 2)).toBe(0);
 		});
 
@@ -63,21 +74,25 @@ describe("clip-edge fade helpers", () => {
 	});
 
 	describe("computeClipFadeZoneRanges", () => {
-		it("fade-in is [clipIn, clipIn+fi]; fade-out is [clipOut-fo, clipOut]", () => {
+		it("fade-in is [clipIn, clipIn+fi]; fade-out ends at early black ≤ clipOut", () => {
 			const r = computeClipFadeZoneRanges(0, 9, 2, 1);
 			expect(r.fadeIn).toEqual({ start: 0, end: 2 });
-			// Must be LEFT of out (8→9), never [9, 10]
-			expect(r.fadeOut).toEqual({ start: 8, end: 9 });
-			expect(r.fadeOut.end).toBe(9);
+			const early = fadeOutEarlyBlackSec(1, 9);
+			const blackAt = 9 - early;
+			// Must be LEFT of out, and finish solid black before the cut
+			expect(r.fadeOut.start).toBeCloseTo(blackAt - 1, 5);
+			expect(r.fadeOut.end).toBeCloseTo(blackAt, 5);
+			expect(r.fadeOut.end).toBeLessThanOrEqual(9);
 			expect(r.fadeOut.start).toBeLessThan(r.fadeOut.end);
-			expect(r.fadeOut.start).toBe(9 - 1);
 		});
 
 		it("never places fade-out starting at clipOut (right side / grey tail)", () => {
 			const r = computeClipFadeZoneRanges(0, 9, 0, 1);
-			expect(r.fadeOut.start).toBe(8);
-			expect(r.fadeOut.end).toBe(9);
+			const early = fadeOutEarlyBlackSec(1, 9);
+			expect(r.fadeOut.start).toBeCloseTo(9 - early - 1, 5);
+			expect(r.fadeOut.end).toBeCloseTo(9 - early, 5);
 			expect(r.fadeOut.start).not.toBe(9);
+			expect(r.fadeOut.end).toBeLessThan(9);
 		});
 
 		it("clamps fades to active duration and clears zeros", () => {
@@ -86,8 +101,10 @@ describe("clip-edge fade helpers", () => {
 			expect(r.fadeOut).toBeNull();
 			const long = computeClipFadeZoneRanges(0, 4, 10, 10);
 			expect(long.fadeIn).toEqual({ start: 0, end: 4 });
-			// full-span out when fo >= active
-			expect(long.fadeOut).toEqual({ start: 0, end: 4 });
+			// full-span out when fo >= active; early black still ≤ clipOut
+			const early = fadeOutEarlyBlackSec(4, 4);
+			expect(long.fadeOut.start).toBe(0);
+			expect(long.fadeOut.end).toBeCloseTo(4 - early, 5);
 		});
 	});
 });
