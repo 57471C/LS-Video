@@ -263,6 +263,10 @@ const enforceClipOutStopOrHandoff = () => {
 			}
 		}
 	}
+	// Ensure solid black at rest (fade-out completes before cut)
+	if (typeof window.applyClipEdgeFadePreview === "function") {
+		window.applyClipEdgeFadePreview();
+	}
 	return true;
 };
 window.enforceClipOutStopOrHandoff = enforceClipOutStopOrHandoff;
@@ -774,7 +778,22 @@ window.SPEED_MAX = SPEED_MAX;
 window.SPEED_DEFAULT = SPEED_DEFAULT;
 
 /**
+ * Early completion of fade-out before the cut (seconds).
+ * Matches export (lib.rs build_segment_fade_filters): solid black a few frames
+ * before clipOut so the last visible frame is not mid-grey when transport stops.
+ * ~2 frames @ 24fps, capped to 20% of fade and half the active span.
+ */
+export function fadeOutEarlyBlackSec(fadeOutSec, activeDur) {
+	const fo = Math.max(0, Number(fadeOutSec) || 0);
+	const span = Math.max(0, Number(activeDur) || 0);
+	if (fo <= 0 || span <= 0) return 0;
+	return Math.min(0.08, fo * 0.2, span * 0.5);
+}
+window.fadeOutEarlyBlackSec = fadeOutEarlyBlackSec;
+
+/**
  * Compute linear fade gain (0..1) for local media time within [clipIn, clipOut].
+ * Fade-out reaches full black slightly *before* clipOut (export parity).
  * @param {number} localTime
  * @param {number} clipIn
  * @param {number} clipOut
@@ -805,9 +824,17 @@ export function computeClipEdgeFadeGain(
 		else if (t < endIn) gain = Math.min(gain, (t - inT) / fi);
 	}
 	if (fo > 0 && outT > inT) {
-		const startOut = outT - fo;
-		if (t >= outT) gain = 0;
-		else if (t > startOut) gain = Math.min(gain, (outT - t) / fo);
+		const activeDur = outT - inT;
+		const d = Math.min(fo, activeDur);
+		// Reach solid black early so park-at-clipOut / epsilon still shows black
+		const early = fadeOutEarlyBlackSec(d, activeDur);
+		const blackAt = Math.max(inT, outT - early);
+		const startOut = Math.max(inT, blackAt - d);
+		if (t >= blackAt - 1e-6) gain = 0;
+		else if (t > startOut) {
+			const span = Math.max(1e-6, blackAt - startOut);
+			gain = Math.min(gain, (blackAt - t) / span);
+		}
 	}
 	if (!Number.isFinite(gain)) return 1;
 	return Math.max(0, Math.min(1, gain));
@@ -816,7 +843,9 @@ window.computeClipEdgeFadeGain = computeClipEdgeFadeGain;
 
 /**
  * Shared fade-zone time ranges (source-local seconds).
- * Fade-in: [clipIn, clipIn+fadeInSec]; fade-out: [clipOut-fadeOutSec, clipOut].
+ * Fade-in: [clipIn, clipIn+fadeInSec].
+ * Fade-out: ramps over fadeOutSec and hits solid black slightly before clipOut
+ * (same early-black as export / computeClipEdgeFadeGain).
  * Clamped to [clipIn, clipOut]. Returns null ranges when no fade / invalid bounds.
  * @returns {{ fadeIn: { start: number, end: number }|null, fadeOut: { start: number, end: number }|null, clipIn: number, clipOut: number }}
  */
@@ -834,11 +863,15 @@ export function computeClipFadeZoneRanges(
 	const activeDur = outT - inT;
 	const fi = Math.min(Math.max(0, Number(fadeInSec) || 0), activeDur);
 	const fo = Math.min(Math.max(0, Number(fadeOutSec) || 0), activeDur);
+	const early = fadeOutEarlyBlackSec(fo, activeDur);
+	const blackAt = Math.max(inT, outT - early);
+	const fadeOutStart = fo > 1e-4 ? Math.max(inT, blackAt - fo) : inT;
 	return {
 		clipIn: inT,
 		clipOut: outT,
 		fadeIn: fi > 1e-4 ? { start: inT, end: inT + fi } : null,
-		fadeOut: fo > 1e-4 ? { start: Math.max(inT, outT - fo), end: outT } : null,
+		// end = when solid black is reached (≤ clipOut); not past the cut
+		fadeOut: fo > 1e-4 ? { start: fadeOutStart, end: blackAt } : null,
 	};
 }
 window.computeClipFadeZoneRanges = computeClipFadeZoneRanges;
