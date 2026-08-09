@@ -3922,8 +3922,9 @@ window.loadWaveformTimeline = async () => {
 /** Joins and compresses the selected video segments. */
 window.joinAndCompressVideos = async (videoSegments) => {
 	const proceed = await asyncConfirm(
-		"Joining these videos will clear all active timeline markers upon success. Do you want to proceed?",
-		"Confirm Join & Compress",
+		"Joining creates one file and clears all markers on these clips.",
+		"Join & compress",
+		{ confirmLabel: "Join & compress", cancelLabel: "Cancel" },
 	);
 	if (!proceed) return;
 
@@ -3939,9 +3940,11 @@ window.joinAndCompressVideos = async (videoSegments) => {
 	}
 
 	const outputFileName = await asyncPrompt(
-		"Enter output file name (e.g. final_video.mp4):",
+		"File name for the joined video:",
 		"final_video.mp4",
-		"Output File",
+		"Output file",
+		[],
+		{ confirmLabel: "Continue", cancelLabel: "Cancel" },
 	);
 	if (!outputFileName) return;
 
@@ -4010,16 +4013,26 @@ const processNewVideoFile = async (fileOrPath, isTauriPath = false) => {
 
 	if (hasExistingVideo && markers.length > 0) {
 		const save = await asyncConfirm(
-			"You have unsaved data. Would you like to save your project before loading a new video?",
-			"Unsaved Data",
+			"Save this project before loading a new video?",
+			"Unsaved changes",
+			{
+				confirmLabel: "Save",
+				cancelLabel: "Don't save",
+			},
 		);
 		if (save) {
 			await exportToJSON(false);
 			toConsole("Project saved before loading new video", null, debuggin);
 		}
 		const proceed = await asyncConfirm(
-			"Loading a new video will clear all existing data. Are you sure you want to proceed?",
-			"Load New Video",
+			"Loading a new video clears markers and data for this clip.",
+			"Load video",
+			{
+				confirmLabel: "Load video",
+				cancelLabel: "Cancel",
+				danger: true,
+				focusCancel: true,
+			},
 		);
 		if (!proceed) {
 			toConsole("User cancelled loading new video", null, debuggin);
@@ -5038,7 +5051,7 @@ const initializePlayer = () => {
 		const pkgCloseBtn = document.getElementById("pkgCloseBtn");
 
 		const resetModal = () => {
-			pkgTitle.textContent = "Packaging Project…";
+			pkgTitle.textContent = "Packaging project…";
 			pkgStatus.textContent = "Preparing…";
 			pkgBar.style.width = "0%";
 			pkgPct.textContent = "0%";
@@ -5056,7 +5069,7 @@ const initializePlayer = () => {
 				pkgCounter.textContent = `File ${current} of ${total}`;
 			}
 			if (step === "done") {
-				pkgTitle.textContent = "Package Complete";
+				pkgTitle.textContent = "Package ready";
 				pkgSpinner.classList.add("hidden");
 				pkgDoneIcon.classList.remove("hidden");
 				pkgDoneFooter.classList.remove("hidden");
@@ -5266,8 +5279,14 @@ const initializePlayer = () => {
 	newProjectButton?.addEventListener("click", async () => {
 		if (markers.length > 0 || player.getAttribute("src")) {
 			const proceed = await asyncConfirm(
-				"Are you sure you want to start a new project? All unsaved data will be lost.",
-				"New Project",
+				"Start a new project? Unsaved work will be lost.",
+				"New project",
+				{
+					confirmLabel: "New project",
+					cancelLabel: "Cancel",
+					danger: true,
+					focusCancel: true,
+				},
 			);
 			if (!proceed) return;
 		}
@@ -5850,7 +5869,7 @@ const initializePlayer = () => {
 		if (markers.length > 0 || player.src) {
 			e.preventDefault();
 			e.returnValue =
-				"You have unsaved changes. Are you sure you want to leave?";
+				"You have unsaved changes. Leave without saving?";
 			return e.returnValue;
 		}
 	});
@@ -6635,8 +6654,14 @@ const updateMarkerType = (markerIndex, newType) => {
 const deleteMarker = async (markerIndex) => {
 	if (
 		await asyncConfirm(
-			`Are you sure you want to delete the marker "${markers[markerIndex].name}"? This action cannot be undone.`,
-			"Delete Marker",
+			`Delete "${markers[markerIndex].name}"? This cannot be undone.`,
+			"Delete marker",
+			{
+				confirmLabel: "Delete",
+				cancelLabel: "Cancel",
+				danger: true,
+				focusCancel: true,
+			},
 		)
 	) {
 		markers.splice(markerIndex, 1);
@@ -7211,7 +7236,7 @@ async function processBatchQueue(presetType) {
 	if (cancelTrimBtn) {
 		cancelTrimBtn.disabled = false;
 		cancelTrimBtn.className = "btn btn-danger";
-		cancelTrimBtn.textContent = "Abort Batch";
+		cancelTrimBtn.textContent = "Stop batch";
 	}
 
 	// Refresh job list UI (progress rows)
@@ -7425,17 +7450,17 @@ async function executeExport(presetType) {
 	const trimCompressBtn = document.getElementById("trimCompressBtn");
 	const originalTrimOnlyText = trimOnlyBtn
 		? trimOnlyBtn.textContent
-		: "Trim Only (Copy)";
+		: "Trim only";
 	const originalTrimCompressText = trimCompressBtn
 		? trimCompressBtn.textContent
-		: "Trim & Compress";
+		: "Trim & compress";
 
 	if (trimOnlyBtn) {
-		trimOnlyBtn.textContent = "Exporting...";
+		trimOnlyBtn.textContent = "Exporting…";
 		trimOnlyBtn.disabled = true;
 	}
 	if (trimCompressBtn) {
-		trimCompressBtn.textContent = "Exporting...";
+		trimCompressBtn.textContent = "Exporting…";
 		trimCompressBtn.disabled = true;
 	}
 
@@ -7878,8 +7903,9 @@ async function executeExport(presetType) {
 			showToast("Video completed.", "success");
 
 			const saveConfirm = await asyncConfirm(
-				"Timestamps shifted. Save project changes now?",
-				"Save Project",
+				"Marker times were adjusted. Save the project now?",
+				"Save project",
+				{ confirmLabel: "Save", cancelLabel: "Not now" },
 			);
 			if (saveConfirm) {
 				await exportToJSON(false);
@@ -8023,8 +8049,14 @@ const removeCurrentVideo = async () => {
 	resetVideoViewport(player);
 
 	const confirmRemove = await asyncConfirm(
-		"Are you sure you want to remove this video from the project?",
-		"Remove Video",
+		"Remove this video from the project?",
+		"Remove video",
+		{
+			confirmLabel: "Remove",
+			cancelLabel: "Cancel",
+			danger: true,
+			focusCancel: true,
+		},
 	);
 	if (!confirmRemove) return;
 
@@ -8129,14 +8161,20 @@ window.removeCurrentVideo = removeCurrentVideo;
 /** Prompts for a new video name and adds a slot to the queue. */
 const addVideoToQueue = async () => {
 	const videoName = await asyncPrompt(
-		"Enter a name for the new video:",
+		"Name for the new queue item:",
 		`Video ${videoQueue.length + 1}`,
-		"New Video",
+		"Add video",
+		[],
+		{ confirmLabel: "Add", cancelLabel: "Cancel" },
 	);
 	if (!videoName) return;
 	const duplicate = await asyncConfirm(
-		"Would you like to duplicate the current video's data? (Click 'Cancel' to create a blank video slot)",
-		"Duplicate Data?",
+		"Copy markers and settings from the current clip?",
+		"Duplicate data",
+		{
+			confirmLabel: "Duplicate",
+			cancelLabel: "Blank slot",
+		},
 	);
 
 	saveLocalState();
@@ -8277,9 +8315,11 @@ async function addNewVideoToQueue(event) {
 const editVideoInQueue = async () => {
 	const currentName = videoQueue[activeQueueIndex].videoName;
 	const newName = await asyncPrompt(
-		"Rename Video:",
+		"New name for this video:",
 		currentName,
-		"Edit Video Name",
+		"Rename video",
+		[],
+		{ confirmLabel: "Rename", cancelLabel: "Cancel" },
 	);
 	if (!newName || newName.trim() === "") return;
 

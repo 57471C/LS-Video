@@ -760,8 +760,14 @@ const updateMarkersListImmediate = () => {
 						if (
 							typeof asyncConfirm === "function"
 								? await asyncConfirm(
-										`Are you sure you want to delete the marker "${name}"? This action cannot be undone.`,
-										"Delete Marker",
+										`Delete "${name}"? This cannot be undone.`,
+										"Delete marker",
+										{
+											confirmLabel: "Delete",
+											cancelLabel: "Cancel",
+											danger: true,
+											focusCancel: true,
+										},
 									)
 								: confirm(`Delete marker "${name}"?`)
 						) {
