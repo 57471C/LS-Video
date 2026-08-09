@@ -4453,7 +4453,20 @@ const initializePlayer = () => {
 		});
 	}
 	if (DOM.addVideoQueueBtn) {
-		DOM.addVideoQueueBtn.addEventListener("click", addNewVideoToQueue);
+		DOM.addVideoQueueBtn.addEventListener("click", (e) => {
+			if (
+				DOM.addVideoQueueBtn.getAttribute("aria-disabled") === "true" ||
+				!hasProjectMediaLoaded()
+			) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (typeof showToast === "function") {
+					showToast("Load a video before adding to the queue.", "info");
+				}
+				return;
+			}
+			addNewVideoToQueue(e);
+		});
 	}
 	if (DOM.editVideoQueueBtn) {
 		DOM.editVideoQueueBtn.addEventListener("click", editVideoInQueue);
@@ -4470,6 +4483,7 @@ const initializePlayer = () => {
 			const mainGrid = document.getElementById("mainLayoutGrid");
 			if (mainGrid) {
 				const isOpen = mainGrid.classList.toggle("playlist-sidebar-open");
+				reorderBtn.setAttribute("aria-expanded", isOpen ? "true" : "false");
 				if (isOpen && typeof window.renderSidebarPlaylist === "function") {
 					window.renderSidebarPlaylist();
 				}
@@ -4484,7 +4498,13 @@ const initializePlayer = () => {
 			if (mainGrid) {
 				mainGrid.classList.remove("playlist-sidebar-open");
 			}
+			const qBtn = document.getElementById("reorder-videos-btn");
+			if (qBtn) qBtn.setAttribute("aria-expanded", "false");
 		});
+	}
+	// Initial muted state for + until media is present
+	if (typeof updateTitlebarQueueControls === "function") {
+		updateTitlebarQueueControls();
 	}
 
 	const toggleMiniPlayerBtn = document.getElementById("toggleMiniPlayerBtn");
@@ -6223,6 +6243,79 @@ const positionControls = () => {
 	}
 };
 
+/**
+ * True when the project has loadable media (active path / player src / any queue item).
+ * Used to gate title-bar "add to queue" until a first file is open.
+ */
+const hasProjectMediaLoaded = () => {
+	if (typeof videoQueue !== "undefined" && Array.isArray(videoQueue)) {
+		for (const v of videoQueue) {
+			if (v?.videoFilePath || v?.videoFileName) return true;
+		}
+	}
+	const p =
+		(typeof player !== "undefined" && player) ||
+		document.getElementById("my_video") ||
+		document.querySelector("video");
+	const src = p?.getAttribute?.("src") || p?.src || "";
+	if (src && typeof isEmptyOrOriginOnlyMediaSrc === "function") {
+		return !isEmptyOrOriginOnlyMediaSrc(src);
+	}
+	return !!src;
+};
+
+/** Enable/mute title-bar "+" until media is loaded; refresh playlist-queue badge. */
+const updateTitlebarQueueControls = () => {
+	const addBtn =
+		DOM.addVideoQueueBtn || document.getElementById("addVideoQueueBtn");
+	const mediaReady = hasProjectMediaLoaded();
+	if (addBtn) {
+		// Use aria-disabled (not HTML disabled) so a muted click can still toast.
+		addBtn.setAttribute("aria-disabled", mediaReady ? "false" : "true");
+		addBtn.title = mediaReady
+			? "Add Video"
+			: "Load a video before adding to the queue";
+		addBtn.classList.toggle("opacity-40", !mediaReady);
+		addBtn.classList.toggle("cursor-not-allowed", !mediaReady);
+		addBtn.classList.toggle("pointer-events-auto", true);
+	}
+
+	const badge = document.getElementById("playlist-queue-badge");
+	const reorderBtn =
+		DOM.reorderVideosBtn || document.getElementById("reorder-videos-btn");
+	let count = 0;
+	if (typeof videoQueue !== "undefined" && Array.isArray(videoQueue)) {
+		count = videoQueue.filter((v) => v?.videoFilePath || v?.videoFileName)
+			.length;
+	}
+	if (badge) {
+		if (count > 0) {
+			badge.textContent = count > 99 ? "99+" : String(count);
+			badge.classList.remove("hidden");
+		} else {
+			badge.classList.add("hidden");
+		}
+	}
+	if (reorderBtn) {
+		const open = document
+			.getElementById("mainLayoutGrid")
+			?.classList.contains("playlist-sidebar-open");
+		reorderBtn.title = "Playlist queue";
+		reorderBtn.setAttribute("aria-label", "Playlist queue");
+		reorderBtn.setAttribute("aria-expanded", open ? "true" : "false");
+		if (count > 0) {
+			reorderBtn.setAttribute(
+				"aria-description",
+				`${count} item${count === 1 ? "" : "s"} in playlist queue`,
+			);
+		} else {
+			reorderBtn.removeAttribute("aria-description");
+		}
+	}
+};
+window.updateTitlebarQueueControls = updateTitlebarQueueControls;
+window.hasProjectMediaLoaded = hasProjectMediaLoaded;
+
 /** Updates the load video button visual styling based on player load state. */
 const updateLoadButtonColor = () => {
 	if (loadVideoButton && player && playPauseButton) {
@@ -6259,6 +6352,10 @@ const updateLoadButtonColor = () => {
 			muteButton.disabled = false;
 			volumeSlider.disabled = false;
 		}
+	}
+	// Keep title-bar add/queue affordances in sync with load state
+	if (typeof updateTitlebarQueueControls === "function") {
+		updateTitlebarQueueControls();
 	}
 };
 // Exposed for classic scripts (state.js) and loadVideo post-load UI sync
@@ -7754,6 +7851,9 @@ const renderVideoQueueSelect = () => {
 		DOM.videoQueueSelect.appendChild(option);
 	}
 	DOM.videoQueueSelect.selectedIndex = activeQueueIndex;
+	if (typeof updateTitlebarQueueControls === "function") {
+		updateTitlebarQueueControls();
+	}
 };
 
 /** Switches the active video to the specified index in the queue. */
@@ -7994,6 +8094,13 @@ const addVideoToQueue = async () => {
 
 async function addNewVideoToQueue(event) {
 	if (event) event.preventDefault();
+
+	if (!hasProjectMediaLoaded()) {
+		if (typeof showToast === "function") {
+			showToast("Load a video before adding to the queue.", "info");
+		}
+		return;
+	}
 
 	console.log("[Queue Subsystem] Invoking system native file selector...");
 
