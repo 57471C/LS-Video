@@ -43,7 +43,7 @@ A sleek, float-locked media companion designed to hover on top of your editing e
 
 The application features deep Windows registry integration for automatic workspace routing depending on what file format you open directly from your operating system explorer context:
 
-* **Raw Video Files (`.mp4`, `.avi`, `.mkv`, `.mov`, `.mpg`):** Double-clicking directly launches the app as a compact, floating **Miniplayer Widget** on top of your workspace, immediately processing the video stream.
+* **Raw Media Files (video: `.mp4`, `.avi`, `.mkv`, `.mov`, …; audio: `.mp3`, `.wav`, `.flac`, …):** Double-clicking directly launches the app as a compact, floating **Miniplayer Widget** on top of your workspace, immediately processing the stream.
 * **Project Files & Data Tables (`.lsv`, `.lsvz`, legacy `.tmv`, `.tmvz`):** Double-clicking instantly expands into a maximized **Normal Workspace**, automatically rehydrating all historical timeline markers, timestamps, metadata, and visual track layouts.
 * **Cold Boots:** Launching the app directly without parameters forces a clean maximized state into a fresh, empty workspace session.
 
@@ -53,9 +53,10 @@ The application features deep Windows registry integration for automatic workspa
 
 LS.Video values speed and minimalism, entirely avoiding heavy third-party framework layers (such as Peaks.js or Wavesurfer.js) or cloud transcription weights.
 
-* **High-Performance Canvas Timeline:** Audio tracks and video filmstrips are rendered using low-level, pure HTML5 2D canvas drawings, enabling lag-free frame lookups.
-* **Speed markers & clip-edge fades:** Speed markers (0.25×–4×) drive live `playbackRate` and warp the detailed timeline to output time; batch export uses ffmpeg `setpts`/`atempo` then optional edge fades. Clip-in/out fade durations live on the marker type menu (default 0).
-* **Batch export:** Queue-driven solo trim or joined concat, optional strip-audio, soft `.vtt` sidecars (never burn-in; VTT failures never fail the video job).
+* **High-Performance Canvas Timeline:** Audio tracks and video filmstrips are rendered using low-level, pure HTML5 2D canvas drawings, enabling lag-free frame lookups. Drag marker handles on the detailed timeline to adjust times; the solo ruler spans the **full file** (clip in/out are bounds, not length).
+* **Speed markers & clip-edge fades:** Speed markers (0.25×–4×) drive live `playbackRate` and warp the detailed timeline to output time; batch export uses ffmpeg `setpts`/`atempo` then optional edge fades. Clip-in/out fade durations live on the marker type menu (default 0); fade-out reaches solid black just before clip out.
+* **Audio & video queues:** Open and “add to queue” pickers follow the playlist kind (audio-only after an MP3 load; video once a video is present). Join is same-class only (audio+audio or video+video)—never mixed.
+* **Batch export:** Queue-driven solo trim or joined concat (video → MP4; audio-only → M4A), optional strip-audio on video jobs, soft `.vtt` sidecars (never burn-in; VTT failures never fail the video job). Clear toasts on failure—not raw ffmpeg logs.
 * **Isolated DOM Component Purging:** The application relies on a strict lifecycle separation. Standalone `.lsv` / `.tmv` data imports only swap marker data points, preserving your running visual timeline. True project switches or "New Project" resets perform clean canvas context wipes (`ctx.clearRect`) and empty image buffers without destroying core structural DOM layouts.
 * **Code Health & Compilation:** Code validation is enforced by the high-speed **Biome compiler toolchain** to maintain syntax uniformity across all tracking engines.
 
