@@ -599,6 +599,10 @@ const renderAudioWaveformCanvas = () => {
  */
 const getTimelineMarkerEntries = () => {
 	const duration = getTimelineDuration();
+	const aq =
+		typeof activeQueueIndex !== "undefined"
+			? activeQueueIndex
+			: window.activeQueueIndex || 0;
 	if (
 		isSequenceMode() &&
 		typeof window.getActiveJoinRun === "function" &&
@@ -608,10 +612,11 @@ const getTimelineMarkerEntries = () => {
 		const entries = [];
 		for (const seg of run.segments) {
 			const sourceMarkers =
-				seg.queueIndex === activeQueueIndex
+				seg.queueIndex === aq
 					? markers || []
 					: seg.video?.appState?.markers || [];
-			for (const marker of sourceMarkers) {
+			for (let mi = 0; mi < sourceMarkers.length; mi += 1) {
+				const marker = sourceMarkers[mi];
 				const seqT = window.sourceTimeToSequence(
 					seg.queueIndex,
 					marker.startTime,
@@ -622,18 +627,289 @@ const getTimelineMarkerEntries = () => {
 					startTime: seqT,
 					_localStartTime: marker.startTime,
 					_queueIndex: seg.queueIndex,
+					_markerIndex: mi,
+					_clipIn: seg.clipIn,
+					_clipOut: seg.clipOut,
+					_mediaDuration:
+						Number(seg.video?.mediaDuration) ||
+						Math.max(seg.clipOut || 0, seg.clipIn + (seg.duration || 0)),
 				});
 			}
 		}
 		entries.sort((a, b) => a.startTime - b.startTime);
 		return { entries, duration };
 	}
-	return { entries: markers || [], duration };
+	// Solo: source-local times; paint maps to effective % when speed-warped
+	const list = markers || [];
+	const soloIn = typeof clipInTime !== "undefined" ? clipInTime : 0;
+	const soloOut = typeof clipOutTime !== "undefined" ? clipOutTime : 0;
+	const p = getPlayer();
+	const mediaDur = Math.max(0, p?.duration || 0);
+	const entries = list.map((marker, mi) => ({
+		...marker,
+		startTime: marker.startTime,
+		_localStartTime: marker.startTime,
+		_queueIndex: aq,
+		_markerIndex: mi,
+		_clipIn: soloIn,
+		_clipOut: soloOut > 0 ? soloOut : mediaDur,
+		_mediaDuration: mediaDur,
+	}));
+	return { entries, duration };
+};
+
+/** Active marker drag on detailed timeline (null when idle). */
+window._timelineMarkerDrag = null;
+
+/**
+ * Clamp a candidate source-local time for a marker.
+ * Standard markers stay in [clipIn, clipOut]; in/out use Set Clip In/Out bounds.
+ */
+const clampMarkerLocalTime = (entry, localTime) => {
+	let t = Math.max(0, Number(localTime) || 0);
+	const mediaDur = Math.max(
+		0,
+		Number(entry._mediaDuration) || Number(entry._clipOut) || 0,
+	);
+	const clipIn = Math.max(0, Number(entry._clipIn) || 0);
+	let clipOut = Math.max(0, Number(entry._clipOut) || 0);
+	if (clipOut <= 0 && mediaDur > 0) clipOut = mediaDur;
+
+	const type = entry.type || "standard";
+	const isIn = type === "in" || type === "start";
+	const isOut = type === "out" || type === "end";
+
+	if (isIn) {
+		// Same as Set Clip In: 0 .. current out (or media end)
+		const maxT = clipOut > 0 ? clipOut : mediaDur > 0 ? mediaDur : t;
+		t = Math.min(Math.max(0, t), Math.max(0, maxT));
+	} else if (isOut) {
+		// Same as Set Clip Out: clipIn .. media end
+		const maxT = mediaDur > 0 ? mediaDur : Math.max(clipIn, t);
+		t = Math.min(Math.max(clipIn, t), maxT);
+	} else {
+		// Annotation / jump / loop / speed: stay inside clip window
+		const maxT = clipOut > 0 ? clipOut : mediaDur > 0 ? mediaDur : t;
+		t = Math.min(Math.max(clipIn, t), Math.max(clipIn, maxT));
+	}
+	return t;
+};
+
+/**
+ * Map timeline (effective/sequence) click time → source-local for a marker entry.
+ */
+const timelineTimeToMarkerLocal = (timelineTime, entry) => {
+	const t = Math.max(0, Number(timelineTime) || 0);
+	if (isSequenceMode() && typeof window.sequenceTimeToSource === "function") {
+		const mapped = window.sequenceTimeToSource(t);
+		if (mapped && mapped.queueIndex === entry._queueIndex) {
+			return mapped.localTime;
+		}
+		// Outside this segment: clamp to segment edge via sequence map of entry's clip
+		if (typeof window.sourceTimeToSequence === "function") {
+			const run = window.getActiveJoinRun?.();
+			const seg = run?.segments?.find(
+				(s) => s.queueIndex === entry._queueIndex,
+			);
+			if (seg) {
+				const segStart = seg.offset;
+				const segEnd = seg.offset + seg.duration;
+				if (t <= segStart) return entry._clipIn;
+				if (t >= segEnd)
+					return entry._clipOut > 0 ? entry._clipOut : entry._clipIn;
+			}
+		}
+		return entry._localStartTime;
+	}
+	// Solo: timeline is effective when speed-warped
+	if (
+		typeof window.getActiveSpeedTimelineModel === "function" &&
+		typeof window.effectiveTimeToSource === "function"
+	) {
+		const model = window.getActiveSpeedTimelineModel();
+		if (model?.hasSpeedMarkers) {
+			return window.effectiveTimeToSource(t, model.ranges);
+		}
+	}
+	return t;
+};
+
+/**
+ * Find marker list + index by stable id (or fallback index) after sorts.
+ */
+const resolveMarkerListIndex = (queueIndex, markerId, fallbackIndex) => {
+	const aq =
+		typeof activeQueueIndex !== "undefined"
+			? activeQueueIndex
+			: window.activeQueueIndex || 0;
+	const list =
+		queueIndex === aq
+			? markers || []
+			: typeof videoQueue !== "undefined" && videoQueue[queueIndex]?.appState
+				? videoQueue[queueIndex].appState.markers || []
+				: [];
+	if (markerId != null && markerId !== "") {
+		const byId = list.findIndex((m) => String(m.id) === String(markerId));
+		if (byId >= 0) return { list, index: byId };
+	}
+	if (fallbackIndex >= 0 && fallbackIndex < list.length) {
+		return { list, index: fallbackIndex };
+	}
+	return { list, index: -1 };
+};
+
+const endTimelineMarkerDrag = (persist) => {
+	const drag = window._timelineMarkerDrag;
+	if (!drag) return;
+	if (drag._raf) {
+		cancelAnimationFrame(drag._raf);
+		drag._raf = null;
+	}
+	window._timelineMarkerDrag = null;
+	document.body.classList.remove("timeline-marker-dragging");
+	document.removeEventListener("pointermove", onTimelineMarkerPointerMove);
+	document.removeEventListener("pointerup", onTimelineMarkerPointerUp);
+	document.removeEventListener("pointercancel", onTimelineMarkerPointerUp);
+	if (persist) {
+		if (typeof saveLocalState === "function") saveLocalState();
+		else if (typeof window.saveLocalState === "function") {
+			window.saveLocalState();
+		}
+		// Final paint + table after clamp/sort settled
+		if (typeof window.updateMarkersList === "function") {
+			window.updateMarkersList();
+		}
+		if (typeof window.updateSliderTicks === "function") {
+			window.updateSliderTicks();
+		}
+		if (typeof window.paintTimelineMarkersAndShading === "function") {
+			window.paintTimelineMarkersAndShading();
+		}
+		const type = drag.type || "";
+		const isBound =
+			type === "in" || type === "out" || type === "start" || type === "end";
+		if (isBound && typeof window.scheduleJoinTimelineRebuild === "function") {
+			window.scheduleJoinTimelineRebuild();
+		}
+		if (
+			type === "speed" &&
+			typeof window.scheduleSpeedTimelineRebuild === "function"
+		) {
+			window.scheduleSpeedTimelineRebuild();
+		}
+	}
+};
+
+const flushTimelineMarkerDragVisuals = () => {
+	const drag = window._timelineMarkerDrag;
+	if (!drag) return;
+	drag._raf = null;
+	if (typeof window.updateMarkersList === "function") {
+		window.updateMarkersList();
+	}
+	if (typeof window.paintTimelineMarkersAndShading === "function") {
+		window.paintTimelineMarkersAndShading();
+	}
+	if (typeof window.updateSliderTicks === "function") {
+		window.updateSliderTicks();
+	}
+};
+
+const onTimelineMarkerPointerMove = (e) => {
+	const drag = window._timelineMarkerDrag;
+	if (!drag) return;
+	e.preventDefault();
+	const overlay = document.getElementById("timeline-marker-overlay");
+	const timelineTime = timeFromTimelineClick(e.clientX, overlay);
+	let localTime = timelineTimeToMarkerLocal(timelineTime, drag.entry);
+	localTime = clampMarkerLocalTime(drag.entry, localTime);
+
+	const { list, index } = resolveMarkerListIndex(
+		drag.queueIndex,
+		drag.markerId,
+		drag.markerIndex,
+	);
+	if (index < 0 || !list[index]) return;
+
+	// Write without full join rebuild mid-drag (bounds only on mouseup)
+	list[index].startTime = localTime;
+	list.sort((a, b) => a.startTime - b.startTime);
+	const aq =
+		typeof activeQueueIndex !== "undefined"
+			? activeQueueIndex
+			: window.activeQueueIndex || 0;
+	if (
+		drag.queueIndex === aq &&
+		typeof videoQueue !== "undefined" &&
+		videoQueue[drag.queueIndex]?.appState
+	) {
+		videoQueue[drag.queueIndex].appState.markers = markers;
+	}
+	// Keep entry clip bounds snapshot for continued clamping (in/out still use prior window mid-drag)
+	drag.entry._localStartTime = localTime;
+
+	// Coalesce live table + timeline paint to animation frames
+	if (!drag._raf) {
+		drag._raf = requestAnimationFrame(flushTimelineMarkerDragVisuals);
+	}
+};
+
+const onTimelineMarkerPointerUp = (e) => {
+	const drag = window._timelineMarkerDrag;
+	if (!drag) return;
+	if (
+		e?.pointerId != null &&
+		drag.pointerId != null &&
+		e.pointerId !== drag.pointerId
+	) {
+		return;
+	}
+	// Final position from last move; optional one more sample
+	if (e?.clientX != null) {
+		onTimelineMarkerPointerMove(e);
+	}
+	// Sync clip bounds for in/out now that drag finished
+	const type = drag.type || "";
+	const isBound =
+		type === "in" || type === "out" || type === "start" || type === "end";
+	if (isBound && typeof window.syncClipBoundsFromMarkers === "function") {
+		window.syncClipBoundsFromMarkers(drag.queueIndex);
+	}
+	endTimelineMarkerDrag(true);
+};
+
+const beginTimelineMarkerDrag = (e, entry) => {
+	if (!entry) return;
+	e.preventDefault();
+	e.stopPropagation();
+	// Drop any prior drag
+	if (window._timelineMarkerDrag) {
+		endTimelineMarkerDrag(false);
+	}
+	window._timelineMarkerDrag = {
+		queueIndex: entry._queueIndex,
+		markerIndex: entry._markerIndex,
+		markerId: entry.id,
+		type: entry.type || "standard",
+		pointerId: e.pointerId,
+		entry: { ...entry },
+	};
+	document.body.classList.add("timeline-marker-dragging");
+	document.addEventListener("pointermove", onTimelineMarkerPointerMove);
+	document.addEventListener("pointerup", onTimelineMarkerPointerUp);
+	document.addEventListener("pointercancel", onTimelineMarkerPointerUp);
+	try {
+		e.currentTarget?.setPointerCapture?.(e.pointerId);
+	} catch {
+		// capture optional
+	}
 };
 
 const paintTimelineMarkersAndShading = () => {
 	const overlay = document.getElementById("timeline-marker-overlay");
 	if (!overlay) return;
+	// Keep handles interactive; shading children stay pointer-events-none
+	overlay.style.pointerEvents = "none";
 	overlay.innerHTML = "";
 
 	const player = getPlayer();
@@ -655,14 +931,14 @@ const paintTimelineMarkersAndShading = () => {
 		);
 		const endMarker = entries.find((m) => m.type === "out" || m.type === "end");
 		const soloIn =
-			startMarker && startMarker.startTime > 0
-				? startMarker.startTime
+			startMarker && startMarker._localStartTime > 0
+				? startMarker._localStartTime
 				: typeof clipInTime !== "undefined" && clipInTime > 0
 					? clipInTime
 					: 0;
 		const soloOut =
-			endMarker && endMarker.startTime > 0
-				? endMarker.startTime
+			endMarker && endMarker._localStartTime > 0
+				? endMarker._localStartTime
 				: typeof clipOutTime !== "undefined" && clipOutTime > 0
 					? clipOutTime
 					: 0;
@@ -687,7 +963,7 @@ const paintTimelineMarkersAndShading = () => {
 			const startPct = (soloInEff / duration) * 100;
 			const startShade = document.createElement("div");
 			startShade.className =
-				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
+				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60 pointer-events-none";
 			startShade.style.left = "0%";
 			startShade.style.width = `${startPct}%`;
 			fragment.appendChild(startShade);
@@ -697,7 +973,7 @@ const paintTimelineMarkersAndShading = () => {
 			const endPct = (soloOutEff / duration) * 100;
 			const endShade = document.createElement("div");
 			endShade.className =
-				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60";
+				"absolute top-0 bottom-0 bg-black/40 dark:bg-black/60 pointer-events-none";
 			endShade.style.left = `${endPct}%`;
 			endShade.style.width = `${100 - endPct}%`;
 			fragment.appendChild(endShade);
@@ -709,13 +985,13 @@ const paintTimelineMarkersAndShading = () => {
 			const effDur = Math.max(0.001, speedModel.effectiveDuration || duration);
 			for (const r of speedModel.ranges) {
 				const rate = Math.max(0.01, Number(r.rate) || 1);
-				const outSpan = (Math.max(0, r.end - r.start)) / rate;
+				const outSpan = Math.max(0, r.end - r.start) / rate;
 				if (Math.abs(rate - 1) > 0.01 && outSpan > 0) {
 					const left = (effCursor / effDur) * 100;
 					const width = (outSpan / effDur) * 100;
 					const speedShade = document.createElement("div");
 					speedShade.className =
-						"absolute top-0 bottom-0 bg-orange-500/10 dark:bg-orange-400/10";
+						"absolute top-0 bottom-0 bg-orange-500/10 dark:bg-orange-400/10 pointer-events-none";
 					speedShade.style.left = `${left}%`;
 					speedShade.style.width = `${width}%`;
 					speedShade.title = `Speed ${
@@ -741,7 +1017,7 @@ const paintTimelineMarkersAndShading = () => {
 				const boundaryPct = (run.segments[i].offset / duration) * 100;
 				const joinLine = document.createElement("div");
 				joinLine.className =
-					"absolute top-0 bottom-0 w-0.5 bg-blue-500/70 dark:bg-blue-400/60 z-10";
+					"absolute top-0 bottom-0 w-0.5 bg-blue-500/70 dark:bg-blue-400/60 z-10 pointer-events-none";
 				joinLine.style.left = `${boundaryPct}%`;
 				joinLine.title = "Join boundary";
 				fragment.appendChild(joinLine);
@@ -763,7 +1039,7 @@ const paintTimelineMarkersAndShading = () => {
 			if (widthPct > 0) {
 				const jumpShade = document.createElement("div");
 				jumpShade.className =
-					"absolute top-0 bottom-0 bg-zinc-500/20 dark:bg-zinc-900/40";
+					"absolute top-0 bottom-0 bg-zinc-500/20 dark:bg-zinc-900/40 pointer-events-none";
 				jumpShade.style.left = `${markerLeft}%`;
 				jumpShade.style.width = `${widthPct}%`;
 				fragment.appendChild(jumpShade);
@@ -779,16 +1055,14 @@ const paintTimelineMarkersAndShading = () => {
 			if (widthPct > 0) {
 				const loopShade = document.createElement("div");
 				loopShade.className =
-					"absolute top-0 bottom-0 bg-cyan-500/10 dark:bg-cyan-400/10";
+					"absolute top-0 bottom-0 bg-cyan-500/10 dark:bg-cyan-400/10 pointer-events-none";
 				loopShade.style.left = `${markerLeft}%`;
 				loopShade.style.width = `${widthPct}%`;
 				fragment.appendChild(loopShade);
 			}
 		}
 
-		// Speed zones painted once from shared ranges (effective timebase) below.
-
-		// Create line element — marker times mapped to effective % when speed-warped
+		// Create draggable handle — marker times mapped to effective % when speed-warped
 		const lineLeftPct = (() => {
 			if (
 				!isSequenceMode() &&
@@ -798,7 +1072,7 @@ const paintTimelineMarkersAndShading = () => {
 				const model = window.getActiveSpeedTimelineModel();
 				if (model?.hasSpeedMarkers && model.effectiveDuration > 0) {
 					const eff = window.sourceTimeToEffective(
-						marker.startTime,
+						marker._localStartTime ?? marker.startTime,
 						model.ranges,
 					);
 					return (eff / model.effectiveDuration) * 100;
@@ -806,9 +1080,9 @@ const paintTimelineMarkersAndShading = () => {
 			}
 			return markerLeft;
 		})();
-		const lineElement = document.createElement("div");
-		lineElement.style.left = `${lineLeftPct}%`;
 
+		let lineColorClass =
+			"bg-amber-500 dark:bg-yellow-400 border-amber-500 dark:border-yellow-400";
 		if (
 			marker.type === "in" ||
 			marker.type === "start" ||
@@ -816,21 +1090,59 @@ const paintTimelineMarkersAndShading = () => {
 			marker.type === "end" ||
 			marker.type === "jump"
 		) {
-			lineElement.className =
-				"absolute top-0 bottom-0 w-[2px] bg-zinc-400 dark:bg-zinc-500 z-10";
+			lineColorClass =
+				"bg-zinc-400 dark:bg-zinc-500 border-zinc-400 dark:border-zinc-500";
 		} else if (marker.type === "loop") {
-			lineElement.className =
-				"absolute top-0 bottom-0 w-[2px] bg-cyan-500 dark:bg-cyan-400 z-10";
+			lineColorClass =
+				"bg-cyan-500 dark:bg-cyan-400 border-cyan-500 dark:border-cyan-400";
 		} else if (marker.type === "speed") {
-			lineElement.className =
-				"absolute top-0 bottom-0 w-[2px] bg-orange-500 dark:bg-orange-400 z-10";
-		} else {
-			// normal annotation marker
-			lineElement.className =
-				"absolute top-0 bottom-0 w-[2px] bg-amber-500 dark:bg-yellow-400 z-10";
+			lineColorClass =
+				"bg-orange-500 dark:bg-orange-400 border-orange-500 dark:border-orange-400";
 		}
 
-		fragment.appendChild(lineElement);
+		const handle = document.createElement("div");
+		handle.className = `timeline-marker-handle absolute top-0 bottom-0 z-20 ${lineColorClass}`;
+		handle.style.left = `${lineLeftPct}%`;
+		handle.style.pointerEvents = "auto";
+		handle.style.cursor = "ew-resize";
+		handle.title = marker.name
+			? `Drag to adjust: ${marker.name}`
+			: "Drag to adjust marker time";
+		handle.setAttribute("role", "slider");
+		handle.setAttribute(
+			"aria-label",
+			marker.name ? `Marker ${marker.name}` : "Timeline marker",
+		);
+		handle.dataset.queueIndex = String(marker._queueIndex);
+		handle.dataset.markerIndex = String(marker._markerIndex);
+		if (marker.id != null) handle.dataset.markerId = String(marker.id);
+		handle.dataset.markerType = marker.type || "standard";
+
+		// Vertical stem (visual only)
+		const stem = document.createElement("div");
+		stem.className = `absolute top-0 bottom-0 left-1/2 -translate-x-1/2 w-[2px] ${lineColorClass
+			.split(" ")
+			.filter((c) => c.startsWith("bg-"))
+			.join(" ")} pointer-events-none`;
+		handle.appendChild(stem);
+
+		// Flag head for hit target
+		const flag = document.createElement("div");
+		flag.className = `absolute top-0 left-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-sm border ${lineColorClass} pointer-events-none`;
+		handle.appendChild(flag);
+
+		const entrySnapshot = { ...marker };
+		handle.addEventListener("pointerdown", (ev) => {
+			if (ev.button != null && ev.button !== 0) return;
+			beginTimelineMarkerDrag(ev, entrySnapshot);
+		});
+		// Block click-to-seek bubbling to filmstrip/ruler under the handle
+		handle.addEventListener("click", (ev) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+		});
+
+		fragment.appendChild(handle);
 	}
 
 	overlay.appendChild(fragment);

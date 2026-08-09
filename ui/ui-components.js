@@ -330,6 +330,8 @@ const writeMarkerLocalTime = (queueIndex, markerIndex, localTime) => {
 		window.scheduleJoinTimelineRebuild();
 	}
 };
+// Timeline drag + table edit write-back share this path
+window.writeMarkerLocalTime = writeMarkerLocalTime;
 
 let _updateMarkersListScheduled = false;
 const updateMarkersListImmediate = () => {
