@@ -11,7 +11,9 @@
     "watch:css": "tailwindcss -i ./ui/input.css -o ./ui/tailwind.css --watch",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "tauri": "tauri",
+    "build": "tauri build"
   },
   "keywords": [
     "ls-video",
@@ -24,7 +26,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.4.15",
     "@tailwindcss/cli": "^4.3.0",
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "^2.11.4",
     "husky": "^9.1.6",
     "jsdom": "^29.1.1",
     "lint-staged": "^15.2.10",
