@@ -47,8 +47,7 @@
         { "path": "$HOME/**" },
         { "path": "$RESOURCE" },
         { "path": "$RESOURCE/**" },
-        { "path": "\\\\**" },
-        { "path": "\\\\?\\UNC\\**" }
+        { "path": "**" }
       ],
       "deny": [
         { "path": "$HOME/.ssh/*" },
