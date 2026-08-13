@@ -28,6 +28,7 @@ import {
 	startVisualizer,
 	stopVisualizer,
 } from "./js/visualizer-engine.js";
+import { pathToAssetUrl } from "./js/path-to-asset-url.js";
 
 /** Audio container extensions (no video stream expected). */
 const AUDIO_MEDIA_EXTENSIONS = [
@@ -2373,27 +2374,8 @@ export function normalizePath(rawPath) {
 	return normalized;
 }
 
-/**
- * Convert a filesystem path to a WebView-loadable asset URL.
- * Always prefer Tauri native convertFileSrc (handles platform percent-encoding,
- * including %2F for path separators). Fallback matches @tauri-apps/api behaviour.
- * @param {string} filePath
- * @returns {string}
- */
-export function pathToAssetUrl(filePath) {
-	if (!filePath || typeof filePath !== "string") return filePath;
-	if (!window.__TAURI__) return filePath;
-	const convertFn =
-		window.__TAURI__.core?.convertFileSrc ||
-		window.__TAURI__.tauri?.convertFileSrc;
-	if (typeof convertFn === "function") {
-		return convertFn(filePath);
-	}
-	// Manual fallback (should be rare): same encoding as Tauri
-	const encoded = encodeURIComponent(filePath);
-	const isWin = /Windows/i.test(navigator.userAgent || "");
-	return isWin ? `https://asset.localhost/${encoded}` : `asset://${encoded}`;
-}
+// pathToAssetUrl lives in ./js/path-to-asset-url.js (hardened %2F encoding).
+export { pathToAssetUrl };
 
 if (typeof window !== "undefined") {
 	window.normalizePath = normalizePath;
