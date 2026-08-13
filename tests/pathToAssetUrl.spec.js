@@ -33,19 +33,46 @@ describe("pathToAssetUrl", () => {
 		expect(pathToAssetUrl("/Users/me/clip.mp4")).toBe("/Users/me/clip.mp4");
 	});
 
-	it("prefers core.convertFileSrc when present and sane", () => {
-		window.__TAURI__ = {
-			core: {
-				convertFileSrc: (p) => `asset://localhost/${encodeURIComponent(p)}`,
-			},
-		};
-		const path = "/Users/me/clip.mp4";
+	it("macOS ignores convertFileSrc and always uses encodeURIComponent", () => {
+		const convertFileSrc = vi.fn(() => "asset://localhost/%6FVolumes%6Fbad.mp4");
+		window.__TAURI__ = { core: { convertFileSrc } };
+		setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+		const path = "/Volumes/TV/Justice Leauge/clip.mp4";
+		const url = pathToAssetUrl(path);
+		expect(convertFileSrc).not.toHaveBeenCalled();
+		expect(url).toBe(`asset://localhost/${encodeURIComponent(path)}`);
+		expect(url).toContain("%2F");
+		expect(url).toContain("%20");
+		expect(url).not.toMatch(/%6[Ff]/);
+	});
+
+	it("macOS uses asset://localhost when convertFileSrc is missing", () => {
+		window.__TAURI__ = {};
+		setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+		const path = "/Users/me/My Video.mp4";
 		expect(pathToAssetUrl(path)).toBe(
 			`asset://localhost/${encodeURIComponent(path)}`,
 		);
+		expect(pathToAssetUrl(path)).toContain("%2F");
+		expect(pathToAssetUrl(path)).toContain("%20");
 	});
 
-	it("falls back to tauri.convertFileSrc when core is missing and sane", () => {
+	it("Windows prefers core.convertFileSrc when present and sane", () => {
+		setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+		window.__TAURI__ = {
+			core: {
+				convertFileSrc: (p) =>
+					`https://asset.localhost/${encodeURIComponent(p)}`,
+			},
+		};
+		const path = "C:\\Videos\\file.mp4";
+		expect(pathToAssetUrl(path)).toBe(
+			`https://asset.localhost/${encodeURIComponent(path)}`,
+		);
+	});
+
+	it("Windows falls back to tauri.convertFileSrc when core is missing and sane", () => {
+		setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
 		window.__TAURI__ = {
 			tauri: {
 				convertFileSrc: (p) =>
@@ -58,35 +85,21 @@ describe("pathToAssetUrl", () => {
 		);
 	});
 
-	it("rejects native URLs that encode path separators as %6F (Mac bug)", () => {
+	it("Windows rejects native URLs that encode separators as %6F", () => {
+		setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
 		window.__TAURI__ = {
 			core: {
-				// Reproduces the bad Mac runtime URL shape
 				convertFileSrc: () =>
-					"asset://localhost/%6FVolumes%6FTV%6FJustice%6Leauge%6Fclip.mp4",
+					"https://asset.localhost/%6FC%6FVideos%6Ffile.mp4",
 			},
 		};
-		setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
-		const path = "/Volumes/TV/Justice Leauge/clip.mp4";
+		const path = "C:\\Videos\\file.mp4";
 		const url = pathToAssetUrl(path);
-		expect(url).toBe(`asset://localhost/${encodeURIComponent(path)}`);
-		expect(url).toContain("%2F");
-		expect(url).toContain("%20");
-		expect(url).not.toMatch(/%6[Ff]Volumes/);
+		expect(url).toBe(`https://asset.localhost/${encodeURIComponent(path)}`);
+		expect(url).not.toMatch(/%6[Ff]/);
 	});
 
-	it("uses asset://localhost/ + encodeURIComponent on macOS when convertFileSrc is missing", () => {
-		window.__TAURI__ = {};
-		setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
-		const path = "/Users/me/My Video.mp4";
-		expect(pathToAssetUrl(path)).toBe(
-			`asset://localhost/${encodeURIComponent(path)}`,
-		);
-		expect(pathToAssetUrl(path)).toContain("%2F");
-		expect(pathToAssetUrl(path)).toContain("%20");
-	});
-
-	it("uses https://asset.localhost/ + encodeURIComponent on Windows when convertFileSrc is missing", () => {
+	it("Windows uses https://asset.localhost when convertFileSrc is missing", () => {
 		window.__TAURI__ = {};
 		setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
 		const path = "C:\\Videos\\file.mp4";
