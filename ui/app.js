@@ -2312,7 +2312,7 @@ window.clearAllPreviousProjectData = () => {
 
 /**
  * Canonical video load path for filesystem sources.
- * Always runs verify_and_prepare_video (H.265 proxy) before convertFileSrc.
+ * Always runs verify_and_prepare_video (H.265 proxy) before pathToAssetUrl.
  * Callers should set videoFileName/videoFilePath (source path) first when known;
  * this function backfills them when missing (e.g. drag-drop / launch args).
  *
@@ -2373,8 +2373,31 @@ export function normalizePath(rawPath) {
 	return normalized;
 }
 
+/**
+ * Convert a filesystem path to a WebView-loadable asset URL.
+ * Always prefer Tauri native convertFileSrc (handles platform percent-encoding,
+ * including %2F for path separators). Fallback matches @tauri-apps/api behaviour.
+ * @param {string} filePath
+ * @returns {string}
+ */
+export function pathToAssetUrl(filePath) {
+	if (!filePath || typeof filePath !== "string") return filePath;
+	if (!window.__TAURI__) return filePath;
+	const convertFn =
+		window.__TAURI__.core?.convertFileSrc ||
+		window.__TAURI__.tauri?.convertFileSrc;
+	if (typeof convertFn === "function") {
+		return convertFn(filePath);
+	}
+	// Manual fallback (should be rare): same encoding as Tauri
+	const encoded = encodeURIComponent(filePath);
+	const isWin = /Windows/i.test(navigator.userAgent || "");
+	return isWin ? `https://asset.localhost/${encoded}` : `asset://${encoded}`;
+}
+
 if (typeof window !== "undefined") {
 	window.normalizePath = normalizePath;
+	window.pathToAssetUrl = pathToAssetUrl;
 }
 
 /**
@@ -2567,17 +2590,8 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 
 		// 4. Transform native drive references into authenticated network stream URLs
 		// Playback uses the proxy path when HEVC/AVI; project globals keep the source path.
-		let validatedStreamUrl = resolvedFilePath;
-		if (window.__TAURI__) {
-			const convertFn =
-				window.__TAURI__.core?.convertFileSrc ||
-				window.__TAURI__.tauri?.convertFileSrc;
-			if (convertFn) {
-				validatedStreamUrl = convertFn(resolvedFilePath);
-			} else {
-				validatedStreamUrl = `https://asset.localhost/${encodeURIComponent(resolvedFilePath)}`;
-			}
-		}
+		// Prefer native convertFileSrc (correct %2F encoding on all platforms).
+		const validatedStreamUrl = pathToAssetUrl(resolvedFilePath);
 
 		console.warn(
 			`%c[Loader Core] Pushing URL to hardware video track src: "${validatedStreamUrl}"`,
@@ -3182,7 +3196,7 @@ window.loadSubtitleTrack = async (filePath) => {
 		ccTrack.srclang = "en";
 		ccTrack.label = "English";
 		ccTrack.default = true;
-		ccTrack.src = window.__TAURI__.core.convertFileSrc(vttPath);
+		ccTrack.src = pathToAssetUrl(vttPath);
 		videoEl.appendChild(ccTrack);
 
 		// Show immediately after successful resolve so state is available+active
@@ -3231,12 +3245,7 @@ window.attachSubtitleTrackFromPath = (vttFilePath) => {
 		return;
 	}
 
-	const convertFn =
-		window.__TAURI__?.core?.convertFileSrc ||
-		window.__TAURI__?.tauri?.convertFileSrc;
-	const src = convertFn
-		? convertFn(vttFilePath)
-		: `https://asset.localhost/${encodeURIComponent(vttFilePath)}`;
+	const src = pathToAssetUrl(vttFilePath);
 
 	const track = document.createElement("track");
 	track.id = "ccTrack";
@@ -3379,7 +3388,7 @@ const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
 	const tileWidthPct = 100 / n;
 	for (const pathString of thumbnailPaths) {
 		const imgElement = document.createElement("img");
-		imgElement.src = window.__TAURI__.core.convertFileSrc(pathString);
+		imgElement.src = pathToAssetUrl(pathString);
 		imgElement.className =
 			"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
 		imgElement.style.flex = "1 1 0";
@@ -3455,7 +3464,7 @@ window.layoutSpeedWarpedFilmstrip = (
 		const slice = thumbnailPaths.slice(i0, Math.max(i0 + 1, i1));
 		for (const pathString of slice) {
 			const img = document.createElement("img");
-			img.src = window.__TAURI__.core.convertFileSrc(pathString);
+			img.src = pathToAssetUrl(pathString);
 			img.className =
 				"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
 			img.style.flex = "1 1 0";
@@ -8096,9 +8105,7 @@ async function executeExport(presetType) {
 		if (typeof window.loadVideo === "function") {
 			await window.loadVideo(videoFilePath);
 		} else {
-			const tauriAssetUrl =
-				window.__TAURI__?.core?.convertFileSrc?.(videoFilePath);
-			player.src = tauriAssetUrl;
+			player.src = pathToAssetUrl(videoFilePath);
 			player.preload = "auto";
 			player.load();
 			toggleVideoPlaceholder(false);

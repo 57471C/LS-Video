@@ -37,6 +37,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 
 - `window.player`, `window.playerReady`
 - `window.loadVideo`, `window.cycleViewMode`
+- Path / asset URL: `normalizePath`, `pathToAssetUrl` (filesystem path → WebView `asset:` / `asset.localhost` URL)
 - Marker handlers: `jumpToMarkerTime`, `playFromMarkerTime`, `deleteMarker`, `updateMarkerName`, …
 - `window.updateMarkersList`, `window.updateVideoTimeSummary`
 - Join / sequence: `getActiveJoinRun`, `isActiveRunMulti`, `seekSequenceTime`, `sourceTimeToSequence`, `scheduleJoinTimelineRebuild`, `syncClipBoundsFromMarkers`, `canJoinQueueIndices`, `normalizeInvalidJoins`, `toggleJoinedToNext`
@@ -65,14 +66,16 @@ If something “does nothing” in the markers table, check window exports first
 - Startup rehydrate (Normal mode only)
 - OS launch args
 
-**Never** assign `video.src` from random call sites. Do **not** reintroduce Failsafe Proxy (prototype interception on `HTMLMediaElement`).
+**Never** assign `video.src` from random call sites. Do **not** reintroduce Failsafe Proxy (prototype interception on `HTMLMediaElement`). Filesystem paths → `src` go through `pathToAssetUrl` (never raw `convertFileSrc` / `encodeURIComponent` at the call site).
 
 Flow:
 
 1. Normalize path (UNC-safe — see ARCHITECTURE_NUANCES)
 2. `invoke("verify_and_prepare_video")` → original or proxy path
-3. `convertFileSrc` → `video.src`
+3. `pathToAssetUrl` (prefers Tauri `convertFileSrc`; platform fallback) → `video.src`
 4. Subtitles / markers / timeline boot as needed
+
+Same helper for other disk-backed asset URLs: caption `track.src`, filmstrip `img.src`, export fallback `player.src`. Leave blob / HTTP / empty-src assignments alone.
 
 Flags: `window._videoLoadInProgress` suppresses empty-src MediaError toasts during transitions.
 
