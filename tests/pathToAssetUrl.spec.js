@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { pathToAssetUrl } from "../ui/app.js";
 
 const originalTauri = globalThis.window?.__TAURI__;
@@ -18,6 +18,7 @@ afterEach(() => {
 		window.__TAURI__ = originalTauri;
 	}
 	setUserAgent(originalUserAgent);
+	vi.restoreAllMocks();
 });
 
 describe("pathToAssetUrl", () => {
@@ -32,33 +33,55 @@ describe("pathToAssetUrl", () => {
 		expect(pathToAssetUrl("/Users/me/clip.mp4")).toBe("/Users/me/clip.mp4");
 	});
 
-	it("prefers core.convertFileSrc when present", () => {
+	it("prefers core.convertFileSrc when present and sane", () => {
 		window.__TAURI__ = {
 			core: {
-				convertFileSrc: (p) => `converted-core:${p}`,
+				convertFileSrc: (p) => `asset://localhost/${encodeURIComponent(p)}`,
 			},
 		};
-		expect(pathToAssetUrl("/Users/me/clip.mp4")).toBe(
-			"converted-core:/Users/me/clip.mp4",
+		const path = "/Users/me/clip.mp4";
+		expect(pathToAssetUrl(path)).toBe(
+			`asset://localhost/${encodeURIComponent(path)}`,
 		);
 	});
 
-	it("falls back to tauri.convertFileSrc when core is missing", () => {
+	it("falls back to tauri.convertFileSrc when core is missing and sane", () => {
 		window.__TAURI__ = {
 			tauri: {
-				convertFileSrc: (p) => `converted-tauri:${p}`,
+				convertFileSrc: (p) =>
+					`https://asset.localhost/${encodeURIComponent(p)}`,
 			},
 		};
-		expect(pathToAssetUrl("C:\\Videos\\file.mp4")).toBe(
-			"converted-tauri:C:\\Videos\\file.mp4",
+		const path = "C:\\Videos\\file.mp4";
+		expect(pathToAssetUrl(path)).toBe(
+			`https://asset.localhost/${encodeURIComponent(path)}`,
 		);
 	});
 
-	it("uses asset:// + encodeURIComponent on macOS when convertFileSrc is missing", () => {
+	it("rejects native URLs that encode path separators as %6F (Mac bug)", () => {
+		window.__TAURI__ = {
+			core: {
+				// Reproduces the bad Mac runtime URL shape
+				convertFileSrc: () =>
+					"asset://localhost/%6FVolumes%6FTV%6FJustice%6Leauge%6Fclip.mp4",
+			},
+		};
+		setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+		const path = "/Volumes/TV/Justice Leauge/clip.mp4";
+		const url = pathToAssetUrl(path);
+		expect(url).toBe(`asset://localhost/${encodeURIComponent(path)}`);
+		expect(url).toContain("%2F");
+		expect(url).toContain("%20");
+		expect(url).not.toMatch(/%6[Ff]Volumes/);
+	});
+
+	it("uses asset://localhost/ + encodeURIComponent on macOS when convertFileSrc is missing", () => {
 		window.__TAURI__ = {};
 		setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
 		const path = "/Users/me/My Video.mp4";
-		expect(pathToAssetUrl(path)).toBe(`asset://${encodeURIComponent(path)}`);
+		expect(pathToAssetUrl(path)).toBe(
+			`asset://localhost/${encodeURIComponent(path)}`,
+		);
 		expect(pathToAssetUrl(path)).toContain("%2F");
 		expect(pathToAssetUrl(path)).toContain("%20");
 	});
