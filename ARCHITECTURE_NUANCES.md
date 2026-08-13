@@ -2,7 +2,7 @@
 
 Hard-won constraints. Agents: prefer reading this over rediscovering via breakage.
 
-Last oriented: v0.6.2 + audio/video queue guards, detailed timeline marker drag, full-media solo timeline, modal polish, Speed markers + fades + batch export.
+Last oriented: v0.6.2 + pathToAssetUrl (macOS-safe convertFileSrc) + audio/video queue guards, detailed timeline marker drag, full-media solo timeline, modal polish, Speed markers + fades + batch export.
 
 ---
 
@@ -35,6 +35,8 @@ Never use a regex that strips a leading `\\` from normal UNC. Same normalize for
 
 Network/Outlook “open” failures at work were this class of bug, not “email magic.”
 
+After normalize, convert to a WebView URL with `pathToAssetUrl` only (see §22). Do not encode the path at the call site.
+
 ---
 
 ## 3. Single load pipeline
@@ -44,8 +46,9 @@ Duplicate `loadVideo` / direct `convertFileSrc` / Failsafe Proxy caused:
 - Double optimizing overlay
 - Empty-src toast spam
 - H.265 path inconsistencies
+- macOS playback 404s from a Windows-only `https://asset.localhost/${encodeURIComponent(...)}` fallback (slashes not encoded the way WKWebView’s `asset:` protocol expects)
 
-**Law:** one entry (`window.loadVideo`). Proxy decision only in Rust `verify_and_prepare_video`.
+**Law:** one entry (`window.loadVideo`). Proxy decision only in Rust `verify_and_prepare_video`. Path → `src` only via `pathToAssetUrl`.
 
 Empty `http://127.0.0.1:1430/` (or origin-only) MediaError during load = transitional; suppress with `_videoLoadInProgress`, do not toast as hard failure.
 
@@ -264,6 +267,24 @@ Do not invent mixed audio+video playlists via the open dialog once a video is pr
 
 ---
 
+## 22. Path → WebView asset URL
+
+**Symptom:** macOS WKWebView 404 / media fail when the UI hand-builds `https://asset.localhost/${encodeURIComponent(path)}`. Windows WebView2 wants `https://asset.localhost/…`; macOS wants `asset://…` with the **entire** path percent-encoded (`/` → `%2F`). Native `convertFileSrc` already does this.
+
+**Law:** `pathToAssetUrl` in `ui/app.js` is the only converter.
+
+1. Prefer `window.__TAURI__.core.convertFileSrc` (then `.tauri.convertFileSrc`).
+2. Rare fallback (matches `@tauri-apps/api`): Windows → `https://asset.localhost/${encodeURIComponent(path)}`; else → `asset://${encodeURIComponent(path)}`.
+3. No Tauri / non-string / empty → return the input unchanged.
+
+Call it for every filesystem-backed `src`: `video.src`, caption `track.src`, filmstrip `img.src`. Do **not** call `convertFileSrc` or `encodeURIComponent` at those sites. Blob URLs, HTTP `?v=`, and empty-src clears stay as-is.
+
+`normalizePath` still runs first (UNC). `pathToAssetUrl` does not strip or rewrite slashes — it only encodes.
+
+Tests: `tests/pathToAssetUrl.spec.js`.
+
+---
+
 ## Quick “don’t do this” list
 
 1. Don’t re-add Failsafe Proxy or Peaks/Whisper  
@@ -281,3 +302,5 @@ Do not invent mixed audio+video playlists via the open dialog once a video is pr
 13. Don’t join or batch-export mixed audio+video runs  
 14. Don’t shrink the solo detailed timeline to clipIn..clipOut (full media + grey bounds)  
 15. Don’t apply video fade filters (`-vf fade`) to audio-only exports  
+16. Don’t assign filesystem `src` via raw `convertFileSrc` / `encodeURIComponent` — use `pathToAssetUrl`  
+17. Don’t use a Windows-only `https://asset.localhost/…` fallback on macOS (`asset://` + full-path encode)  
