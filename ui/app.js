@@ -2576,8 +2576,9 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 		const validatedStreamUrl = pathToAssetUrl(resolvedFilePath);
 
 		console.warn(
-			`%c[Loader Core] Pushing URL to hardware video track src: "${validatedStreamUrl}"`,
+			"%c[Loader Core] Pushing URL to hardware video track src:",
 			"color: #00ffcc; font-weight: bold;",
+			validatedStreamUrl,
 		);
 
 		// Sync globals: keep original source path for project save / subtitles / re-verify
