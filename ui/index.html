@@ -1,638 +1,929 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- asset:/ipc: for macOS WKWebView; asset.localhost/ipc.localhost for Windows WebView2 -->
-    <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self';
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- asset:/ipc: for macOS WKWebView; asset.localhost/ipc.localhost for Windows WebView2 -->
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self';
                    script-src 'self' 'unsafe-eval';
                    style-src 'self' 'unsafe-inline';
                    font-src 'self';
                    img-src 'self' asset: asset.localhost http://asset.localhost https://asset.localhost data: blob:;
                    media-src 'self' asset: asset.localhost http://asset.localhost https://asset.localhost blob:;
                    connect-src 'self' ipc: ipc.localhost http://ipc.localhost https://ipc.localhost http://127.0.0.1:*;">
-    <style id="initial-flash-suppression">
-      html, body {
-        background-color: #f9fafb;
-        color: #18181b;
-      }
-      html.dark, html.dark body {
-        background-color: #121214;
-        color: #f4f4f5;
-      }
-    </style>
-    <title>LS.Video v0.6.3</title>
-    <!-- Favicons -->
-    <link rel="icon" type="image/x-icon" href="icons/favicon.ico" />
-    <link rel="icon" type="image/png" href="icons/favicon.png" />
-    <!-- Tailwind CSS (Compiled for production) -->
-    <link rel="stylesheet" href="tailwind.css" />
-    <!-- Custom styles -->
-    <link rel="stylesheet" href="styles.css" />
+  <style id="initial-flash-suppression">
+    html,
+    body {
+      background-color: #f9fafb;
+      color: #18181b;
+    }
 
-     
+    html.dark,
+    html.dark body {
+      background-color: #121214;
+      color: #f4f4f5;
+    }
+  </style>
+  <title>LS.Video v0.6.4</title>
+  <!-- Favicons -->
+  <link rel="icon" type="image/x-icon" href="icons/favicon.ico" />
+  <link rel="icon" type="image/png" href="icons/favicon.png" />
+  <!-- Tailwind CSS (Compiled for production) -->
+  <link rel="stylesheet" href="tailwind.css" />
+  <!-- Custom styles -->
+  <link rel="stylesheet" href="styles.css" />
 
-  </head>
-  <body class="font-sans bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 h-screen overflow-hidden flex flex-col transition-colors duration-200">
-    <!-- Codec Optimizing Overlay -->
-    <div id="optimizingOverlay" class="fixed inset-0 bg-black/85 backdrop-blur-md z-[9999] hidden flex-col items-center justify-center text-center p-6 transition-all duration-300 opacity-0">
-      <div class="flex flex-col items-center gap-4 max-w-md animate-fade-in">
-        <div class="w-14 h-14 border-4 border-yellow-500/20 border-t-yellow-500 rounded-full animate-spin"></div>
-        
-        <h3 class="text-xl font-bold text-zinc-100 tracking-wide mt-3">Optimizing High-Efficiency Media</h3>
-        <p class="text-sm text-zinc-400 leading-relaxed">
-          Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per video asset. Please keep this window active...
-        </p>
+
+
+</head>
+
+<body
+  class="font-sans bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 h-screen overflow-hidden flex flex-col transition-colors duration-200">
+  <!-- Codec Optimizing Overlay -->
+  <div id="optimizingOverlay"
+    class="fixed inset-0 bg-black/85 backdrop-blur-md z-[9999] hidden flex-col items-center justify-center text-center p-6 transition-all duration-300 opacity-0">
+    <div class="flex flex-col items-center gap-4 max-w-md animate-fade-in">
+      <div class="w-14 h-14 border-4 border-yellow-500/20 border-t-yellow-500 rounded-full animate-spin"></div>
+
+      <h3 class="text-xl font-bold text-zinc-100 tracking-wide mt-3">Optimizing High-Efficiency Media</h3>
+      <p class="text-sm text-zinc-400 leading-relaxed">
+        Processing H.265/HEVC tracking sequences to generate a frame-accurate proxy timeline track. This occurs once per
+        video asset. Please keep this window active...
+      </p>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header
+    class="bg-white dark:bg-zinc-800 border-b border-zinc-200 dark:border-zinc-700 shadow-sm py-1.5 px-4 flex justify-between items-center z-10 min-h-8">
+    <div class="flex items-center gap-2 sm:gap-3">
+      <h1 id="appHeaderTitle"
+        class="text-xl font-bold tracking-tight text-zinc-900 dark:text-white whitespace-nowrap hidden lg:block">
+        LS.Video v0.6.4</h1>
+      <span class="text-zinc-300 dark:text-zinc-600 hidden lg:inline font-light text-xl">/</span>
+      <input type="text" id="projectNameInput" placeholder="Untitled Project" class="project-name-input" />
+      <span class="text-zinc-300 dark:text-zinc-600 hidden sm:inline font-light text-xl">/</span>
+      <div class="flex items-center gap-1">
+        <select id="videoQueueSelect" class="video-queue-select" title="Switch Video in Queue"></select>
+        <button type="button" id="editVideoQueueBtn"
+          class="hidden border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer"
+          title="Rename Video">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+            <path d="m15 5 4 4" />
+          </svg>
+        </button>
+        <button type="button" id="addVideoQueueBtn"
+          class="border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer"
+          title="Add Video" aria-label="Add video to queue" aria-disabled="true">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        </button>
+        <button type="button" id="reorder-videos-btn"
+          class="relative border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer"
+          title="Playlist queue" aria-label="Playlist queue" aria-controls="playlist-queue-sidebar">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 6h13" />
+            <path d="M8 12h13" />
+            <path d="M8 18h13" />
+            <path d="M3 6h.01" />
+            <path d="M3 12h.01" />
+            <path d="M3 18h.01" />
+          </svg>
+          <span id="playlist-queue-badge"
+            class="hidden absolute -top-0.5 -right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-blue-600 text-white text-[9px] font-bold leading-[14px] text-center pointer-events-none"
+            aria-hidden="true">0</span>
+        </button>
+        <button type="button" id="removeVideoQueueBtn"
+          class="border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer"
+          title="Remove Current Video">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18" />
+            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+          </svg>
+        </button>
       </div>
     </div>
-
-    <!-- Header -->
-    <header class="bg-white dark:bg-zinc-800 border-b border-zinc-200 dark:border-zinc-700 shadow-sm py-1.5 px-4 flex justify-between items-center z-10 min-h-8">
-      <div class="flex items-center gap-2 sm:gap-3">
-        <h1 id="appHeaderTitle" class="text-xl font-bold tracking-tight text-zinc-900 dark:text-white whitespace-nowrap hidden lg:block">LS.Video v0.6.3</h1>
-        <span class="text-zinc-300 dark:text-zinc-600 hidden lg:inline font-light text-xl">/</span>
-        <input type="text" id="projectNameInput" placeholder="Untitled Project" class="project-name-input" />
-        <span class="text-zinc-300 dark:text-zinc-600 hidden sm:inline font-light text-xl">/</span>
-        <div class="flex items-center gap-1">
-          <select id="videoQueueSelect" class="video-queue-select" title="Switch Video in Queue"></select>
-          <button type="button" id="editVideoQueueBtn" class="hidden border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer" title="Rename Video">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
-          </button>
-          <button type="button" id="addVideoQueueBtn" class="border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer" title="Add Video" aria-label="Add video to queue" aria-disabled="true">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          </button>
-          <button type="button" id="reorder-videos-btn" class="relative border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer" title="Playlist queue" aria-label="Playlist queue" aria-controls="playlist-queue-sidebar">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>
-            <span id="playlist-queue-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[14px] h-3.5 px-0.5 rounded-full bg-blue-600 text-white text-[9px] font-bold leading-[14px] text-center pointer-events-none" aria-hidden="true">0</span>
-          </button>
-          <button type="button" id="removeVideoQueueBtn" class="border border-transparent hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 p-1 flex items-center justify-center rounded-md w-8 h-8 transition-colors shadow-none cursor-pointer" title="Remove Current Video">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
-          </button>
-        </div>
-      </div>
-      <div class="flex items-center gap-3 sm:gap-4">
-        <!-- File Management Actions -->
-        <div class="flex items-center gap-1 sm:gap-2 border-r border-zinc-200 dark:border-zinc-700 pr-2 sm:pr-4">
-          <button type="button" id="newProjectButton" class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2" title="New Project">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M9 15h6"/><path d="M12 18v-6"/></svg>
-            <span class="hidden md:inline">New</span>
-          </button>
-          <button type="button" id="projectImportButton" class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2" title="Load Project">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-            <span class="hidden md:inline">Load</span>
-          </button>
-          <button type="button" id="projectExportButton" class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2" title="Save Project">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.5l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>
-            <span class="hidden md:inline">Save</span>
-          </button>
-          <button type="button" id="projectSaveAsButton" class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2" title="Save Project As...">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.5l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></svg>
-            <span class="hidden md:inline">Save As</span>
-          </button>
-          <button type="button" id="packageBtn" class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2" title="Package Project (.lsvz)">
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
-            <span class="hidden md:inline">Package</span>
-          </button>
+    <div class="flex items-center gap-3 sm:gap-4">
+      <!-- File Management Actions -->
+      <div class="flex items-center gap-1 sm:gap-2 border-r border-zinc-200 dark:border-zinc-700 pr-2 sm:pr-4">
+        <button type="button" id="newProjectButton"
+          class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2"
+          title="New Project">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+            <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+            <path d="M9 15h6" />
+            <path d="M12 18v-6" />
+          </svg>
+          <span class="hidden md:inline">New</span>
+        </button>
+        <button type="button" id="projectImportButton"
+          class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2"
+          title="Load Project">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" x2="12" y1="15" y2="3" />
+          </svg>
+          <span class="hidden md:inline">Load</span>
+        </button>
+        <button type="button" id="projectExportButton"
+          class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2"
+          title="Save Project">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path
+              d="M15.2 3a2 2 0 0 1 1.4.5l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+            <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
+            <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+          </svg>
+          <span class="hidden md:inline">Save</span>
+        </button>
+        <button type="button" id="projectSaveAsButton"
+          class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2"
+          title="Save Project As...">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path
+              d="M15.2 3a2 2 0 0 1 1.4.5l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+            <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
+            <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+          </svg>
+          <span class="hidden md:inline">Save As</span>
+        </button>
+        <button type="button" id="packageBtn"
+          class="btn btn-sm btn-outline-secondary whitespace-nowrap flex justify-center items-center gap-2"
+          title="Package Project (.lsvz)">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path
+              d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+            <path d="m3.3 7 8.7 5 8.7-5" />
+            <path d="M12 22V12" />
+          </svg>
+          <span class="hidden md:inline">Package</span>
+        </button>
         <input type="file" id="projectFileInput" accept=".lsv,.lsvz,.tmv,.tmvz" style="display: none" />
-        </div>
-
-        <button type="button" id="darkModeToggle" class="text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 transition-colors" title="Toggle Dark Mode">
-          <!-- Sun Icon -->
-          <svg id="sunIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
-            <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
-          </svg>
-          <!-- Moon Icon -->
-          <svg id="moonIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
-            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
-          </svg>
-        </button>
-        <button type="button" id="openSettingsBtn" class="text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 transition-colors" title="Project Settings">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-          </svg>
-        </button>
-        <button type="button" id="openHelpBtn" class="btn btn-sm border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700">Help</button>
       </div>
-    </header>
 
-    <div class="app-master-container flex-1 pl-0 pr-4 lg:pl-0 lg:pr-6 pb-4 lg:pb-6 overflow-x-hidden overflow-y-auto relative">
-      <div id="mainLayoutGrid" class="grid grid-cols-1 lg:grid-cols-2 gap-6 pl-0">
-        <aside id="playlist-queue-sidebar" class="bg-white dark:bg-zinc-800 border-r border-zinc-200 dark:border-zinc-700 h-full overflow-y-auto flex flex-col">
-          <header class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
-            <h5 class="text-lg font-semibold">Playlist Queue</h5>
-            <button type="button" id="close-playlist-sidebar-btn" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none">&times;</button>
-          </header>
-          <div id="sidebar-queue-list" class="p-4 flex-1"></div>
-        </aside>
-        <!-- Left Column: Video and Controls -->
-        <div class="flex flex-col gap-4 lg:sticky lg:top-0 pt-4 lg:pt-6 lg:z-20 self-start">
-          <div class="w-full h-125 relative group">
-            <div id="videoPlaceholder" class="w-full h-full min-h-125 bg-zinc-900 text-zinc-400 flex items-center justify-center text-lg p-5 absolute top-0 left-0 z-10 cursor-pointer border border-transparent dark:border-zinc-700 transition-colors duration-200">Load a video to get started</div>
-            <div id="video-wrapper-id" class="relative overflow-hidden w-full h-full bg-black flex items-center justify-center" style="display: none;">
-              <button type="button" id="expandToEditorBtn" class="absolute top-2.5 left-2.5 z-20 btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0 hidden" style="padding: 0 !important;" title="Expand to Editor">
-                <svg xmlns="http://www.w3.org/2000/svg" style="width: 20px !important; height: 20px !important;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+      <button type="button" id="darkModeToggle"
+        class="text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 transition-colors"
+        title="Toggle Dark Mode">
+        <!-- Sun Icon -->
+        <svg id="sunIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2" />
+          <path d="M12 20v2" />
+          <path d="m4.93 4.93 1.41 1.41" />
+          <path d="m17.66 17.66 1.41 1.41" />
+          <path d="M2 12h2" />
+          <path d="M20 12h2" />
+          <path d="m6.34 17.66-1.41 1.41" />
+          <path d="m19.07 4.93-1.41 1.41" />
+        </svg>
+        <!-- Moon Icon -->
+        <svg id="moonIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+        </svg>
+      </button>
+      <button type="button" id="openSettingsBtn"
+        class="text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 transition-colors"
+        title="Project Settings">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path
+            d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z">
+          </path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+      </button>
+      <button type="button" id="openHelpBtn"
+        class="btn btn-sm border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700">Help</button>
+    </div>
+  </header>
+
+  <div
+    class="app-master-container flex-1 pl-0 pr-4 lg:pl-0 lg:pr-6 pb-4 lg:pb-6 overflow-x-hidden overflow-y-auto relative">
+    <div id="mainLayoutGrid" class="grid grid-cols-1 lg:grid-cols-2 gap-6 pl-0">
+      <aside id="playlist-queue-sidebar"
+        class="bg-white dark:bg-zinc-800 border-r border-zinc-200 dark:border-zinc-700 h-full overflow-y-auto flex flex-col">
+        <header class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
+          <h5 class="text-lg font-semibold">Playlist Queue</h5>
+          <button type="button" id="close-playlist-sidebar-btn"
+            class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none">&times;</button>
+        </header>
+        <div id="sidebar-queue-list" class="p-4 flex-1"></div>
+      </aside>
+      <!-- Left Column: Video and Controls -->
+      <div class="flex flex-col gap-4 lg:sticky lg:top-0 pt-4 lg:pt-6 lg:z-20 self-start">
+        <div class="w-full h-125 relative group">
+          <div id="videoPlaceholder"
+            class="w-full h-full min-h-125 bg-zinc-900 text-zinc-400 flex items-center justify-center text-lg p-5 absolute top-0 left-0 z-10 cursor-pointer border border-transparent dark:border-zinc-700 transition-colors duration-200">
+            Load a video to get started</div>
+          <div id="video-wrapper-id"
+            class="relative overflow-hidden w-full h-full bg-black flex items-center justify-center"
+            style="display: none;">
+            <button type="button" id="expandToEditorBtn"
+              class="absolute top-2.5 left-2.5 z-20 btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0 hidden"
+              style="padding: 0 !important;" title="Expand to Editor">
+              <svg xmlns="http://www.w3.org/2000/svg" style="width: 20px !important; height: 20px !important;"
+                viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                stroke-linejoin="round">
+                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+              </svg>
+            </button>
+            <div id="marqueeOverlay"
+              class="absolute top-0 left-0 w-full h-full z-50 pointer-events-none cursor-crosshair">
+              <div id="marqueeRect"
+                class="absolute border-2 border-dashed border-blue-600 bg-blue-600/10 pointer-events-none hidden"></div>
+            </div>
+            <video id="my_video" crossorigin="anonymous" class="w-full h-full object-contain z-1">
+              <track kind="captions" />
+              Your browser does not support the video tag.
+            </video>
+            <canvas id="vizCanvas"
+              class="absolute inset-0 w-full h-full object-cover z-2 hidden pointer-events-none bg-black"></canvas>
+            <div id="video-action-overlay"
+              class="absolute bg-zinc-950/80 text-white font-bold text-lg px-4 py-2 rounded-lg pointer-events-none z-30 transition-opacity duration-300 ease-out hidden opacity-0">
+            </div>
+            <div id="videoOverlayControls"
+              class="absolute top-2.5 right-2.5 z-15 flex items-center gap-1.5 zoom-controls">
+              <button type="button" id="zoomIn"
+                class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0 font-bold text-sm"
+                style="padding: 0 !important;" title="Zoom In">+</button>
+              <button type="button" id="zoomOut"
+                class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0 font-bold text-sm"
+                style="padding: 0 !important;" title="Zoom Out">-</button>
+              <button type="button" id="resetZoom"
+                class="btn btn-sm btn-dark-gray flex items-center justify-center h-7 px-2.5"
+                title="Reset Zoom">Reset</button>
+              <button type="button" id="takeSnapshotBtn"
+                class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0"
+                style="padding: 0 !important;" title="Take Snapshot (S)">
+                <svg xmlns="http://www.w3.org/2000/svg" style="width: 20px !important; height: 20px !important;"
+                  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                  stroke-linejoin="round">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                  <circle cx="12" cy="13" r="4" />
                 </svg>
               </button>
-              <div id="marqueeOverlay" class="absolute top-0 left-0 w-full h-full z-50 pointer-events-none cursor-crosshair">
-                <div id="marqueeRect" class="absolute border-2 border-dashed border-blue-600 bg-blue-600/10 pointer-events-none hidden"></div>
-              </div>
-              <video id="my_video" crossorigin="anonymous" class="w-full h-full object-contain z-1">
-                <track kind="captions" />
-                Your browser does not support the video tag.
-              </video>
-              <canvas id="vizCanvas" class="absolute inset-0 w-full h-full object-cover z-2 hidden pointer-events-none bg-black"></canvas>
-              <div id="video-action-overlay" class="absolute bg-zinc-950/80 text-white font-bold text-lg px-4 py-2 rounded-lg pointer-events-none z-30 transition-opacity duration-300 ease-out hidden opacity-0"></div>
-              <div id="videoOverlayControls" class="absolute top-2.5 right-2.5 z-15 flex items-center gap-1.5 zoom-controls">
-                <button type="button" id="zoomIn" class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0 font-bold text-sm" style="padding: 0 !important;" title="Zoom In">+</button>
-                <button type="button" id="zoomOut" class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0 font-bold text-sm" style="padding: 0 !important;" title="Zoom Out">-</button>
-                <button type="button" id="resetZoom" class="btn btn-sm btn-dark-gray flex items-center justify-center h-7 px-2.5" title="Reset Zoom">Reset</button>
-                <button type="button" id="takeSnapshotBtn" class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0" style="padding: 0 !important;" title="Take Snapshot (S)">
-                  <svg xmlns="http://www.w3.org/2000/svg" style="width: 20px !important; height: 20px !important;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                    <circle cx="12" cy="13" r="4"/>
-                  </svg>
-                </button>
-                <button type="button" id="toggleCinemaBtn" class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0" style="padding: 0 !important;" title="Toggle Cinema Mode (\)">
-                  <svg xmlns="http://www.w3.org/2000/svg" style="width: 20px !important; height: 20px !important;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
-                  </svg>
-                </button>
-              </div>
+              <button type="button" id="toggleCinemaBtn"
+                class="btn btn-sm btn-dark-gray flex items-center justify-center w-7 h-7 p-0"
+                style="padding: 0 !important;" title="Toggle Cinema Mode (\)">
+                <svg xmlns="http://www.w3.org/2000/svg" style="width: 20px !important; height: 20px !important;"
+                  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                  stroke-linejoin="round">
+                  <path
+                    d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+                </svg>
+              </button>
             </div>
           </div>
-
-
-          <div id="mediaControlsContainer" class="w-full p-2.5 lg:p-3 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-sm flex flex-wrap gap-1.5 z-0 transition-all duration-300 ease-in-out">
-            <div id="video_controls_bar" class="w-full m-0 p-0">
-              <div class="w-full flex items-center gap-4">
-                <span id="currentTime" class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-24 text-center">00:00:00.00</span>
-                <div id="seekBarContainer" class="flex-1 relative flex items-center h-full min-h-6">
-                  <div id="startGreyOut" class="absolute h-1.5 bg-zinc-800 dark:bg-zinc-950 top-1/2 -translate-y-1/2 z-20 pointer-events-none left-0 w-0 rounded-l-full hidden"></div>
-                  <div id="endGreyOut" class="absolute h-1.5 bg-zinc-800 dark:bg-zinc-950 top-1/2 -translate-y-1/2 z-20 pointer-events-none right-0 w-0 rounded-r-full hidden"></div>
-                  <input type="range" class="form-range w-full timeline-ticks z-10" min="0" max="100" value="0" id="seekBar" aria-label="Seek Video" />
-                  <div id="markerTicksContainer" class="absolute inset-0 z-25 pointer-events-none"></div>
-                  <div id="startTick" class="absolute h-3 w-0.5 bg-blue-500 top-1/2 -translate-y-1/2 z-30 pointer-events-none hidden"></div>
-                  <div id="endTick" class="absolute h-3 w-0.5 bg-blue-500 top-1/2 -translate-y-1/2 z-30 pointer-events-none hidden"></div>
-                </div>
-                <span id="durationTime" class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-24 text-center">00:00:00.00</span>
-              </div>
-              <div id="transport-controls-row" class="w-full flex items-center justify-center flex-nowrap mt-2.5 gap-1 sm:gap-1.5 overflow-x-auto">
-                <span id="tetrisHighScoreDisplay" class="text-[10px] text-zinc-400 dark:text-zinc-500 font-mono select-none mr-2 hidden">HS:00000</span>
-                <button type="button" id="ccToggleBtn" disabled class="btn-icon btn-icon-cc-none mr-8 inline-flex items-center justify-center align-middle" title="Closed Captions (none available)" aria-pressed="false">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="3" y="5" width="18" height="14" rx="2" ry="2"/>
-                    <path d="M10 9a3 3 0 0 0-3 3v0a3 3 0 0 0 3 3"/>
-                    <path d="M17 9a3 3 0 0 0-3 3v0a3 3 0 0 0 3 3"/>
-                  </svg>
-                </button>
-                <button type="button" id="vizToggleBtn" class="btn-icon mr-8 inline-flex items-center justify-center align-middle" title="Toggle Visualizer (Butterchurn)">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M2 10v4" />
-                    <path d="M6 6v12" />
-                    <path d="M10 3v18" />
-                    <path d="M14 8v8" />
-                    <path d="M18 5v14" />
-                    <path d="M22 10v4" />
-                  </svg>
-                </button>
-                <button type="button" id="toggleMiniPlayerBtn" class="btn-icon mr-8 inline-flex items-center justify-center align-middle" title="Toggle Mini Player Mode">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="2" y="5" width="20" height="14" rx="2" />
-                    <rect x="12" y="13" width="8" height="5" rx="1" />
-                  </svg>
-                </button>
-                <button type="button" id="loadVideoButton" class="btn-icon-highlight mr-8" title="Load Video">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"></path>
-                  </svg>
-                </button>
-                <button type="button" id="trimVideoBtn" class="btn-icon hidden mr-4" title="Trim / Compress Video">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="m22 8-6 4 6 4V8Z" />
-                    <rect width="14" height="12" x="2" y="6" rx="2" ry="2" />
-                  </svg>
-                </button>
-                <button type="button" id="jumpToStartButton" class="btn-icon" title="Jump to Start">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="19 20 9 12 19 4 19 20"></polygon>
-                    <line x1="5" y1="19" x2="5" y2="5"></line>
-                  </svg>
-                </button>
-                <button type="button" id="rewind5sButton" class="btn-icon" title="Rewind 5s">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="11 19 2 12 11 5 11 19"></polygon>
-                    <polygon points="22 19 13 12 22 5 22 19"></polygon>
-                  </svg>
-                </button>
-                <button type="button" id="rewind1sButton" class="btn-icon" title="Rewind 1s">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="15 18 9 12 15 6"></polyline>
-                  </svg>
-                </button>
-                <button type="button" id="playPauseButton" class="btn-icon" title="Play / Pause">
-                  <!-- Play -->
-                  <svg id="playIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
-                  </svg>
-                  <!-- Pause -->
-                  <svg id="pauseIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
-                    <rect x="6" y="4" width="4" height="16"></rect>
-                    <rect x="14" y="4" width="4" height="16"></rect>
-                  </svg>
-                </button>
-                <button type="button" id="forward1sButton" class="btn-icon" title="Forward 1s">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polyline points="9 18 15 12 9 6"></polyline>
-                  </svg>
-                </button>
-                <button type="button" id="forward5sButton" class="btn-icon" title="Forward 5s">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="13 19 22 12 13 5 13 19"></polygon>
-                    <polygon points="2 19 11 12 2 5 2 19"></polygon>
-                  </svg>
-                </button>
-                <button type="button" id="muteButton" class="btn-icon ml-8" title="Mute/Unmute">
-                  <!-- Volume High (Unmuted) -->
-                  <svg id="volumeOnIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
-                  </svg>
-                  <!-- Volume X (Muted) -->
-                  <svg id="volumeOffIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                    <line x1="23" y1="9" x2="17" y2="15"></line>
-                    <line x1="17" y1="9" x2="23" y2="15"></line>
-                  </svg>
-                </button>
-                <div id="volume-control-group" class="flex items-center flex-shrink-0 w-28 sm:w-36 gap-2">
-                  <input
-                    type="range"
-                    class="form-range slider-ticks flex-1 min-w-0"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value="1"
-                    id="volumeSlider"
-                    aria-label="Volume Slider"
-                  />
-                  <span id="volumeValue" class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-7 text-right flex-shrink-0">100</span>
-                </div>
-              </div>
-              <div class="w-full flex items-center gap-2 sm:gap-8 mt-4">
-                <span class="font-mono text-sm text-zinc-500 dark:text-zinc-400 w-20 text-center">Speed</span>
-                <input type="range" class="form-range flex-1 timeline-ticks" style="--tick-interval: 6.6667%;" min="0.5" max="8" step="0.1" value="1" id="speedSlider" aria-label="Playback Speed" />
-                <span id="speedValue" class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-20 text-center">1.0x</span>
-                <button type="button" id="timeline-toggle-btn" class="p-1.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 dark:text-zinc-400 transition-colors ml-4" title="Toggle Detailed Timeline">
-                  <svg class="w-4 h-4 transform transition-transform duration-200" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 8.25l7.5 7.5 7.5-7.5"></path>
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-          
-          
-          <input type="file" id="videoFileInput" accept="video/*,audio/*" style="display: none" />
         </div>
 
-        <!-- Right Column: Controls -->
-        <div id="rightPanel" class="flex flex-col pt-4 lg:pt-6">
 
-
-          <!-- Markers List Table -->
-          <div id="markersList" style="max-height: calc(100vh - 420px); overflow-y: auto;">
-            
-          </div>
-        </div>
-        <!-- Custom detailed timeline (Rust waveform + filmstrip) -->
-        <div id="detailed-timeline-panel" class="bg-zinc-100 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 p-4 rounded shadow-sm mt-6 px-4 ml-4 lg:ml-6" style="display: none;">
-          <div class="flex justify-between items-center mb-2 gap-3">
-            <span class="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider shrink-0">Detailed Timeline</span>
-            <div id="timeline-zoom-controls" class="flex items-center gap-1.5 shrink-0" title="Timeline zoom (1 = fit width)">
-              <button type="button" id="timelineZoomOutBtn" class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 p-0.5 rounded leading-none text-sm font-bold w-5 h-5 flex items-center justify-center" aria-label="Zoom out" title="Zoom out">−</button>
-              <input type="range" id="timelineZoomSlider" min="1" max="8" step="0.05" value="1" class="form-range w-24 sm:w-28 cursor-pointer" aria-label="Timeline zoom" />
-              <button type="button" id="timelineZoomInBtn" class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 p-0.5 rounded leading-none text-sm font-bold w-5 h-5 flex items-center justify-center" aria-label="Zoom in" title="Zoom in">+</button>
-              <span id="timelineZoomLabel" class="text-[10px] font-mono tabular-nums text-zinc-500 dark:text-zinc-400 w-9 text-right select-none">Fit</span>
-              <button type="button" id="timelineZoomFitBtn" class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 hover:text-blue-500 dark:hover:text-blue-400 px-1.5 py-0.5 rounded border border-transparent hover:border-zinc-300 dark:hover:border-zinc-600" title="Fit to width (double-click slider)">Fit</button>
+        <div id="mediaControlsContainer"
+          class="w-full p-2.5 lg:p-3 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 shadow-sm flex flex-wrap gap-1.5 z-0 transition-all duration-300 ease-in-out">
+          <div id="video_controls_bar" class="w-full m-0 p-0">
+            <div class="w-full flex items-center gap-4">
+              <span id="currentTime"
+                class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-24 text-center">00:00:00.00</span>
+              <div id="seekBarContainer" class="flex-1 relative flex items-center h-full min-h-6">
+                <div id="startGreyOut"
+                  class="absolute h-1.5 bg-zinc-800 dark:bg-zinc-950 top-1/2 -translate-y-1/2 z-20 pointer-events-none left-0 w-0 rounded-l-full hidden">
+                </div>
+                <div id="endGreyOut"
+                  class="absolute h-1.5 bg-zinc-800 dark:bg-zinc-950 top-1/2 -translate-y-1/2 z-20 pointer-events-none right-0 w-0 rounded-r-full hidden">
+                </div>
+                <input type="range" class="form-range w-full timeline-ticks z-10" min="0" max="100" value="0"
+                  id="seekBar" aria-label="Seek Video" />
+                <div id="markerTicksContainer" class="absolute inset-0 z-25 pointer-events-none"></div>
+                <div id="startTick"
+                  class="absolute h-3 w-0.5 bg-blue-500 top-1/2 -translate-y-1/2 z-30 pointer-events-none hidden"></div>
+                <div id="endTick"
+                  class="absolute h-3 w-0.5 bg-blue-500 top-1/2 -translate-y-1/2 z-30 pointer-events-none hidden"></div>
+              </div>
+              <span id="durationTime"
+                class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-24 text-center">00:00:00.00</span>
+            </div>
+            <div id="transport-controls-row"
+              class="w-full flex items-center justify-center flex-nowrap mt-2.5 gap-1 sm:gap-1.5 overflow-x-auto">
+              <span id="tetrisHighScoreDisplay"
+                class="text-[10px] text-zinc-400 dark:text-zinc-500 font-mono select-none mr-2 hidden">HS:00000</span>
+              <button type="button" id="ccToggleBtn" disabled
+                class="btn-icon btn-icon-cc-none mr-8 inline-flex items-center justify-center align-middle"
+                title="Closed Captions (none available)" aria-pressed="false">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="5" width="18" height="14" rx="2" ry="2" />
+                  <path d="M10 9a3 3 0 0 0-3 3v0a3 3 0 0 0 3 3" />
+                  <path d="M17 9a3 3 0 0 0-3 3v0a3 3 0 0 0 3 3" />
+                </svg>
+              </button>
+              <button type="button" id="vizToggleBtn"
+                class="btn-icon mr-8 inline-flex items-center justify-center align-middle"
+                title="Toggle Visualizer (Butterchurn)">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2 10v4" />
+                  <path d="M6 6v12" />
+                  <path d="M10 3v18" />
+                  <path d="M14 8v8" />
+                  <path d="M18 5v14" />
+                  <path d="M22 10v4" />
+                </svg>
+              </button>
+              <button type="button" id="toggleMiniPlayerBtn"
+                class="btn-icon mr-8 inline-flex items-center justify-center align-middle"
+                title="Toggle Mini Player Mode">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="5" width="20" height="14" rx="2" />
+                  <rect x="12" y="13" width="8" height="5" rx="1" />
+                </svg>
+              </button>
+              <button type="button" id="loadVideoButton" class="btn-icon-highlight mr-8" title="Load Video">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path
+                    d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2">
+                  </path>
+                </svg>
+              </button>
+              <button type="button" id="trimVideoBtn" class="btn-icon hidden mr-4" title="Trim / Compress Video">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="m22 8-6 4 6 4V8Z" />
+                  <rect width="14" height="12" x="2" y="6" rx="2" ry="2" />
+                </svg>
+              </button>
+              <button type="button" id="jumpToStartButton" class="btn-icon" title="Jump to Start">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="19 20 9 12 19 4 19 20"></polygon>
+                  <line x1="5" y1="19" x2="5" y2="5"></line>
+                </svg>
+              </button>
+              <button type="button" id="rewind5sButton" class="btn-icon" title="Rewind 5s">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="11 19 2 12 11 5 11 19"></polygon>
+                  <polygon points="22 19 13 12 22 5 22 19"></polygon>
+                </svg>
+              </button>
+              <button type="button" id="rewind1sButton" class="btn-icon" title="Rewind 1s">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+              </button>
+              <button type="button" id="playPauseButton" class="btn-icon" title="Play / Pause">
+                <!-- Play -->
+                <svg id="playIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                <!-- Pause -->
+                <svg id="pauseIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                  class="hidden">
+                  <rect x="6" y="4" width="4" height="16"></rect>
+                  <rect x="14" y="4" width="4" height="16"></rect>
+                </svg>
+              </button>
+              <button type="button" id="forward1sButton" class="btn-icon" title="Forward 1s">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+              </button>
+              <button type="button" id="forward5sButton" class="btn-icon" title="Forward 5s">
+                <svg xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="13 19 22 12 13 5 13 19"></polygon>
+                  <polygon points="2 19 11 12 2 5 2 19"></polygon>
+                </svg>
+              </button>
+              <button type="button" id="muteButton" class="btn-icon ml-8" title="Mute/Unmute">
+                <!-- Volume High (Unmuted) -->
+                <svg id="volumeOnIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+                </svg>
+                <!-- Volume X (Muted) -->
+                <svg id="volumeOffIcon" xmlns="http://www.w3.org/2000/svg" width="27" height="27" viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                  class="hidden">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                  <line x1="23" y1="9" x2="17" y2="15"></line>
+                  <line x1="17" y1="9" x2="23" y2="15"></line>
+                </svg>
+              </button>
+              <div id="volume-control-group" class="flex items-center flex-shrink-0 w-28 sm:w-36 gap-2">
+                <input type="range" class="form-range slider-ticks flex-1 min-w-0" min="0" max="1" step="0.01" value="1"
+                  id="volumeSlider" aria-label="Volume Slider" />
+                <span id="volumeValue"
+                  class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-7 text-right flex-shrink-0">100</span>
+              </div>
+            </div>
+            <div class="w-full flex items-center gap-2 sm:gap-8 mt-4">
+              <span class="font-mono text-sm text-zinc-500 dark:text-zinc-400 w-20 text-center">Speed</span>
+              <input type="range" class="form-range flex-1 timeline-ticks" style="--tick-interval: 6.6667%;" min="0.5"
+                max="8" step="0.1" value="1" id="speedSlider" aria-label="Playback Speed" />
+              <span id="speedValue"
+                class="font-mono tabular-nums text-sm text-zinc-500 dark:text-zinc-400 w-20 text-center">1.0x</span>
+              <button type="button" id="timeline-toggle-btn"
+                class="p-1.5 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-500 dark:text-zinc-400 transition-colors ml-4"
+                title="Toggle Detailed Timeline">
+                <svg class="w-4 h-4 transform transition-transform duration-200" fill="none" stroke="currentColor"
+                  stroke-width="2.5" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 8.25l7.5 7.5 7.5-7.5"></path>
+                </svg>
+              </button>
             </div>
           </div>
-          <div id="non-linear-sequencer" class="relative min-h-0 flex flex-col">
-            <!-- Single H-scroll parent so ruler, tracks, markers, playhead share px-per-second -->
-            <div id="timeline-h-scroll" class="timeline-h-scroll min-h-0 flex-1">
-              <div id="timeline-zoom-content" class="timeline-zoom-content relative">
-                <div id="timeline-marker-overlay" class="absolute inset-0 pointer-events-none z-20"></div>
+        </div>
 
-                <div id="timeline-ruler-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700" style="height: 24px; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-family: monospace; border-bottom: 1px solid; margin-bottom: 8px; border-radius: 4px; flex-shrink: 0; box-sizing: border-box;">
-                  0:00:00 / Sequence Time Tracks Placeholder
+
+        <input type="file" id="videoFileInput" accept="video/*,audio/*" style="display: none" />
+      </div>
+
+      <!-- Right Column: Controls -->
+      <div id="rightPanel" class="flex flex-col pt-4 lg:pt-6">
+
+
+        <!-- Markers List Table -->
+        <div id="markersList" style="max-height: calc(100vh - 420px); overflow-y: auto;">
+
+        </div>
+      </div>
+      <!-- Custom detailed timeline (Rust waveform + filmstrip) -->
+      <div id="detailed-timeline-panel"
+        class="bg-zinc-100 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 p-4 rounded shadow-sm mt-6 px-4 ml-4 lg:ml-6"
+        style="display: none;">
+        <div class="flex justify-between items-center mb-2 gap-3">
+          <span
+            class="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider shrink-0">Detailed
+            Timeline</span>
+          <div id="timeline-zoom-controls" class="flex items-center gap-1.5 shrink-0"
+            title="Timeline zoom (1 = fit width)">
+            <button type="button" id="timelineZoomOutBtn"
+              class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 p-0.5 rounded leading-none text-sm font-bold w-5 h-5 flex items-center justify-center"
+              aria-label="Zoom out" title="Zoom out">−</button>
+            <input type="range" id="timelineZoomSlider" min="1" max="8" step="0.05" value="1"
+              class="form-range w-24 sm:w-28 cursor-pointer" aria-label="Timeline zoom" />
+            <button type="button" id="timelineZoomInBtn"
+              class="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 p-0.5 rounded leading-none text-sm font-bold w-5 h-5 flex items-center justify-center"
+              aria-label="Zoom in" title="Zoom in">+</button>
+            <span id="timelineZoomLabel"
+              class="text-[10px] font-mono tabular-nums text-zinc-500 dark:text-zinc-400 w-9 text-right select-none">Fit</span>
+            <button type="button" id="timelineZoomFitBtn"
+              class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 hover:text-blue-500 dark:hover:text-blue-400 px-1.5 py-0.5 rounded border border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+              title="Fit to width (double-click slider)">Fit</button>
+          </div>
+        </div>
+        <div id="non-linear-sequencer" class="relative min-h-0 flex flex-col">
+          <!-- Single H-scroll parent so ruler, tracks, markers, playhead share px-per-second -->
+          <div id="timeline-h-scroll" class="timeline-h-scroll min-h-0 flex-1">
+            <div id="timeline-zoom-content" class="timeline-zoom-content relative">
+              <div id="timeline-marker-overlay" class="absolute inset-0 pointer-events-none z-20"></div>
+
+              <div id="timeline-ruler-track"
+                class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700"
+                style="height: 24px; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-family: monospace; border-bottom: 1px solid; margin-bottom: 8px; border-radius: 4px; flex-shrink: 0; box-sizing: border-box;">
+                0:00:00 / Sequence Time Tracks Placeholder
+              </div>
+
+              <div id="timeline-tracks-host" class="flex flex-col gap-2 min-h-0 flex-1">
+                <div id="timeline-video-track"
+                  class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed"
+                  style="height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;">
+                  Video Filmstrip Strip Track Frame Housing
                 </div>
 
-                <div id="timeline-tracks-host" class="flex flex-col gap-2 min-h-0 flex-1">
-                  <div id="timeline-video-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed" style="height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;">
-                    Video Filmstrip Strip Track Frame Housing
-                  </div>
-
-                  <div id="timeline-audio-track" class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed" style="height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;">
-                    Linear Amplitude Peak Canvas Element
-                  </div>
+                <div id="timeline-audio-track"
+                  class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed"
+                  style="height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;">
+                  Linear Amplitude Peak Canvas Element
                 </div>
               </div>
             </div>
           </div>
         </div>
       </div>
-
-
     </div>
 
-    <!-- Toast Notification Container -->
-    <div id="toastContainer" class="fixed top-4 left-1/2 -translate-x-1/2 z-100 flex flex-col gap-2 pointer-events-none items-center w-full max-w-md px-4"></div>
 
-    <!-- Settings Slide-out Panel -->
-    <div id="settingsBackdrop" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 hidden transition-opacity duration-300 opacity-0"></div>
-    <div id="settingsPanel" class="fixed top-0 right-0 h-full w-80 max-w-[90vw] bg-white dark:bg-zinc-800 shadow-2xl z-50 transform translate-x-full transition-transform duration-300 flex flex-col border-l border-zinc-200 dark:border-zinc-700">
-      <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
-        <h5 class="text-lg font-semibold flex items-center gap-2 text-zinc-900 dark:text-white">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-blue-500">
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-            <circle cx="12" cy="12" r="3"></circle>
-          </svg>
-          Project Settings
-        </h5>
-        <button type="button" id="closeSettingsBtn" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none">&times;</button>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer"
+    class="fixed top-4 left-1/2 -translate-x-1/2 z-100 flex flex-col gap-2 pointer-events-none items-center w-full max-w-md px-4">
+  </div>
+
+  <!-- Settings Slide-out Panel -->
+  <div id="settingsBackdrop"
+    class="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 hidden transition-opacity duration-300 opacity-0"></div>
+  <div id="settingsPanel"
+    class="fixed top-0 right-0 h-full w-80 max-w-[90vw] bg-white dark:bg-zinc-800 shadow-2xl z-50 transform translate-x-full transition-transform duration-300 flex flex-col border-l border-zinc-200 dark:border-zinc-700">
+    <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
+      <h5 class="text-lg font-semibold flex items-center gap-2 text-zinc-900 dark:text-white">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-blue-500">
+          <path
+            d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z">
+          </path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+        Project Settings
+      </h5>
+      <button type="button" id="closeSettingsBtn"
+        class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none">&times;</button>
+    </div>
+    <div
+      class="p-5 overflow-y-auto flex-1 flex flex-col gap-6 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
+      <div>
+        <label for="projectCommentsInput" class="form-label">Project Comments</label>
+        <textarea id="projectCommentsInput" class="form-control w-full" rows="3"
+          placeholder="Notes about this project..."></textarea>
       </div>
-      <div class="p-5 overflow-y-auto flex-1 flex flex-col gap-6 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
-        <div>
-          <label for="projectCommentsInput" class="form-label">Project Comments</label>
-          <textarea id="projectCommentsInput" class="form-control w-full" rows="3" placeholder="Notes about this project..."></textarea>
-        </div>
 
-        <div id="proxyInfoSection" class="hidden">
-          <label class="form-label">Proxy Info</label>
-          <p id="proxyInfoPath" class="text-xs font-mono break-all text-zinc-600 dark:text-zinc-400 bg-zinc-100 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-700 rounded px-2 py-1.5">None</p>
-          <p class="text-[11px] text-zinc-500 dark:text-zinc-500 mt-1">Local H.265/AVI playback proxy for the active queue item. Cleared when the item is removed.</p>
-        </div>
+      <div id="proxyInfoSection" class="hidden">
+        <label class="form-label">Proxy Info</label>
+        <p id="proxyInfoPath"
+          class="text-xs font-mono break-all text-zinc-600 dark:text-zinc-400 bg-zinc-100 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-700 rounded px-2 py-1.5">
+          None</p>
+        <p class="text-[11px] text-zinc-500 dark:text-zinc-500 mt-1">Local H.265/AVI playback proxy for the active queue
+          item. Cleared when the item is removed.</p>
+      </div>
 
-        <hr class="border-zinc-200 dark:border-zinc-700" />
+      <hr class="border-zinc-200 dark:border-zinc-700" />
 
-        <div class="flex flex-col gap-4">
-          <h6 class="text-sm font-semibold text-zinc-900 dark:text-white">Video Editing Utilities</h6>
+      <div class="flex flex-col gap-4">
+        <h6 class="text-sm font-semibold text-zinc-900 dark:text-white">Video Editing Utilities</h6>
 
-          <!-- Config & Progress Container -->
-          <div id="trimNormalContent" class="space-y-4">
-            <div class="grid grid-cols-2 gap-4">
-              <div>
-                <label for="trimStartInput" class="form-label font-semibold text-xs text-zinc-500 dark:text-zinc-400">Start Time</label>
-                <input type="text" id="trimStartInput" class="form-control w-full font-mono text-center text-sm" placeholder="00:00:00.00">
-              </div>
-              <div>
-                <label for="trimEndInput" class="form-label font-semibold text-xs text-zinc-500 dark:text-zinc-400">End Time</label>
-                <input type="text" id="trimEndInput" class="form-control w-full font-mono text-center text-sm" placeholder="00:00:00.00">
-              </div>
-            </div>
-
+        <!-- Config & Progress Container -->
+        <div id="trimNormalContent" class="space-y-4">
+          <div class="grid grid-cols-2 gap-4">
             <div>
-              <label class="form-label font-semibold text-xs text-zinc-500 dark:text-zinc-400 block mb-2">Quality Preset (Re-encoding)</label>
-              <div class="flex gap-4">
-                <label class="flex items-center gap-1.5 cursor-pointer text-sm font-medium">
-                  <input type="radio" name="trimQuality" value="low" class="text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800">
-                  Low
-                </label>
-                <label class="flex items-center gap-1.5 cursor-pointer text-sm font-medium">
-                  <input type="radio" name="trimQuality" value="medium" checked class="text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800">
-                  Medium
-                </label>
-                <label class="flex items-center gap-1.5 cursor-pointer text-sm font-medium">
-                  <input type="radio" name="trimQuality" value="high" class="text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800">
-                  High
-                </label>
-              </div>
+              <label for="trimStartInput"
+                class="form-label font-semibold text-xs text-zinc-500 dark:text-zinc-400">Start Time</label>
+              <input type="text" id="trimStartInput" class="form-control w-full font-mono text-center text-sm"
+                placeholder="00:00:00.00">
             </div>
-
-            <div class="flex flex-col gap-2 border-t border-zinc-200 dark:border-zinc-700 pt-3">
-              <label for="batchExportToggle" class="text-sm font-semibold text-zinc-700 dark:text-zinc-300 cursor-pointer flex items-center gap-2">
-                <input type="checkbox" id="batchExportToggle" checked class="rounded text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-4 h-4 cursor-pointer" />
-                Batch export queue
-              </label>
-              <p class="text-[11px] text-zinc-500 dark:text-zinc-400 leading-snug pl-6">
-                Joined clips export as one file; others export separately. Uses each clip’s In / Out.
-              </p>
-              <label for="batchStripAudioToggle" class="text-sm font-medium text-zinc-700 dark:text-zinc-300 cursor-pointer flex items-center gap-2 pl-6">
-                <input type="checkbox" id="batchStripAudioToggle" class="rounded text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-4 h-4 cursor-pointer" />
-                Strip audio (video only)
-              </label>
-            </div>
-
-            <div id="batch-export-list" class="hidden space-y-2 border-t border-zinc-200 dark:border-zinc-700 pt-3 max-h-48 overflow-y-auto [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full"></div>
-
-            <!-- Progress bar UI container -->
-            <div id="trimProgressContainer" class="hidden space-y-2 pt-2 cursor-pointer select-none">
-              <div class="flex justify-between items-center text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                <div class="flex items-center gap-2">
-                  <svg id="trimProgressSpinner" class="animate-spin h-3.5 w-3.5 text-blue-500 hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <span>Processing…</span>
-                </div>
-                <span id="trimProgressText">0%</span>
-              </div>
-              <div class="w-full bg-zinc-200 dark:bg-zinc-700 h-2.5 rounded-full overflow-hidden">
-                <div id="trimProgressBar" class="bg-blue-600 h-full rounded-full transition-all duration-150" style="width: 0%"></div>
-              </div>
+            <div>
+              <label for="trimEndInput" class="form-label font-semibold text-xs text-zinc-500 dark:text-zinc-400">End
+                Time</label>
+              <input type="text" id="trimEndInput" class="form-control w-full font-mono text-center text-sm"
+                placeholder="00:00:00.00">
             </div>
           </div>
 
-          <!-- Normal Footer / Buttons -->
-          <div id="trimNormalFooter" class="pt-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-2">
-            <button type="button" id="cancelTrimBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
-            <button type="button" id="trimOnlyBtn" class="btn btn-outline-primary shrink-0">Trim only</button>
-            <button type="button" id="trimCompressBtn" class="btn btn-primary shrink-0">Trim &amp; compress</button>
+          <div>
+            <label class="form-label font-semibold text-xs text-zinc-500 dark:text-zinc-400 block mb-2">Quality Preset
+              (Re-encoding)</label>
+            <div class="flex gap-4">
+              <label class="flex items-center gap-1.5 cursor-pointer text-sm font-medium">
+                <input type="radio" name="trimQuality" value="low"
+                  class="text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800">
+                Low
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer text-sm font-medium">
+                <input type="radio" name="trimQuality" value="medium" checked
+                  class="text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800">
+                Medium
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer text-sm font-medium">
+                <input type="radio" name="trimQuality" value="high"
+                  class="text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800">
+                High
+              </label>
+            </div>
           </div>
 
-          <!-- Tetris Easter Egg Screen -->
-          <div id="tetrisContainer" class="hidden pt-5 flex flex-col items-center justify-center relative">
-            <div class="flex items-start gap-4">
-              <!-- Main Canvas -->
-              <canvas id="tetrisCanvas" width="200" height="400" class="rounded shadow bg-zinc-950"></canvas>
-              
-              <!-- Sidebar for stats and next block -->
-              <div class="flex flex-col gap-3">
-                <div class="bg-zinc-900/80 border border-zinc-700 rounded p-2 flex flex-col items-center shadow">
-                  <span class="text-[10px] text-zinc-400 font-bold uppercase mb-1.5">Next</span>
-                  <canvas id="tetrisNextCanvas" width="50" height="50" class="bg-black/40 rounded-sm"></canvas>
-                </div>
-                <div class="bg-zinc-900/80 border border-zinc-700 rounded p-2 flex flex-col gap-1.5 min-w-17.5 shadow text-xs">
-                  <div class="flex flex-col">
-                    <span class="text-[9px] text-zinc-500 font-bold uppercase">Score</span>
-                    <span id="tetrisScore" class="font-mono font-bold text-sm text-zinc-200">00000</span>
-                  </div>
-                  <div class="flex flex-col border-t border-zinc-800 pt-1.5">
-                    <span class="text-[9px] text-zinc-500 font-bold uppercase">High</span>
-                    <span id="tetrisHighScore" class="font-mono font-bold text-sm text-zinc-200">00000</span>
-                  </div>
-                </div>
+          <div class="flex flex-col gap-2 border-t border-zinc-200 dark:border-zinc-700 pt-3">
+            <label for="batchExportToggle"
+              class="text-sm font-semibold text-zinc-700 dark:text-zinc-300 cursor-pointer flex items-center gap-2">
+              <input type="checkbox" id="batchExportToggle" checked
+                class="rounded text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-4 h-4 cursor-pointer" />
+              Batch export queue
+            </label>
+            <p class="text-[11px] text-zinc-500 dark:text-zinc-400 leading-snug pl-6">
+              Joined clips export as one file; others export separately. Uses each clip’s In / Out.
+            </p>
+            <label for="batchStripAudioToggle"
+              class="text-sm font-medium text-zinc-700 dark:text-zinc-300 cursor-pointer flex items-center gap-2 pl-6">
+              <input type="checkbox" id="batchStripAudioToggle"
+                class="rounded text-blue-600 focus:ring-blue-500 border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 w-4 h-4 cursor-pointer" />
+              Strip audio (video only)
+            </label>
+          </div>
+
+          <div id="batch-export-list"
+            class="hidden space-y-2 border-t border-zinc-200 dark:border-zinc-700 pt-3 max-h-48 overflow-y-auto [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
+          </div>
+
+          <!-- Progress bar UI container -->
+          <div id="trimProgressContainer" class="hidden space-y-2 pt-2 cursor-pointer select-none">
+            <div class="flex justify-between items-center text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+              <div class="flex items-center gap-2">
+                <svg id="trimProgressSpinner" class="animate-spin h-3.5 w-3.5 text-blue-500 hidden"
+                  xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+                  </path>
+                </svg>
+                <span>Processing…</span>
               </div>
+              <span id="trimProgressText">0%</span>
             </div>
-            <p class="text-[10px] text-zinc-500 dark:text-zinc-400 mt-4 font-medium">Tip: Press "B" to hide/show the game screen.</p>
-            
-            <!-- Overlay for Game Over / 100% Completion -->
-            <div id="tetrisOverlay" class="absolute inset-0 bg-black/85 flex flex-col items-center justify-center text-center p-4 hidden z-20">
-              <h6 id="tetrisOverlayTitle" class="text-lg font-bold text-white mb-4">Game Over</h6>
-              <div id="tetrisOverlayButtons" class="flex flex-col gap-2 w-full max-w-40">
-                <!-- Dynamic buttons will be inserted here -->
-              </div>
+            <div class="w-full bg-zinc-200 dark:bg-zinc-700 h-2.5 rounded-full overflow-hidden">
+              <div id="trimProgressBar" class="bg-blue-600 h-full rounded-full transition-all duration-150"
+                style="width: 0%"></div>
             </div>
           </div>
         </div>
 
-        <!-- Product chrome / about (settings footer; no layout impact on cinema/miniplayer) -->
-        <div id="productChrome" class="product-chrome mt-auto pt-4 border-t border-zinc-200 dark:border-zinc-700">
-          <p class="product-chrome-line">
-            Powered by
-            <a href="https://lean.studio" class="product-chrome-link">LEAN.STUDIO</a>
-          </p>
-          <div class="product-chrome-links">
-            <a href="https://speeddf.com" class="product-chrome-link">speedDF</a>
-            <a href="https://buymeacoffee.com/lean.studio" class="product-chrome-link">Buy Me a Coffee</a>
+        <!-- Normal Footer / Buttons -->
+        <div id="trimNormalFooter"
+          class="pt-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-2">
+          <button type="button" id="cancelTrimBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+          <button type="button" id="trimOnlyBtn" class="btn btn-outline-primary shrink-0">Trim only</button>
+          <button type="button" id="trimCompressBtn" class="btn btn-primary shrink-0">Trim &amp; compress</button>
+        </div>
+
+        <!-- Tetris Easter Egg Screen -->
+        <div id="tetrisContainer" class="hidden pt-5 flex flex-col items-center justify-center relative">
+          <div class="flex items-start gap-4">
+            <!-- Main Canvas -->
+            <canvas id="tetrisCanvas" width="200" height="400" class="rounded shadow bg-zinc-950"></canvas>
+
+            <!-- Sidebar for stats and next block -->
+            <div class="flex flex-col gap-3">
+              <div class="bg-zinc-900/80 border border-zinc-700 rounded p-2 flex flex-col items-center shadow">
+                <span class="text-[10px] text-zinc-400 font-bold uppercase mb-1.5">Next</span>
+                <canvas id="tetrisNextCanvas" width="50" height="50" class="bg-black/40 rounded-sm"></canvas>
+              </div>
+              <div
+                class="bg-zinc-900/80 border border-zinc-700 rounded p-2 flex flex-col gap-1.5 min-w-17.5 shadow text-xs">
+                <div class="flex flex-col">
+                  <span class="text-[9px] text-zinc-500 font-bold uppercase">Score</span>
+                  <span id="tetrisScore" class="font-mono font-bold text-sm text-zinc-200">00000</span>
+                </div>
+                <div class="flex flex-col border-t border-zinc-800 pt-1.5">
+                  <span class="text-[9px] text-zinc-500 font-bold uppercase">High</span>
+                  <span id="tetrisHighScore" class="font-mono font-bold text-sm text-zinc-200">00000</span>
+                </div>
+              </div>
+            </div>
           </div>
+          <p class="text-[10px] text-zinc-500 dark:text-zinc-400 mt-4 font-medium">Tip: Press "B" to hide/show the game
+            screen.</p>
+
+          <!-- Overlay for Game Over / 100% Completion -->
+          <div id="tetrisOverlay"
+            class="absolute inset-0 bg-black/85 flex flex-col items-center justify-center text-center p-4 hidden z-20">
+            <h6 id="tetrisOverlayTitle" class="text-lg font-bold text-white mb-4">Game Over</h6>
+            <div id="tetrisOverlayButtons" class="flex flex-col gap-2 w-full max-w-40">
+              <!-- Dynamic buttons will be inserted here -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Product chrome / about (settings footer; no layout impact on cinema/miniplayer) -->
+      <div id="productChrome" class="product-chrome mt-auto pt-4 border-t border-zinc-200 dark:border-zinc-700">
+        <p class="product-chrome-line">
+          Powered by
+          <a href="https://lean.studio" class="product-chrome-link">LEAN.STUDIO</a>
+        </p>
+        <div class="product-chrome-links">
+          <a href="https://speeddf.com" class="product-chrome-link">speedDF</a>
+          <a href="https://buymeacoffee.com/lean.studio" class="product-chrome-link">Buy Me a Coffee</a>
         </div>
       </div>
     </div>
+  </div>
 
-    <!-- Package Progress Modal -->
-    <dialog id="packageProgressModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-xl shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/60 backdrop:backdrop-blur-sm w-full max-w-md fixed inset-0 m-auto">
-      <div class="p-6 flex flex-col gap-5">
-        <!-- Header -->
-        <div class="flex items-center gap-3">
-          <div id="pkgSpinner" class="shrink-0">
-            <svg class="animate-spin h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-          </div>
-          <div id="pkgDoneIcon" class="shrink-0 hidden">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-          </div>
-          <h5 id="pkgModalTitle" class="text-base font-semibold tracking-tight">Packaging project…</h5>
+  <!-- Package Progress Modal -->
+  <dialog id="packageProgressModal"
+    class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-xl shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/60 backdrop:backdrop-blur-sm w-full max-w-md fixed inset-0 m-auto">
+    <div class="p-6 flex flex-col gap-5">
+      <!-- Header -->
+      <div class="flex items-center gap-3">
+        <div id="pkgSpinner" class="shrink-0">
+          <svg class="animate-spin h-6 w-6 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none"
+            viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor"
+              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+            </path>
+          </svg>
         </div>
-
-        <!-- Status message -->
-        <p id="pkgStatusMessage" class="text-sm text-zinc-500 dark:text-zinc-400 min-h-5 truncate">Preparing…</p>
-
-        <!-- Progress bar -->
-        <div class="space-y-1.5">
-          <div class="flex justify-between text-xs font-mono text-zinc-500 dark:text-zinc-400">
-            <span id="pkgFileCounter" class=""></span>
-            <span id="pkgPercent">0%</span>
-          </div>
-          <div class="w-full bg-zinc-200 dark:bg-zinc-700 h-2.5 rounded-full overflow-hidden">
-            <div id="pkgProgressBar" class="bg-blue-600 h-full rounded-full transition-all duration-200 ease-out" style="width: 0%"></div>
-          </div>
+        <div id="pkgDoneIcon" class="shrink-0 hidden">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-green-500" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
         </div>
-
-        <!-- Footer — only shown on completion -->
-        <div id="pkgDoneFooter" class="hidden flex flex-nowrap items-center justify-end gap-3">
-          <button type="button" id="pkgCloseBtn" class="btn btn-primary shrink-0">Done</button>
-        </div>
+        <h5 id="pkgModalTitle" class="text-base font-semibold tracking-tight">Packaging project…</h5>
       </div>
-    </dialog>
 
-    <!-- Confirm Modal -->
-    <dialog id="confirmModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
-      <div class="p-5">
-        <h5 class="text-lg font-semibold tracking-tight mb-1.5" id="confirmTitle">Confirm</h5>
-        <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-6 leading-relaxed" id="confirmMessage">Continue?</p>
-        <div class="flex flex-nowrap items-center justify-end gap-3">
-          <button type="button" id="confirmCancelBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
-          <button type="button" id="confirmOkBtn" class="btn btn-primary shrink-0">Confirm</button>
+      <!-- Status message -->
+      <p id="pkgStatusMessage" class="text-sm text-zinc-500 dark:text-zinc-400 min-h-5 truncate">Preparing…</p>
+
+      <!-- Progress bar -->
+      <div class="space-y-1.5">
+        <div class="flex justify-between text-xs font-mono text-zinc-500 dark:text-zinc-400">
+          <span id="pkgFileCounter" class=""></span>
+          <span id="pkgPercent">0%</span>
+        </div>
+        <div class="w-full bg-zinc-200 dark:bg-zinc-700 h-2.5 rounded-full overflow-hidden">
+          <div id="pkgProgressBar" class="bg-blue-600 h-full rounded-full transition-all duration-200 ease-out"
+            style="width: 0%"></div>
         </div>
       </div>
-    </dialog>
 
-    <!-- Prompt Modal -->
-    <dialog id="promptModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto" aria-labelledby="promptTitle" aria-describedby="promptMessage">
-      <div class="p-5">
-        <h5 class="text-lg font-semibold tracking-tight mb-1.5" id="promptTitle">Input</h5>
-        <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-3 leading-relaxed" id="promptMessage"></p>
-        <input type="text" id="promptInput" class="form-control w-full mb-6" autocomplete="off" list="promptDatalist">
-        <datalist id="promptDatalist"></datalist>
-        <div class="flex flex-nowrap items-center justify-end gap-3">
-          <button type="button" id="promptCancelBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
-          <button type="button" id="promptOkBtn" class="btn btn-primary shrink-0">OK</button>
-        </div>
+      <!-- Footer — only shown on completion -->
+      <div id="pkgDoneFooter" class="hidden flex flex-nowrap items-center justify-end gap-3">
+        <button type="button" id="pkgCloseBtn" class="btn btn-primary shrink-0">Done</button>
       </div>
-    </dialog>
+    </div>
+  </dialog>
 
-    <!-- Help Modal -->
-    <dialog id="helpModal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-lg fixed inset-0 m-auto" aria-labelledby="helpModalLabel">
-      <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
-        <h5 class="text-lg font-semibold tracking-tight" id="helpModalLabel">Help &amp; shortcuts</h5>
-        <button type="button" id="closeHelpBtnX" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none" aria-label="Close">&times;</button>
+  <!-- Confirm Modal -->
+  <dialog id="confirmModal"
+    class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto"
+    aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <div class="p-5">
+      <h5 class="text-lg font-semibold tracking-tight mb-1.5" id="confirmTitle">Confirm</h5>
+      <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-6 leading-relaxed" id="confirmMessage">Continue?</p>
+      <div class="flex flex-nowrap items-center justify-end gap-3">
+        <button type="button" id="confirmCancelBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+        <button type="button" id="confirmOkBtn" class="btn btn-primary shrink-0">Confirm</button>
       </div>
-      <div class="p-4 space-y-4">
-        <h6 class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Keyboard</h6>
-        <div class="overflow-x-auto [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
-          <table class="table w-full">
-            <tbody>
-              <tr><td><strong>Space</strong></td><td>Play / pause</td></tr>
-              <tr><td><strong>Left arrow</strong></td><td>Back 1s</td></tr>
-              <tr><td><strong>Right arrow</strong></td><td>Forward 1s</td></tr>
-              <tr><td><strong>Down arrow</strong></td><td>Back 5s</td></tr>
-              <tr><td><strong>Up arrow</strong></td><td>Forward 5s</td></tr>
-              <tr><td><strong>Enter / M</strong></td><td>Add marker</td></tr>
-              <tr><td><strong>, (comma)</strong></td><td>Previous marker</td></tr>
-              <tr><td><strong>. (period)</strong></td><td>Next marker</td></tr>
-              <tr><td><strong>L</strong></td><td>Load video</td></tr>
-              <tr><td><strong>` (backtick)</strong></td><td>0.5× speed</td></tr>
-              <tr><td><strong>1 – 8</strong></td><td>1× – 8× speed</td></tr>
-              <tr><td><strong>=</strong></td><td>Zoom in</td></tr>
-              <tr><td><strong>-</strong></td><td>Zoom out</td></tr>
-              <tr><td><strong>Backspace</strong></td><td>Reset zoom</td></tr>
-              <tr><td><strong>S</strong></td><td>Snapshot</td></tr>
-              <tr><td><strong>\</strong></td><td>Cinema mode</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <h6 class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Mouse</h6>
-        <p class="text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">Drag on the video to draw a box and zoom into that area.</p>
-      </div>
-      <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-3">
-        <button type="button" id="closeHelpBtn" class="btn btn-primary shrink-0">Close</button>
-      </div>
-    </dialog>
+    </div>
+  </dialog>
 
-    <!-- Reorder Videos Modal -->
-    <dialog id="reorder-videos-modal" class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-md fixed inset-0 m-auto" style="display: none;" aria-labelledby="reorderModalTitle">
-      <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
-        <h5 class="text-lg font-semibold tracking-tight" id="reorderModalTitle">Reorder playlist</h5>
-        <button type="button" id="close-reorder-modal-x" class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none" aria-label="Close">&times;</button>
+  <!-- Prompt Modal -->
+  <dialog id="promptModal"
+    class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-sm fixed inset-0 m-auto"
+    aria-labelledby="promptTitle" aria-describedby="promptMessage">
+    <div class="p-5">
+      <h5 class="text-lg font-semibold tracking-tight mb-1.5" id="promptTitle">Input</h5>
+      <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-3 leading-relaxed" id="promptMessage"></p>
+      <input type="text" id="promptInput" class="form-control w-full mb-6" autocomplete="off" list="promptDatalist">
+      <datalist id="promptDatalist"></datalist>
+      <div class="flex flex-nowrap items-center justify-end gap-3">
+        <button type="button" id="promptCancelBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+        <button type="button" id="promptOkBtn" class="btn btn-primary shrink-0">OK</button>
       </div>
-      <div class="p-4 overflow-y-auto max-h-[50vh] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
-        <div id="modal-queue-list" class="flex flex-col gap-2"></div>
+    </div>
+  </dialog>
+
+  <!-- Help Modal -->
+  <dialog id="helpModal"
+    class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-lg fixed inset-0 m-auto"
+    aria-labelledby="helpModalLabel">
+    <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
+      <h5 class="text-lg font-semibold tracking-tight" id="helpModalLabel">Help &amp; shortcuts</h5>
+      <button type="button" id="closeHelpBtnX"
+        class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none"
+        aria-label="Close">&times;</button>
+    </div>
+    <div class="p-4 space-y-4">
+      <h6 class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Keyboard</h6>
+      <div
+        class="overflow-x-auto [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
+        <table class="table w-full">
+          <tbody>
+            <tr>
+              <td><strong>Space</strong></td>
+              <td>Play / pause</td>
+            </tr>
+            <tr>
+              <td><strong>Left arrow</strong></td>
+              <td>Back 1s</td>
+            </tr>
+            <tr>
+              <td><strong>Right arrow</strong></td>
+              <td>Forward 1s</td>
+            </tr>
+            <tr>
+              <td><strong>Down arrow</strong></td>
+              <td>Back 5s</td>
+            </tr>
+            <tr>
+              <td><strong>Up arrow</strong></td>
+              <td>Forward 5s</td>
+            </tr>
+            <tr>
+              <td><strong>Enter / M</strong></td>
+              <td>Add marker</td>
+            </tr>
+            <tr>
+              <td><strong>, (comma)</strong></td>
+              <td>Previous marker</td>
+            </tr>
+            <tr>
+              <td><strong>. (period)</strong></td>
+              <td>Next marker</td>
+            </tr>
+            <tr>
+              <td><strong>L</strong></td>
+              <td>Load video</td>
+            </tr>
+            <tr>
+              <td><strong>` (backtick)</strong></td>
+              <td>0.5× speed</td>
+            </tr>
+            <tr>
+              <td><strong>1 – 8</strong></td>
+              <td>1× – 8× speed</td>
+            </tr>
+            <tr>
+              <td><strong>=</strong></td>
+              <td>Zoom in</td>
+            </tr>
+            <tr>
+              <td><strong>-</strong></td>
+              <td>Zoom out</td>
+            </tr>
+            <tr>
+              <td><strong>Backspace</strong></td>
+              <td>Reset zoom</td>
+            </tr>
+            <tr>
+              <td><strong>S</strong></td>
+              <td>Snapshot</td>
+            </tr>
+            <tr>
+              <td><strong>\</strong></td>
+              <td>Cinema mode</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-3">
-        <button type="button" id="closeReorderVideosBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
-        <button type="button" id="save-reorder-btn" class="btn btn-primary shrink-0">Save order</button>
-      </div>
-    </dialog>
+      <h6 class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Mouse</h6>
+      <p class="text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">Drag on the video to draw a box and zoom into
+        that area.</p>
+    </div>
+    <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-3">
+      <button type="button" id="closeHelpBtn" class="btn btn-primary shrink-0">Close</button>
+    </div>
+  </dialog>
 
-    <!-- Butterchurn Visualizer Vendor Scripts -->
-    <script src="vendor/butterchurn.min.js"></script>
-    <script src="vendor/butterchurnPresetsMinimal.min.js"></script>
+  <!-- Reorder Videos Modal -->
+  <dialog id="reorder-videos-modal"
+    class="bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-lg shadow-2xl border border-zinc-200 dark:border-zinc-700 p-0 backdrop:bg-black/50 backdrop:backdrop-blur-sm w-full max-w-md fixed inset-0 m-auto"
+    style="display: none;" aria-labelledby="reorderModalTitle">
+    <div class="flex justify-between items-center p-4 border-b border-zinc-200 dark:border-zinc-700">
+      <h5 class="text-lg font-semibold tracking-tight" id="reorderModalTitle">Reorder playlist</h5>
+      <button type="button" id="close-reorder-modal-x"
+        class="text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 text-2xl font-bold px-2 leading-none"
+        aria-label="Close">&times;</button>
+    </div>
+    <div
+      class="p-4 overflow-y-auto max-h-[50vh] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-zinc-300 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-600 [&::-webkit-scrollbar-thumb]:rounded-full">
+      <div id="modal-queue-list" class="flex flex-col gap-2"></div>
+    </div>
+    <div class="p-4 border-t border-zinc-200 dark:border-zinc-700 flex flex-nowrap items-center justify-end gap-3">
+      <button type="button" id="closeReorderVideosBtn" class="btn btn-outline-secondary shrink-0">Cancel</button>
+      <button type="button" id="save-reorder-btn" class="btn btn-primary shrink-0">Save order</button>
+    </div>
+  </dialog>
 
-    <!-- Application Logic -->
-    <script src="utils.js"></script>
-    <script src="state.js"></script>
-<script src="ui-modals.js"></script>
-<script src="ui-components.js"></script>
+  <!-- Butterchurn Visualizer Vendor Scripts -->
+  <script src="vendor/butterchurn.min.js"></script>
+  <script src="vendor/butterchurnPresetsMinimal.min.js"></script>
 
-    <script src="tetris.js"></script>
-    <script src="js/timeline-engine.js"></script>
-    <script type="module" src="app.js"></script>
+  <!-- Application Logic -->
+  <script src="utils.js"></script>
+  <script src="state.js"></script>
+  <script src="ui-modals.js"></script>
+  <script src="ui-components.js"></script>
 
-  </body>
+  <script src="tetris.js"></script>
+  <script src="js/timeline-engine.js"></script>
+  <script type="module" src="app.js"></script>
+
+</body>
+
 </html>
