@@ -95,6 +95,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS codesign + notarization (no-op on Win/Linux)
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -105,8 +107,9 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'LS.Video ${{ github.ref_name }}'
-          releaseBody: 'Windows + Linux + macOS (Apple Silicon) installers. FFmpeg from ffmpeg-n9.0-lsvideo. Autoupdate planned for a follow-up release.'
+          releaseBody: 'Windows + Linux + macOS (Apple Silicon) installers. FFmpeg from ffmpeg-n9.0-lsvideo. Includes updater artifacts + latest.json when TAURI_SIGNING_* secrets are set.'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
+          includeUpdaterJson: true
           retryAttempts: 3

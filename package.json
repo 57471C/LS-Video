@@ -1,6 +1,6 @@
 {
   "name": "ls-video",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "A Windows Video Player/Editor with multiple view modes and encoding capabilities.",
   "main": "ui/index.html",
   "scripts": {
@@ -41,7 +41,9 @@
   "dependencies": {
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.0.0",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "butterchurn": "^2.6.7",
     "butterchurn-presets": "^2.4.7"
   }
