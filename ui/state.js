@@ -39,7 +39,7 @@ let clipOutTime = 0;
 let playbackSpeed = 1;
 let volumeLevel = 1;
 
-const APP_VERSION = "0.6.5";
+const APP_VERSION = "0.6.6";
 /** Active project localStorage key (writes only go here). */
 const PROJECT_STORAGE_KEY = "lfvideo_project";
 /** Legacy key from time-study era — read once for migration, never written. */
