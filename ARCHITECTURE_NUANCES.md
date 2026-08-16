@@ -1,56 +1,25 @@
 # LS.Video — ARCHITECTURE_NUANCES
 
-Hard-won constraints. Agents: prefer reading this over rediscovering via breakage.
-
-Last oriented: v0.6.2 + pathToAssetUrl (macOS-safe convertFileSrc) + audio/video queue guards, detailed timeline marker drag, full-media solo timeline, modal polish, Speed markers + fades + batch export.
+Footguns and “why it is this way.” Pair with `AGENT_MAP.md`.
 
 ---
 
 ## 1. Identity & branding
 
-| Item | Value |
-|------|--------|
-| Display name | LS.Video |
-| Identifier | `com.leanstudio.lsvideo` |
-| npm / Cargo name | `ls-video` |
-
-Changing `identifier` = new Windows app (separate AppData, install path). Old TMVideo installs do not share state.
+- productName `LS.Video`, identifier `com.leanstudio.lsvideo`
+- Version lives in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `ui/state.js` (`APP_VERSION`), and window/title strings — bump together on release
 
 ---
 
 ## 2. Path normalization (UNC)
 
-**Symptom:** `\\server\share\file.mp4` becomes `server\share\file.mp4` → `asset.localhost` 404.
-
-**Rule:** only strip Windows **extended** prefixes:
-
-```text
-\\?\C:\foo              → C:\foo
-\\?\UNC\server\share\x  → \\server\share\x
-\\server\share\x        → unchanged
-C:\foo                  → unchanged
-```
-
-Never use a regex that strips a leading `\\` from normal UNC. Same normalize for drag-drop, dialogs, and OS launch args.
-
-Network/Outlook “open” failures at work were this class of bug, not “email magic.”
-
-After normalize, convert to a WebView URL with `pathToAssetUrl` only (see §22). Do not encode the path at the call site.
+Preserve `\\server\share\...`. Only strip `\\?\` extended prefixes. Do not turn UNC into single-slash paths.
 
 ---
 
 ## 3. Single load pipeline
 
-Duplicate `loadVideo` / direct `convertFileSrc` / Failsafe Proxy caused:
-
-- Double optimizing overlay
-- Empty-src toast spam
-- H.265 path inconsistencies
-- macOS playback 404s from a Windows-only `https://asset.localhost/${encodeURIComponent(...)}` fallback (slashes not encoded the way WKWebView’s `asset:` protocol expects)
-
 **Law:** one entry (`window.loadVideo`). Proxy decision only in Rust `verify_and_prepare_video`. Path → `src` only via `pathToAssetUrl`.
-
-Empty `http://127.0.0.1:1430/` (or origin-only) MediaError during load = transitional; suppress with `_videoLoadInProgress`, do not toast as hard failure.
 
 ---
 
@@ -61,6 +30,14 @@ Empty `http://127.0.0.1:1430/` (or origin-only) MediaError during load = transit
 Audio extensions must **short-circuit** before the “not web-safe” branch.
 
 mpeg4/mp4v in MP4 is also not web-safe for WebView2 → proxy (seen on mislabeled “H265-Test” files that were actually mpeg4).
+
+**HEVC / H.265 (`hev1` / `hvc1` / probe `hevc`):** default is **always proxy** to H.264 MP4. Reasons:
+
+1. WebView2 does not reliably decode HEVC without the separate Windows HEVC extension and still varies by machine.
+2. macOS WKWebView *can* play many HEVC files in Safari, but Tauri’s WebView is not a guarantee of the same codec path; seeking, multi-track, and odd containers still fail.
+3. One code path keeps filmstrip/export/proxy cache coherent (export already goes through ffmpeg).
+
+**Experiment (do not merge without data):** on macOS only, optionally attempt `pathToAssetUrl(original)` first for pure HEVC-in-MP4; on `MediaError` or `error` event, fall back to `verify_and_prepare_video` proxy and keep using that path for the session. Never skip proxy for AVI/MKV/unsafe containers. Capture: cold-open time, first-frame time, seek accuracy, whether filmstrip still needs ffmpeg decode.
 
 On queue delete/replace: purge hash-keyed proxy under app cache (`delete_proxy_for_video`) and clear CC tracks so captions/proxy paths do not stick to the next source.
 
@@ -87,9 +64,7 @@ Markers table “visible but dead” = handlers not on `window`. Timeline `playe
 
 ## 7. Filmstrip races
 
-Async thumb jobs complete out of order when switching videos fast.
-
-Use generation token + path guard; ignore stale `.then` results. Per-video cache subdirectory in Rust so thumbs don’t overwrite each other.
+Generation tokens / path stamps cancel stale async thumb batches when the user switches queue items quickly.
 
 Skip entire filmstrip pipeline for audio-only (ffmpeg “no video stream”).
 
@@ -97,72 +72,33 @@ Skip entire filmstrip pipeline for audio-only (ffmpeg “no video stream”).
 
 ## 8. Join sequence spine (flush boundaries)
 
-Playback and export both assume:
-
-```text
-sequenceOffset(0) = 0
-segmentDuration(i) = max(0, clipOut_i − clipIn_i)   // speed-warped when ranges exist
-sequenceOffset(i+1) = sequenceOffset(i) + segmentDuration(i)
-```
-
-So clip N’s sequence out **equals** clip N+1’s sequence in (one vertical cut on multi-row timeline).
-
-`clipIn`/`clipOut` must stay in sync with in/out markers (`syncClipBoundsFromMarkers`). Multi-clip footer used to skip that sync → wrong segment widths until fixed.
-
-Joined rows show **full source** filmstrip/waveform mapped so the active `[clipIn, clipOut]` band aligns with the sequence slot; head/tail are tinted (solo-like) so users see the file is longer than the joined segment.
-
-Transport bar: multi-clip = **sequence** clock; do not apply solo “black after local clipOut” to the whole bar.
-
-**Join class law:** `joinedToNext` only when both neighbours are the same media class (audio+audio or video+video). Mixed joins break ffmpeg (video filters on audio, concat map failures). Use `canJoinQueueIndices` / `normalizeInvalidJoins`; never re-enable mixed join “for convenience.”
+`joinedToNext` only when both neighbours are the same media class (audio+audio or video+video). Mixed joins break ffmpeg (video filters on audio, concat map failures). Use `canJoinQueueIndices` / `normalizeInvalidJoins`; never re-enable mixed join “for convenience.”
 
 ---
 
 ## 9. Timeline zoom (detailed panel only)
 
-- `zoom = 1`: content width = scrollport clientWidth (fit); no H-scroll.
-- `zoom > 1`: content width = fit × factor; overflow-x on `#timeline-h-scroll` wrapping **ruler + tracks + marker overlay** so one `scrollLeft` keeps alignment.
-- Click-to-seek must use the **content** box (wide element rect), not the viewport-only width.
-- Debounce filmstrip/waveform regen on slider; live CSS width updates are fine every tick.
-- User zoom factor survives resize; force fit when `userOverride` is false (including Fit button / double-click slider).
+Does not affect the transport seek bar. Content width scales; scroll parent is `#timeline-h-scroll`.
 
 ---
 
 ## 10. Batch export IPC (`export_queue_job`)
 
-Jobs come from `buildBatchJobsFromQueue()` (walk same-class `joinedToNext` only).
-
-**Serde trap:** Rust `VideoSegment` has `loop_count` with `alias = "loopCount"`. Sending **both** keys in one JSON object →  
-`invalid args … duplicate field loop_count`.
-
-**Law:** flat segment objects, **one** key per field. Prefer `loop_count` only (or only `loopCount`, not both). Same for join_and_compress payloads. Optional `audio_only` / `audioOnly` for audio-safe encode.
-
 Export uses ffmpeg sidecar decode (works for HEVC/proxy sources). Never delete source media. Fail one job → continue batch.
 
-**Audio-only jobs:** no video stream — do not apply `-vf` / libx264. Rust path uses `-vn`, `afade` only, AAC, `.m4a` temps/output; multi-audio concat is `concat=n:v=0:a=1`. Video jobs stay on the existing trim → speed → fade → quality pipeline.
-
 **Errors:** toast `humanizeExportError` (short). Do not surface multi-kilobyte ffmpeg stderr as the only user feedback. Rust rejects mixed audio+video segment lists with a clear string.
-
-Batch export toggle is **checked by default** in the trim/export settings panel.
 
 ---
 
 ## 11. Closed captions hygiene
 
-- `clearSubtitleTracks` removes `<track>` / cues **without** necessarily clearing `video.src`.
-- Media replace / queue switch / delete must clear CC so captions from A do not show on B.
-- Button visuals: none / available-off / active-on via `setCcButtonState` (not ad-hoc yellow classes).
+Clear tracks on media change. Soft VTT next to batch outputs is best-effort.
 
 ---
 
 ## 12. Butterchurn / CSP
 
-Milkdrop presets compile via `new Function()` → CSP must include **`unsafe-eval`** or init throws `EvalError` forever.
-
-`createMediaElementSource(video)` **once** per element lifetime. Graph must reach `destination` or audio is silent.
-
-Canvas size from **wrapper clientWidth/Height × DPR**, not `video.videoWidth` (0 for audio). Hide/opacity-0 the `<video>` for audio-only so it doesn’t impose a wrong aspect box.
-
-Do not offer viz toggle on video media (users assume exportable “effect”).
+`script-src 'unsafe-eval'` required. Viz is audio-only. Missing `.map` produces console noise only.
 
 ---
 
@@ -178,9 +114,11 @@ In `setup`, use `tauri::async_runtime::spawn`, not a bare `tokio::spawn` that as
 
 - `externalBin: ["binaries/ffmpeg"]` → platform-triple-named binary under `src-tauri/binaries/`
 - Not in git (too large). Local/CI must supply before `tauri build`
+- Published under GH Release tag e.g. `ffmpeg-n9.0-lsvideo` (win / linux / mac); app CI downloads them
 - Full builds that link **libx264** are **GPL** — see root `LICENSE` §2 (bundled FFmpeg). App source stays MIT; do not call the whole installer MIT-only
-- Custom minimal ffmpeg is optional size work, not required for correctness
+- **macOS must be fully static** — no Homebrew `libx264.*.dylib`. Signed app + Homebrew dylib → dyld Team ID mismatch and proxy abort
 - Batch/join export and proxy share this sidecar
+- Verify a new Mac binary with `otool -L` (no `/opt/homebrew` / `/usr/local` deps) before shipping
 
 ---
 
@@ -200,7 +138,10 @@ Self-host Inter under `ui/fonts`. Broken `@font-face` URLs → OTS `invalid sfnt
 
 - Windows SmartScreen: unsigned NSIS warns; OV/EV cert is **per publisher/year**, not per app
 - R2 (Cloudflare) fine for large installers; GH Releases has size limits
-- macOS: separate Apple signing/notarization; Tauri ports but needs arm64 ffmpeg + Mac build
+- macOS: Apple Developer ID Application cert (not Installer) in `APPLE_CERTIFICATE`; notarization needs app-specific password (`APPLE_PASSWORD`), not the Apple ID login password
+- macOS also needs fully static arm64 ffmpeg (see §14) or proxy fails inside the signed `.app`
+- **Updater:** each release uploads Tauri `latest.json` + `.sig` when `TAURI_SIGNING_*` secrets and `createUpdaterArtifacts` are set. Public feed: `https://lean.studio/lsvideo/latest.json`. Do not re-tag published versions to “add” updater bits — ship the next semver
+- UX: `ui/js/updater.js` (Cancel | Now | When I close). Suite-wide contract lives in `SUITE_MAP.md` on `lean-studio-web`
 
 ---
 
@@ -259,11 +200,13 @@ Do not invent mixed audio+video playlists via the open dialog once a video is pr
 ## 21. Known product backlog (not blockers)
 
 - Butterchurn preset UX polish / optional viz on video (explicitly rejected for now)
-- Installer/R2 public pipeline
-- Mac target
+- CSP `style-src` console noise on some Mac builds (UI OK; still noisy)
+- Settings UI: “Check for updates on launch” + Help “Check now” (`checkForUpdatesNow` is ready)
+- Installer/R2 public pipeline (optional; GH Releases + lean.studio feed works)
 - Rename Rust tspz commands + drop legacy localStorage key after a grace release
 - Batch: optional richer VTT timing under speed warp (soft VTT sidecars exist; sequence shift is clip-duration based today)
 - Multi-clip join detailed timeline fully speed-warped end-to-end (solo path is warped; join sequence offsets still use raw clip spans)
+- **HEVC experiment:** macOS try-native-then-proxy (see §4) — measurement only until parity is proven
 
 ---
 
@@ -271,7 +214,7 @@ Do not invent mixed audio+video playlists via the open dialog once a video is pr
 
 **Symptom:** macOS WKWebView 404 / media fail when the UI hand-builds `https://asset.localhost/${encodeURIComponent(path)}`. Windows WebView2 wants `https://asset.localhost/…`; macOS wants `asset://…` with the **entire** path percent-encoded (`/` → `%2F`). Native `convertFileSrc` already does this.
 
-**Law:** `pathToAssetUrl` in `ui/app.js` is the only converter.
+**Law:** `pathToAssetUrl` in `ui/js/path-to-asset-url.js` (imported by `app.js`) is the only converter.
 
 1. Prefer `window.__TAURI__.core.convertFileSrc` (then `.tauri.convertFileSrc`).
 2. Rare fallback (matches `@tauri-apps/api`): Windows → `https://asset.localhost/${encodeURIComponent(path)}`; else → `asset://${encodeURIComponent(path)}`.
@@ -304,3 +247,6 @@ Tests: `tests/pathToAssetUrl.spec.js`.
 15. Don’t apply video fade filters (`-vf fade`) to audio-only exports  
 16. Don’t assign filesystem `src` via raw `convertFileSrc` / `encodeURIComponent` — use `pathToAssetUrl`  
 17. Don’t use a Windows-only `https://asset.localhost/…` fallback on macOS (`asset://` + full-path encode)  
+18. Don’t ship a macOS ffmpeg that links Homebrew dylibs (signed app proxy will abort)  
+19. Don’t remove HEVC→proxy without a measured try-native fallback  
+20. Don’t re-tag a published GitHub Release to inject updater artifacts — bump semver  
