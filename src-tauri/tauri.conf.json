@@ -23,25 +23,18 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' asset: asset.localhost http://asset.localhost https://asset.localhost data: blob:; media-src 'self' asset: asset.localhost http://asset.localhost https://asset.localhost blob:; connect-src 'self' ipc: ipc.localhost http://ipc.localhost https://ipc.localhost http://127.0.0.1:*",
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' asset: asset.localhost http://asset.localhost https://asset.localhost data: blob:; media-src 'self' asset: asset.localhost http://asset.localhost https://asset.localhost blob:; connect-src 'self' ipc: ipc.localhost http://ipc.localhost https://ipc.localhost http://127.0.0.1:* https://lean.studio https://lean.studio/* https://www.lean.studio https://www.lean.studio/* https://github.com https://github.com/* https://objects.githubusercontent.com https://objects.githubusercontent.com/*",
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "**"
-        ]
+        "scope": ["**"]
       }
     },
     "withGlobalTauri": true
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis",
-      "dmg",
-      "app",
-      "deb",
-      "appimage"
-    ],
+    "targets": ["nsis", "dmg", "app", "deb", "appimage"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -52,34 +45,26 @@
     "fileAssociations": [
       {
         "name": "LS.Video Project",
-        "ext": [
-          "lsv",
-          "lsvz",
-          "tmv",
-          "tmvz"
-        ],
+        "ext": ["lsv", "lsvz", "tmv", "tmvz"],
         "description": "LS.Video Project File",
         "role": "Editor"
       },
       {
         "name": "Media File",
-        "ext": [
-          "mp4",
-          "mkv",
-          "avi",
-          "mov",
-          "mpg",
-          "mpeg"
-        ],
+        "ext": ["mp4", "mkv", "avi", "mov", "mpg", "mpeg"],
         "description": "Media File",
         "role": "Viewer"
       }
     ],
-    "externalBin": [
-      "binaries/ffmpeg"
-    ],
+    "externalBin": ["binaries/ffmpeg"],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_OUTPUT_OF_tauri_signer_generate",
+      "endpoints": ["https://lean.studio/lsvideo/latest.json"]
     }
   }
 }
