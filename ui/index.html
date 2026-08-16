@@ -923,6 +923,13 @@
   <script src="tetris.js"></script>
   <script src="js/timeline-engine.js"></script>
   <script type="module" src="app.js"></script>
+  <!-- speedDF-style updater (desktop only; module no-ops without __TAURI__) -->
+  <script type="module">
+    import { initUpdater } from "./js/updater.js";
+    window.addEventListener("load", () => {
+      try { initUpdater(); } catch (e) { console.warn("[Updater] init failed:", e); }
+    });
+  </script>
 
 </body>
 
