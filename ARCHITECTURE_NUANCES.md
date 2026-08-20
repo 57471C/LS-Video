@@ -215,7 +215,7 @@ Do not reintroduce time-study **features**. Migrating away residual names is fin
 
 ## 19. Speed markers, export order, timeline warp
 
-**Marker model:** `type: "speed"`, `speedValue` clamped 0.25–4. Rate applies from that marker’s time until the next speed marker (or clip out). Gaps default to 1×. Shared builder: `buildSpeedRanges(markers, clipIn, clipOut)` → `[{ start, end, rate }, …]` covering the clip.
+**Marker model:** `type: "speed"`, `speedValue` clamped 0.25–8. Rate applies from that marker’s time until the next speed marker (or clip out). Gaps default to 1×. Shared builder: `buildSpeedRanges(markers, clipIn, clipOut)` → `[{ start, end, rate }, …]` covering the clip. Transport slider and keys 1–8 share that clamp (backtick = 0.5×, 1–8 = 1×–8×).
 
 **Live playback:** `applyActiveSpeedPlayback` sets `video.playbackRate` from the active range. Footer speed slider snaps to the active marker’s range and writes back `speedValue` while dragging. Exactly **1×** does not paint orange speed-zone tint (visual noise).
 
