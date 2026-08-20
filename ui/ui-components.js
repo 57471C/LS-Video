@@ -519,7 +519,7 @@ const updateMarkersListImmediate = () => {
                     </button>
                     <button class="w-full text-left px-3 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 flex items-center justify-between gap-2 cursor-pointer font-semibold marker-type-trigger" data-marker-index="${entry.markerIndex}" data-queue-index="${entry.queueIndex}" data-type="speed">
                       <span class="flex items-center gap-2">${ICONS.speedType} Speed</span>
-                      <span class="inline-flex items-center gap-0.5" title="Playback rate (0.25–4)">
+                      <span class="inline-flex items-center gap-0.5" title="Playback rate (0.25–8)">
                         <input type="text" inputmode="decimal"
                                class="w-10 text-center text-xs bg-zinc-100 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 rounded text-zinc-900 dark:text-zinc-100 speed-value-input"
                                value="${
@@ -534,7 +534,7 @@ const updateMarkersListImmediate = () => {
                                maxlength="5"
                                data-marker-index="${entry.markerIndex}"
                                data-queue-index="${entry.queueIndex}"
-                               title="Speed multiplier e.g. 0.5, 1, 1.5, 2">
+                               title="Speed multiplier e.g. 0.5, 1, 2, 8">
                         <span class="text-[10px] text-zinc-500 font-normal">x</span>
                       </span>
                     </button>
@@ -997,7 +997,10 @@ const updateMarkersListImmediate = () => {
 				const rate =
 					typeof window.clampSpeedValue === "function"
 						? window.clampSpeedValue(rawValue)
-						: Math.min(4, Math.max(0.25, Number(rawValue) || 1));
+						: Math.min(
+							window.SPEED_MAX ?? 8,
+							Math.max(window.SPEED_MIN ?? 0.25, Number(rawValue) || 1),
+						);
 				const list =
 					qIndex === activeQueueIndex
 						? markers

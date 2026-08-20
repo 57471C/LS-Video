@@ -545,6 +545,10 @@ fn is_audio_only_path(path: &str) -> bool {
     .any(|e| lower.ends_with(e))
 }
 
+/// Playback / export speed clamp. Matches JS SPEED_MIN / SPEED_MAX (0.25–8).
+const SPEED_RATE_MIN: f64 = 0.25;
+const SPEED_RATE_MAX: f64 = 8.0;
+
 /// atempo only accepts 0.5–2.0; chain for rates outside that band.
 fn build_atempo_filter(rate: f64) -> String {
     let mut r = rate.max(0.01);
@@ -574,7 +578,7 @@ fn normalize_speed_ranges(start: f64, end: f64, raw: &[SpeedRange]) -> Vec<Speed
         .iter()
         .map(|sr| {
             let a = sr.start.max(start).min(end);
-            (a, sr.rate.clamp(0.25, 4.0))
+            (a, sr.rate.clamp(SPEED_RATE_MIN, SPEED_RATE_MAX))
         })
         .filter(|(a, _)| *a < end - 1e-6)
         .collect();
@@ -1176,7 +1180,7 @@ async fn export_queue_job(
                     let mut af_parts: Vec<String> = Vec::new();
                     // Simple: if single non-1 rate, apply atempo; multi-rate audio is rare
                     if speed_ranges.len() == 1 {
-                        let rate = speed_ranges[0].rate.clamp(0.25, 4.0);
+                        let rate = speed_ranges[0].rate.clamp(SPEED_RATE_MIN, SPEED_RATE_MAX);
                         if (rate - 1.0).abs() > 0.01 {
                             af_parts.push(build_atempo_filter(rate));
                         }
@@ -1275,7 +1279,7 @@ async fn export_queue_job(
                         ));
                         let piece_str = piece.to_string_lossy().to_string();
                         let span = (sr.end - sr.start).max(0.01);
-                        let rate = sr.rate.clamp(0.25, 4.0);
+                        let rate = sr.rate.clamp(SPEED_RATE_MIN, SPEED_RATE_MAX);
                         let out_dur = speed_output_duration(span, rate);
                         println!(
                             "[export_queue_job] seg{} run{} trim [{:.3},{:.3}) span={:.3} rate={:.3} -> out_dur={:.3}",

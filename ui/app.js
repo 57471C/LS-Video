@@ -518,13 +518,13 @@ window.FADE_DEFAULT_SEC = FADE_DEFAULT_SEC;
 // ---------------------------------------------------------------------------
 // Speed markers — type "speed" + speedValue (playbackRate / export setpts)
 // ---------------------------------------------------------------------------
-/** Marker speed clamp (atempo-friendly). Matches common rates 0.25–4. */
+/** Marker speed clamp (atempo-friendly). Matches common rates 0.25–8. */
 export const SPEED_MIN = 0.25;
-export const SPEED_MAX = 4;
+export const SPEED_MAX = 8;
 export const SPEED_DEFAULT = 1.0;
 
 /**
- * Clamp marker speed to [0.25, 4], round to 2 decimals.
+ * Clamp marker speed to [0.25, 8], round to 2 decimals.
  * @param {unknown} value
  * @returns {number}
  */
@@ -839,7 +839,7 @@ window.applyActiveSpeedPlayback = (opts = {}) => {
 		videoEl.playbackRate = rate;
 	}
 	// Snap transport slider to active rate (display only unless user drags)
-	if (!opts.skipSlider) {
+	if (!opts.skipSlider && !window._speedSliderActive) {
 		const slider =
 			typeof speedSlider !== "undefined" && speedSlider
 				? speedSlider
@@ -5581,48 +5581,63 @@ const initializePlayer = () => {
 		 *   and global playbackSpeed (used when no Speed markers exist).
 		 * - Active Speed marker → slider shows/snaps to that marker's speedValue;
 		 *   dragging UPDATES the active marker's speedValue so export matches audio.
+		 *
+		 * Apply the rate immediately on input. Debouncing the read of
+		 * event.target.value races timeupdate → applyActiveSpeedPlayback, which
+		 * snaps the thumb back before the delayed handler runs — click-to-set
+		 * then looks like it does nothing and only a drag "sticks".
 		 */
-		speedSlider.addEventListener(
-			"input",
-			debounce((event) => {
-				const speed = clampSpeedValue(event.target.value);
-				if (!Number.isFinite(speed)) return;
-				const activeIdx = window._activeSpeedMarkerIndex;
-				if (
-					typeof activeIdx === "number" &&
-					activeIdx >= 0 &&
-					markers?.[activeIdx]?.type === "speed"
-				) {
-					markers[activeIdx].speedValue = speed;
-					markers[activeIdx].type = "speed";
-					if (player) player.playbackRate = speed;
-					if (DOM.speedValue)
-						DOM.speedValue.textContent = `${speed.toFixed(speed % 1 === 0 ? 1 : 2)}x`;
-					saveLocalState();
-					if (typeof window.updateMarkersList === "function") {
-						window.updateMarkersList();
-					}
-					if (typeof window.scheduleSpeedTimelineRebuild === "function") {
-						window.scheduleSpeedTimelineRebuild();
-					}
-					toConsole(
-						"Speed slider → active Speed marker",
-						{
-							index: activeIdx,
-							speed,
-						},
-						debuggin,
-					);
-				} else {
-					if (player) player.playbackRate = speed;
-					playbackSpeed = speed;
-					if (DOM.speedValue)
-						DOM.speedValue.textContent = `${speed.toFixed(1)}x`;
-					toConsole("Speed slider input event fired", speed, debuggin);
-					saveLocalState();
-				}
-			}, 100),
-		);
+		speedSlider.max = String(SPEED_MAX);
+		const persistSpeedSlider = debounce((updatingMarker) => {
+			saveLocalState();
+			if (!updatingMarker) return;
+			if (typeof window.updateMarkersList === "function") {
+				window.updateMarkersList();
+			}
+			if (typeof window.scheduleSpeedTimelineRebuild === "function") {
+				window.scheduleSpeedTimelineRebuild();
+			}
+		}, 100);
+		const endSpeedSliderGesture = () => {
+			window._speedSliderActive = false;
+		};
+		speedSlider.addEventListener("pointerdown", () => {
+			window._speedSliderActive = true;
+		});
+		window.addEventListener("pointerup", endSpeedSliderGesture);
+		window.addEventListener("pointercancel", endSpeedSliderGesture);
+		speedSlider.addEventListener("input", (event) => {
+			const speed = clampSpeedValue(event.target.value);
+			if (!Number.isFinite(speed)) return;
+			const activeIdx = window._activeSpeedMarkerIndex;
+			const updatingMarker =
+				typeof activeIdx === "number" &&
+				activeIdx >= 0 &&
+				markers?.[activeIdx]?.type === "speed";
+			if (updatingMarker) {
+				markers[activeIdx].speedValue = speed;
+				markers[activeIdx].type = "speed";
+				if (player) player.playbackRate = speed;
+				if (DOM.speedValue)
+					DOM.speedValue.textContent = `${speed.toFixed(speed % 1 === 0 ? 1 : 2)}x`;
+				toConsole(
+					"Speed slider → active Speed marker",
+					{
+						index: activeIdx,
+						speed,
+					},
+					debuggin,
+				);
+			} else {
+				if (player) player.playbackRate = speed;
+				playbackSpeed = speed;
+				if (DOM.speedValue)
+					DOM.speedValue.textContent = `${speed.toFixed(speed % 1 === 0 ? 1 : 2)}x`;
+				toConsole("Speed slider input event fired", speed, debuggin);
+			}
+			event.target.value = String(speed);
+			persistSpeedSlider(updatingMarker);
+		});
 
 		speedSlider.value = playbackSpeed;
 		DOM.speedValue.textContent = `${playbackSpeed.toFixed(1)}x`;
@@ -5977,11 +5992,21 @@ const initializePlayer = () => {
 					saveLocalState();
 				}
 				player.playbackRate = newSpeed;
-				if (speedSlider) speedSlider.value = newSpeed;
+				if (speedSlider) speedSlider.value = String(newSpeed);
 				if (DOM.speedValue)
-					DOM.speedValue.textContent = `${newSpeed.toFixed(1)}x`;
+					DOM.speedValue.textContent = `${newSpeed.toFixed(newSpeed % 1 === 0 ? 1 : 2)}x`;
+				if (
+					typeof activeIdx === "number" &&
+					activeIdx >= 0 &&
+					markers?.[activeIdx]?.type === "speed" &&
+					typeof window.scheduleSpeedTimelineRebuild === "function"
+				) {
+					window.scheduleSpeedTimelineRebuild();
+				}
 				toConsole("Playback speed shortcut", newSpeed, debuggin);
-				window.triggerPlaybackOverlay(`Speed: ${newSpeed.toFixed(1)}x`);
+				window.triggerPlaybackOverlay(
+					`Speed: ${newSpeed.toFixed(newSpeed % 1 === 0 ? 1 : 2)}x`,
+				);
 				break;
 			}
 		}

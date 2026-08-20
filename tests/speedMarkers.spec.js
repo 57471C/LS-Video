@@ -14,8 +14,10 @@ import {
 } from "../ui/app.js";
 
 describe("Speed marker helpers", () => {
-	it("clamps speed to 0.25–4", () => {
+	it("clamps speed to 0.25–8", () => {
+		expect(SPEED_MAX).toBe(8);
 		expect(clampSpeedValue(0.1)).toBe(SPEED_MIN);
+		expect(clampSpeedValue(8)).toBe(8);
 		expect(clampSpeedValue(10)).toBe(SPEED_MAX);
 		expect(clampSpeedValue(1.5)).toBe(1.5);
 		expect(clampSpeedValue("2")).toBe(2);

@@ -52,7 +52,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 - Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt`, `humanizeExportError`, `jobHasMixedMedia` (soft `.vtt` next to each job output; failure never fails the video job)
 - Dialogs: `asyncConfirm` / `asyncPrompt` (`ui-modals.js`) — opts `confirmLabel`, `cancelLabel`, `danger`, `focusCancel`; Esc cancels
 - Clip-edge fades: `setVideoFadeSec`, `getVideoFadeSeconds`, `clampFadeSec`, `formatFadeBadge`, `computeClipEdgeFadeGain`, `fadeOutEarlyBlackSec`, `applyClipEdgeFadePreview`, `paintClipFadeZonesOnHost` / `refreshClipFadeTimelineZones`. `FADE_DEFAULT_SEC = 0`, hard max 10s (also half clip). UX is **marker type menu** (Set Clip In / Out + `#.#s` like Loop); badge on in/out **row**. Live preview ramps opacity/volume and reaches solid black slightly **before** clipOut (export parity). Detailed timeline shows purple fade zones.
-- Speed markers: type `speed` + `speedValue` (0.25–4). Badge `1.5x` (no orange tint at exactly 1×). Helpers: `getActiveSpeedMarker`, `buildSpeedRanges`, `applyActiveSpeedPlayback`, `sourceTimeToEffective`, `effectiveTimeToSource`, `scheduleSpeedTimelineRebuild`, `layoutSpeedWarpedFilmstrip` / `layoutSpeedWarpedWaveform`. Live `playbackRate`; slider snaps to active range and drag updates that marker’s rate. Detailed timeline is **output-time** warped (∫ dt/rate) over **full media length** (clipIn/Out do not shrink the ruler). Export: `speed_ranges` on `VideoSegment` → setpts + chained atempo, then edge fades on output time.
+- Speed markers: type `speed` + `speedValue` (0.25–8). Badge `1.5x` (no orange tint at exactly 1×). Keys 1–8 set 1×–8× (backtick = 0.5×). Helpers: `getActiveSpeedMarker`, `buildSpeedRanges`, `applyActiveSpeedPlayback`, `sourceTimeToEffective`, `effectiveTimeToSource`, `scheduleSpeedTimelineRebuild`, `layoutSpeedWarpedFilmstrip` / `layoutSpeedWarpedWaveform`. Live `playbackRate`; slider snaps to active range and drag updates that marker’s rate. Detailed timeline is **output-time** warped (∫ dt/rate) over **full media length** (clipIn/Out do not shrink the ruler). Export: `speed_ranges` on `VideoSegment` → setpts + chained atempo, then edge fades on output time.
 
 If something “does nothing” in the markers table, check window exports first.
 
@@ -155,9 +155,11 @@ See ARCHITECTURE_NUANCES §20. Empty queue → audio+video filters; after audio-
 
 ## Markers & closed captions
 
-Markers live on `videoQueue[active].appState.markers` and the active `markers` array. Handlers must be on `window`.
-
-Generate CC from markers → WebVTT cues. Soft batch export can write a `.vtt` beside each job. Clear tracks on media change.
+- Types include standard, jump, loop, in, out, **speed**.
+- **Speed** (`type: "speed"`, `speedValue` 0.25–8): holds rate from that marker’s time until the next speed marker (or clip out). Non-1× zones get orange timeline tint; **1× does not**. Badge on the speed marker row (`1.5x`).
+- Clip-edge fade is **not** a marker type — it is set on **in/out** rows via the type menu (same pattern as Loop count).
+- **Generate CC** (table footer): plain WebVTT from markers (solo = active source; multi = sequence-ordered run); save beside video + load track.
+- CC transport button states (`setCcButtonState`): **none** (dark/disabled), **available** (white/idle), **active** (green glow).
 
 ---
 

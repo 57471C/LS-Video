@@ -66,10 +66,18 @@
 		@apply w-full h-1.5 bg-zinc-200 dark:bg-zinc-700/80 rounded-full appearance-none cursor-pointer outline-none shadow-inner;
 	}
 	.form-range::-webkit-slider-thumb {
-		@apply appearance-none w-1.5 h-4 rounded-full bg-blue-500 hover:bg-blue-400 hover:scale-110 active:scale-95 transition-all duration-200 shadow-md border-0;
+		@apply appearance-none w-1.5 h-4 rounded-full bg-blue-500 hover:bg-blue-400 hover:scale-110 active:scale-95 shadow-md border-0;
+		transition:
+			background-color 0.2s,
+			box-shadow 0.2s,
+			transform 0.2s;
 	}
 	.form-range::-moz-range-thumb {
-		@apply appearance-none w-1.5 h-4 rounded-full bg-blue-500 hover:bg-blue-400 hover:scale-110 active:scale-95 transition-all duration-200 shadow-md border-0;
+		@apply appearance-none w-1.5 h-4 rounded-full bg-blue-500 hover:bg-blue-400 hover:scale-110 active:scale-95 shadow-md border-0;
+		transition:
+			background-color 0.2s,
+			box-shadow 0.2s,
+			transform 0.2s;
 	}
 
 	.slider-ticks {
