@@ -5,7 +5,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 **Product:** LS.Video (Lean Studio)  
 **Repo:** https://github.com/57471C/LS-Video (legacy clone paths may still say TMVideo)  
 **Stack:** Tauri 2 + Rust backend + vanilla JS frontend (no React)  
-**Current version:** 0.6.2
+**Current version:** 0.6.6
 
 ---
 
@@ -20,12 +20,14 @@ Living map for agents and humans. Read this before large refactors. Update when 
 | `ui/js/timeline-engine.js` | Playhead, ruler, waveform, marker shading, **timeline zoom** |
 | `ui/js/viewport-engine.js` | Zoom / pan viewport |
 | `ui/js/visualizer-engine.js` | Butterchurn / Web Audio viz |
+| `ui/js/path-to-asset-url.js` | Filesystem path → WebView `asset:` URL (macOS/Linux/Windows rules) |
+| `ui/js/updater.js` | Auto-update toast (Cancel / Now / When I close); boots from `index.html` |
 | `ui/vendor/butterchurn*.js` | Vendored UMD Butterchurn + presets |
 | `ui/index.html` | Shell, CSP meta, script order, detailed timeline chrome |
 | `ui/styles.css` | View-mode, sequence rows, CC button states, timeline zoom scroll |
 | `src-tauri/src/lib.rs` | Proxy, thumbs, project zip, ffmpeg export/join, VTT, proxy cleanup |
-| `src-tauri/tauri.conf.json` | productName, identifier, associations, externalBin |
-| `src-tauri/capabilities/default.json` | Permissions (fs, shell spawn/open) |
+| `src-tauri/tauri.conf.json` | productName, identifier, associations, externalBin, updater pubkey/endpoints |
+| `src-tauri/capabilities/default.json` | Permissions (fs, shell spawn/open, updater) |
 | `src-tauri/binaries/` | ffmpeg sidecar (gitignored; required for build) |
 | `LICENSE` | MIT for app source; §2 GPL notice for bundled FFmpeg/x264 sidecar |
 
@@ -37,6 +39,8 @@ Living map for agents and humans. Read this before large refactors. Update when 
 
 - `window.player`, `window.playerReady`
 - `window.loadVideo`, `window.cycleViewMode`
+- Path / asset URL: `normalizePath`, `pathToAssetUrl` (module `ui/js/path-to-asset-url.js`; filesystem → WebView `asset:` URL)
+- Updater: `window.initUpdater`, `window.checkForUpdatesNow` (`ui/js/updater.js`)
 - Marker handlers: `jumpToMarkerTime`, `playFromMarkerTime`, `deleteMarker`, `updateMarkerName`, …
 - `window.updateMarkersList`, `window.updateVideoTimeSummary`
 - Join / sequence: `getActiveJoinRun`, `isActiveRunMulti`, `seekSequenceTime`, `sourceTimeToSequence`, `scheduleJoinTimelineRebuild`, `syncClipBoundsFromMarkers`, `canJoinQueueIndices`, `normalizeInvalidJoins`, `toggleJoinedToNext`
@@ -65,14 +69,16 @@ If something “does nothing” in the markers table, check window exports first
 - Startup rehydrate (Normal mode only)
 - OS launch args
 
-**Never** assign `video.src` from random call sites. Do **not** reintroduce Failsafe Proxy (prototype interception on `HTMLMediaElement`).
+**Never** assign `video.src` from random call sites. Do **not** reintroduce Failsafe Proxy (prototype interception on `HTMLMediaElement`). Filesystem paths → `src` go through `pathToAssetUrl` (never raw `convertFileSrc` / `encodeURIComponent` at the call site).
 
 Flow:
 
 1. Normalize path (UNC-safe — see ARCHITECTURE_NUANCES)
 2. `invoke("verify_and_prepare_video")` → original or proxy path
-3. `convertFileSrc` → `video.src`
+3. `pathToAssetUrl` (prefers Tauri `convertFileSrc`; platform fallback) → `video.src`
 4. Subtitles / markers / timeline boot as needed
+
+Same helper for other disk-backed asset URLs: caption `track.src`, filmstrip `img.src`, export fallback `player.src`. Leave blob / HTTP / empty-src assignments alone.
 
 Flags: `window._videoLoadInProgress` suppresses empty-src MediaError toasts during transitions.
 
@@ -80,10 +86,10 @@ Flags: `window._videoLoadInProgress` suppresses empty-src MediaError toasts duri
 
 ## View modes
 
-| Mode | Body class | Boot / behavior |
-|------|------------|-----------------|
-| **Normal** | `normal-mode` | Cold start (Start Menu / desktop). Editor, sidebars, markers, filmstrip. localStorage video rehydrate **only** here. |
-| **Cinema** | `cinema-mode` | Fullscreen review. **Esc → Miniplayer** (not Normal). |
+| Mode | Body class cues | Notes |
+|------|-----------------|-------|
+| **Normal** | default | Cold start; full editor; localStorage rehydrate |
+| **Cinema** | `cinema-active` | Immersive; **Esc → Miniplayer** (not Normal) |
 | **Miniplayer** | `miniplayer-mode` | Compact, always-on-top. OS **raw media** launch lands here. |
 
 `cycleViewMode(target)` — use explicit target strings; respect `_viewModeTransitioning` lock.
@@ -97,7 +103,7 @@ Theme: respect `localStorage` darkMode / `html.dark` in **all** modes. Cinema/mi
 | Input | Action |
 |-------|--------|
 | Audio-only (`mp3`, `wav`, `flac`, `aac`, `m4a`, `ogg`, …) | Return path as-is — **no** proxy |
-| HEVC / h265 / hev1 / hvc1 | Proxy → H.264 MP4 cache |
+| HEVC / h265 / hev1 / hvc1 | Proxy → H.264 MP4 cache (**default**; see experiment note) |
 | Unsafe containers (`avi`, `mkv`, `wmv`, `flv`) | Proxy |
 | No web-safe video line (no h264/avc1/vp8/vp9/av1) e.g. mpeg4 | Proxy |
 | Web-safe H.264 MP4 etc. | Return original |
@@ -105,6 +111,14 @@ Theme: respect `localStorage` darkMode / `html.dark` in **all** modes. Cinema/mi
 Cache under app local data (`com.leanstudio.lsvideo`). Overlay: heavy “Optimizing…” only when transcode needed.
 
 Queue items may store `proxyPath` when playback uses a cache file. On remove/replace: `delete_proxy_for_video` + clear Proxy Info UI. Do not leave stale CC tracks across media change (`clearSubtitleTracks`).
+
+### H.265 / HEVC (current law + experiment)
+
+**Supported path today:** always proxy HEVC → H.264 MP4 via the static ffmpeg sidecar. WebView2 (Windows) and WKWebView (macOS) are treated as unreliable for in-app HEVC without platform codecs / entitlement variance. Do **not** remove the proxy path.
+
+**Experiment (optional, branch-only):** try native `<video>` playback for `hev1`/`hvc1` on **macOS only**, fall back to proxy on `error` / non-zero `MediaError`. Windows stays proxy-first unless HEVC Video Extensions are proven in WebView2. Goals: skip “Optimizing…” when the OS can decode; measure seek/scrub parity vs proxy. Document results in ARCHITECTURE_NUANCES before merging any try-native change.
+
+Proxy ffmpeg must be **fully static on macOS** (no Homebrew libx264 dylib) or signed apps die on dyld Team ID mismatch.
 
 ---
 
@@ -135,13 +149,7 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 
 ### File pickers (queue media kind)
 
-| Queue state | Open / “+” dialog filters |
-|-------------|---------------------------|
-| Empty (no paths) | Media = video + audio common types |
-| All loaded items audio | Audio only |
-| Any video present | Video only (no mixed playlist via picker) |
-
-Helpers: `getQueueMediaKind()`, `getOpenMediaDialogFilters()`. Title-bar **+** stays muted until first media is loaded (`hasProjectMediaLoaded`).
+See ARCHITECTURE_NUANCES §20. Empty queue → audio+video filters; after audio-only → audio only; any video present → video only.
 
 ---
 
@@ -157,55 +165,36 @@ Helpers: `getQueueMediaKind()`, `getOpenMediaDialogFilters()`. Title-bar **+** s
 
 ## Timeline / filmstrip / zoom
 
-- Custom canvas waveform + filmstrip (Peaks.js / Whisper **removed** — do not re-add).
-- Stale-job guard: `window._timelineGenId` + request path check on async completion.
-- Per-video thumbnail cache dir in Rust.
-- **Skip** filmstrip/thumb generation for audio-only files.
-- **Detailed timeline zoom** (`#timelineZoomSlider`): factor `1` = fit width; `>1` = `fitWidth * zoom` + horizontal scroll on `#timeline-h-scroll` (ruler + tracks share scrollLeft). Debounce filmstrip regen on slider change.
-- **Speed-warped timeline (solo detailed):** ruler, playhead, scrub, filmstrip cells, and waveform use **output time** (`∫ dt / rate` over **full media** 0..mediaDuration — not the clipIn..clipOut window). Source→effective / effective→source via `sourceTimeToEffective` / `effectiveTimeToSource` + `buildSpeedRanges`. Filmstrip/waveform cells sized by `outSpan = sourceSpan / rate`. Call `scheduleSpeedTimelineRebuild` after speed/marker/clip edits. Join multi-clip sequence offsets still use per-segment clip spans; speed warp applies inside each solo layout path when ranges exist.
-- **Marker drag (detailed overlay):** horizontal drag on stem/flag handles; live table + paint; persist on mouseup (`updateMarkersListImmediate`). End/out handles stay grabable at the right edge (not clipped at 100%).
-- Purple **clip-edge fade zones** on the detailed host: fade-in over `[clipIn, clipIn+fi)`; fade-out ramps to solid black slightly **before** clipOut (`fadeOutEarlyBlackSec`, export parity).
+Custom canvas filmstrip + waveform (Peaks.js removed). Skip filmstrip generation for audio-only. Generation tokens avoid stale thumbs after rapid queue switches.
+
+Timeline zoom is **detailed panel only** — not the transport seek bar.
 
 ---
 
 ## Batch export (queue)
 
-Entry: settings panel → Batch export queue (**checked by default**) + optional Strip audio.
-
-| Job type | Output |
-|----------|--------|
-| Contiguous same-class `joinedToNext` run | One concat (video → `.mp4`; **audio-only → `.m4a`**) + optional soft `.vtt` for video jobs |
-| Unjoined item | Solo trim/export + optional soft `.vtt` |
-
-- Folder pick once; names like `sequence_001_…mp4` / `basename_export.mp4` (or `.m4a` for audio).
-- **Mixed audio+video joins never export:** cleared by `normalizeInvalidJoins` / `canJoinQueueIndices`; `export_queue_job` rejects mixed segment lists; UI toasts short human text via `humanizeExportError` (never dump full ffmpeg logs as the only feedback).
-- Soft captions sidecar (no burn-in): same basename as the video, `.vtt`, same folder.
-  - **Solo:** markers (or existing source VTT) with times relative to export trim (`clipIn → 0`).
-  - **Join:** all markers in the run, sequence-shifted by sum of prior segment durations; cue text = marker name; end = next cue / +3s / clip end (same policy as Generate CC).
-  - Skip when no markers and no source VTT; **VTT write failure never fails the video job** (toast warning OK).
-- Clip-edge fades (soft export filters only):
-  - Per queue item: `fadeInSec` / `fadeOutSec` (default **0**).
-  - UX (same family as Loop): marker row type menu → **Set Clip In** / **Set Clip Out** with `#.#s` duration input (UI placeholder may show `1.0`; stored default is `0`; `0` clears). Cyan badge on the in/out **marker row** when fade > 0. **No** footer Fade button; **no** playlist fade UI.
-  - Live preview: opacity + volume ramp via `computeClipEdgeFadeGain` / `applyClipEdgeFadePreview`; fade-out hits solid black slightly before clipOut.
-  - Export: ffmpeg `fade` / `afade` on **output** segment time after speed; join keeps per-segment fades; `0` → no filter. Forces reencode when fade > 0. **Audio-only:** video fade filters skipped (`-vn`); `afade` only.
-- Speed markers (export):
-  - Frontend builds `speed_ranges: [{ start, end, rate }, …]` covering `[clipIn, clipOut]` via `buildSpeedRanges` (gaps default rate 1).
-  - Per range: `setpts=(PTS-STARTPTS)/rate` + chained `atempo` (ffmpeg 0.5–2 per stage); `-t` caps piece length at `span/rate`.
-  - Pieces concat’d then fade applied on that output timeline. 1×-only ranges can skip speed filter when whole segment is flat 1×.
-- Rust: `export_queue_job` pipeline order: **trim → speed pieces → concat pieces → edge fade → quality**. Audio-only segments: no libx264 / no `-vf`; AAC/`-vn`. Also `save_vtt_file` for sidecar write.
-- **IPC `VideoSegment`:** send **one** of `loop_count` / `loopCount`, never both (serde duplicate field). Fade: `fade_in_sec` / `fade_out_sec` (aliases `fadeInSec` / `fadeOutSec`). Speed: `speed_ranges` array of `{ start, end, rate }` (snake_case preferred). Optional `audio_only` / `audioOnly` flag.
-- Also: `join_and_compress_videos` (legacy single-shot join UI path).
-- Out of scope for batch captions: burn-in, ASS/SSA styling, titles.
+`buildBatchJobsFromQueue` → IPC `export_queue_job` per job. Join runs export as one file when joined; others separate. Strip-audio option. Soft VTT sidecars never fail the video job. `humanizeExportError` for toasts — not raw multi-kB ffmpeg stderr.
 
 ---
 
 ## Butterchurn (audio viz)
 
-- Vendor scripts in `ui/vendor/`; CSP needs `script-src 'self' 'unsafe-eval'` (preset `new Function`).
-- `MediaElementSource` **once** per `<video>` lifetime; connect so audio still reaches speakers.
-- Size canvas from **container**, not `videoWidth` (audio has no intrinsic size).
-- Viz toggle: **audio-only only**. Video load → stop viz, hide/disable button, restore video opacity.
-- Hide trim/compress camera control in miniplayer + cinema.
+Audio-only only. CSP needs `script-src 'unsafe-eval'` for Butterchurn. Source map 404/parse noise is cosmetic (strip or ignore).
+
+---
+
+## Auto-update
+
+- Feed: `https://lean.studio/lsvideo/latest.json` (site proxies GitHub Release asset `latest.json`)
+- Config: `plugins.updater` pubkey + endpoints in `tauri.conf.json`; `createUpdaterArtifacts: true`
+- Plugins: `tauri-plugin-updater` + `tauri-plugin-process` (registered in `lib.rs`)
+- Secrets: `TAURI_SIGNING_PRIVATE_KEY` (+ password if set); never commit `*.key`
+- UX (`ui/js/updater.js`, speedDF model): silent `check()` ~2.5s after load → toast **Cancel** | **Now** | **When I close**
+  - Now → `downloadAndInstall` + `relaunch`
+  - When I close → background `download`, `install` on `onCloseRequested`
+  - Optional skip: `localStorage.lsvideo_check_updates_on_launch = "0"`
+  - Manual: `window.checkForUpdatesNow()`
+- Suite contract: `SUITE_MAP.md` on `lean-studio-web` (repo root, **not** a public route)
 
 ---
 
@@ -229,6 +218,7 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 
 - Peaks.js, Whisper, Failsafe Proxy
 - VLC / libmpv experimental branches (orphaned; proxy is the supported H.265 path)
+- Re-tagging a published release (e.g. rewrite `v0.6.5`) — ship the next version instead
 - Shipping without ffmpeg sidecar in the NSIS bundle
 - Batch export: titles, burn-in captions, dip-to-black as a separate fade **mode**, fancy re-encode UI beyond quality presets
 - Mixed audio+video playlists via the file picker once a video is present (policy: video filter only)
@@ -240,3 +230,4 @@ Entry: settings panel → Batch export queue (**checked by default**) + optional
 
 - `ARCHITECTURE_NUANCES.md` — footguns and “why it is this way”
 - `README.md` — user-facing overview
+- `SUITE_MAP.md` — Lean.Studio product family + cross-app updater contract (`lean-studio-web` repo root)

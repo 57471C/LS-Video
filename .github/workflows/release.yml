@@ -22,10 +22,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             ffmpeg_asset: ffmpeg-x86_64-unknown-linux-gnu
 
-          # v0.6.3+: macOS + signing + autoupdate
-          # - platform: macos-latest
-          #   target: aarch64-apple-darwin
-          #   ffmpeg_asset: ffmpeg-aarch64-apple-darwin
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            ffmpeg_asset: ffmpeg-aarch64-apple-darwin
 
     runs-on: ${{ matrix.platform }}
 
@@ -70,21 +69,47 @@ jobs:
           chmod +x "src-tauri/binaries/${{ matrix.ffmpeg_asset }}" || true
           ls -la src-tauri/binaries/
 
-      # v0.6.3+: Import Apple certificate (requires secrets on this repo)
-      # - name: Import Apple certificate
-      #   if: matrix.platform == 'macos-latest'
-      #   ...
+      - name: Import Apple Developer certificate
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "APPLE_CERTIFICATE secret not set — building unsigned (ad-hoc)."
+            exit 0
+          fi
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-build-keychain-temp}"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+          rm -f certificate.p12
 
       - name: Build & Release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # v0.6.3+: TAURI_SIGNING_* and APPLE_* for updater + Mac
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS codesign + notarization (no-op on Win/Linux)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'LS.Video ${{ github.ref_name }}'
-          releaseBody: 'Windows + Linux installers. macOS and autoupdate planned for 0.6.3. FFmpeg from ffmpeg-n9.0-lsvideo.'
+          releaseBody: 'Windows + Linux + macOS (Apple Silicon) installers. FFmpeg from ffmpeg-n9.0-lsvideo. Includes updater artifacts + latest.json when TAURI_SIGNING_* secrets are set.'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
+          includeUpdaterJson: true
           retryAttempts: 3

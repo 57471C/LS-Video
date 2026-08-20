@@ -28,6 +28,7 @@ import {
 	startVisualizer,
 	stopVisualizer,
 } from "./js/visualizer-engine.js";
+import { pathToAssetUrl } from "./js/path-to-asset-url.js";
 
 /** Audio container extensions (no video stream expected). */
 const AUDIO_MEDIA_EXTENSIONS = [
@@ -2312,7 +2313,7 @@ window.clearAllPreviousProjectData = () => {
 
 /**
  * Canonical video load path for filesystem sources.
- * Always runs verify_and_prepare_video (H.265 proxy) before convertFileSrc.
+ * Always runs verify_and_prepare_video (H.265 proxy) before pathToAssetUrl.
  * Callers should set videoFileName/videoFilePath (source path) first when known;
  * this function backfills them when missing (e.g. drag-drop / launch args).
  *
@@ -2373,8 +2374,12 @@ export function normalizePath(rawPath) {
 	return normalized;
 }
 
+// pathToAssetUrl lives in ./js/path-to-asset-url.js (hardened %2F encoding).
+export { pathToAssetUrl };
+
 if (typeof window !== "undefined") {
 	window.normalizePath = normalizePath;
+	window.pathToAssetUrl = pathToAssetUrl;
 }
 
 /**
@@ -2567,21 +2572,13 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 
 		// 4. Transform native drive references into authenticated network stream URLs
 		// Playback uses the proxy path when HEVC/AVI; project globals keep the source path.
-		let validatedStreamUrl = resolvedFilePath;
-		if (window.__TAURI__) {
-			const convertFn =
-				window.__TAURI__.core?.convertFileSrc ||
-				window.__TAURI__.tauri?.convertFileSrc;
-			if (convertFn) {
-				validatedStreamUrl = convertFn(resolvedFilePath);
-			} else {
-				validatedStreamUrl = `https://asset.localhost/${encodeURIComponent(resolvedFilePath)}`;
-			}
-		}
+		// Prefer native convertFileSrc (correct %2F encoding on all platforms).
+		const validatedStreamUrl = pathToAssetUrl(resolvedFilePath);
 
 		console.warn(
-			`%c[Loader Core] Pushing URL to hardware video track src: "${validatedStreamUrl}"`,
+			"%c[Loader Core] Pushing URL to hardware video track src:",
 			"color: #00ffcc; font-weight: bold;",
+			validatedStreamUrl,
 		);
 
 		// Sync globals: keep original source path for project save / subtitles / re-verify
@@ -3182,7 +3179,7 @@ window.loadSubtitleTrack = async (filePath) => {
 		ccTrack.srclang = "en";
 		ccTrack.label = "English";
 		ccTrack.default = true;
-		ccTrack.src = window.__TAURI__.core.convertFileSrc(vttPath);
+		ccTrack.src = pathToAssetUrl(vttPath);
 		videoEl.appendChild(ccTrack);
 
 		// Show immediately after successful resolve so state is available+active
@@ -3231,12 +3228,7 @@ window.attachSubtitleTrackFromPath = (vttFilePath) => {
 		return;
 	}
 
-	const convertFn =
-		window.__TAURI__?.core?.convertFileSrc ||
-		window.__TAURI__?.tauri?.convertFileSrc;
-	const src = convertFn
-		? convertFn(vttFilePath)
-		: `https://asset.localhost/${encodeURIComponent(vttFilePath)}`;
+	const src = pathToAssetUrl(vttFilePath);
 
 	const track = document.createElement("track");
 	track.id = "ccTrack";
@@ -3379,7 +3371,7 @@ const fillFilmstripTrack = (trackOrFill, thumbnailPaths) => {
 	const tileWidthPct = 100 / n;
 	for (const pathString of thumbnailPaths) {
 		const imgElement = document.createElement("img");
-		imgElement.src = window.__TAURI__.core.convertFileSrc(pathString);
+		imgElement.src = pathToAssetUrl(pathString);
 		imgElement.className =
 			"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
 		imgElement.style.flex = "1 1 0";
@@ -3455,7 +3447,7 @@ window.layoutSpeedWarpedFilmstrip = (
 		const slice = thumbnailPaths.slice(i0, Math.max(i0 + 1, i1));
 		for (const pathString of slice) {
 			const img = document.createElement("img");
-			img.src = window.__TAURI__.core.convertFileSrc(pathString);
+			img.src = pathToAssetUrl(pathString);
 			img.className =
 				"h-full object-cover border-r border-zinc-200 dark:border-zinc-700 pointer-events-none";
 			img.style.flex = "1 1 0";
@@ -8121,9 +8113,7 @@ async function executeExport(presetType) {
 		if (typeof window.loadVideo === "function") {
 			await window.loadVideo(videoFilePath);
 		} else {
-			const tauriAssetUrl =
-				window.__TAURI__?.core?.convertFileSrc?.(videoFilePath);
-			player.src = tauriAssetUrl;
+			player.src = pathToAssetUrl(videoFilePath);
 			player.preload = "auto";
 			player.load();
 			toggleVideoPlaceholder(false);

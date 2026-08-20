@@ -1,9 +1,7 @@
 {
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": [
-    "main"
-  ],
+  "windows": ["main"],
   "permissions": [
     "core:default",
     "dialog:default",
@@ -79,6 +77,8 @@
         { "url": "https://buymeacoffee.com/*" },
         { "url": "https://www.buymeacoffee.com/*" }
       ]
-    }
+    },
+    "updater:default",
+    "process:allow-restart"
   ]
 }
