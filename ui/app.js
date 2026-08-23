@@ -6951,11 +6951,7 @@ const initializeTrimFeature = () => {
 				alert("Please load a video first.");
 				return;
 			}
-			document.getElementById("trimStartInput").value =
-				formatTimeToHHMMSSMS(clipInTime);
-			document.getElementById("trimEndInput").value = formatTimeToHHMMSSMS(
-				clipOutTime || player.duration,
-			);
+			// Clip In/Out drive export; no separate start/end fields in settings.
 			resetTrimModalUI();
 			// Batch is on by default — refresh join-group job list
 			if (typeof window.renderBatchExportList === "function") {
