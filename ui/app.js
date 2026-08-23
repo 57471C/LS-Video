@@ -258,27 +258,8 @@ const applyEffectivePlaybackVolume = () => {
 			: String(Math.round(masterVol * 100));
 	}
 
-	// Update Timeline Clip Fader UI (Clip Only)
-	const clipSlider = document.getElementById("timelineClipGainSlider");
-	const clipValEl = document.getElementById("timelineClipGainValue");
-	const clipMuteBtn = document.getElementById("timelineClipMuteBtn");
-	const clipOnIcon = document.getElementById("timelineClipVolOnIcon");
-	const clipOffIcon = document.getElementById("timelineClipVolOffIcon");
-
-	if (clipSlider) {
-		clipSlider.value = clipMuted ? "0" : String(clipGain);
-		clipSlider.disabled = !videoFilePath && !videoFileName;
-	}
-	if (clipValEl) {
-		clipValEl.textContent = clipMuted ? "0" : String(Math.round(clipGain * 100));
-	}
-	if (clipOnIcon && clipOffIcon) {
-		clipOnIcon.classList.toggle("hidden", clipMuted);
-		clipOffIcon.classList.toggle("hidden", !clipMuted);
-	}
-	if (clipMuteBtn) {
-		clipMuteBtn.disabled = !videoFilePath && !videoFileName;
-	}
+	// Update all rendered per-clip timeline faders and highlight active row
+	syncTimelineClipFaderUIs();
 
 	return {
 		masterVolume: masterVol,
@@ -290,6 +271,38 @@ const applyEffectivePlaybackVolume = () => {
 	};
 };
 window.applyEffectivePlaybackVolume = applyEffectivePlaybackVolume;
+
+/**
+ * Re-syncs all rendered per-clip DAW faders/mutes from videoQueue[qIndex]
+ * and applies active-clip-fader class to the active queue index's gutter.
+ */
+const syncTimelineClipFaderUIs = () => {
+	const activeQ = typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	const gutters = document.querySelectorAll(".timeline-clip-fader-gutter");
+	for (const gutter of gutters) {
+		const qIdx = Number(gutter.dataset.queueIndex);
+		if (!Number.isFinite(qIdx)) continue;
+		const clip = resolveVolumeForQueueIndex(qIdx);
+		const gainSlider = gutter.querySelector(".timeline-clip-row-gain-slider");
+		const valSpan = gutter.querySelector(".timeline-clip-row-gain-value");
+		const onIcon = gutter.querySelector(".timeline-clip-vol-on-icon");
+		const offIcon = gutter.querySelector(".timeline-clip-vol-off-icon");
+		const muteBtn = gutter.querySelector(".timeline-clip-row-mute-btn");
+
+		if (gainSlider) {
+			gainSlider.value = clip.muted ? "0" : String(clip.volume);
+		}
+		if (valSpan) {
+			valSpan.textContent = clip.muted ? "0" : String(Math.round(clip.volume * 100));
+		}
+		if (onIcon && offIcon) {
+			onIcon.classList.toggle("hidden", !!clip.muted);
+			offIcon.classList.toggle("hidden", !clip.muted);
+		}
+		gutter.classList.toggle("active-clip-fader", qIdx === activeQ);
+	}
+};
+window.syncTimelineClipFaderUIs = syncTimelineClipFaderUIs;
 
 /** Update master monitor volume and re-evaluate effective playback volume. */
 const applyMasterVolume = (volume, muted) => {
@@ -3288,8 +3301,109 @@ window.downloadVttFallback = (vttContent, basename = "captions.vtt") => {
 };
 
 /**
+ * Helper to build a DAW-style clip volume & mute fader gutter for a queue item.
+ * @param {number} qIdx queue index
+ * @returns {HTMLDivElement}
+ */
+const createClipFaderGutter = (qIdx) => {
+	const gutter = document.createElement("div");
+	gutter.className =
+		"timeline-clip-fader-gutter bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700";
+	gutter.dataset.queueIndex = String(qIdx);
+	gutter.title = "Clip volume";
+
+	const clip = resolveVolumeForQueueIndex(qIdx);
+	const activeQ = typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	if (qIdx === activeQ) {
+		gutter.classList.add("active-clip-fader");
+	}
+
+	const muteBtn = document.createElement("button");
+	muteBtn.type = "button";
+	muteBtn.className =
+		"btn-icon timeline-clip-row-mute-btn p-0.5 w-5 h-5 flex items-center justify-center text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 rounded";
+	muteBtn.title = "Clip Mute/Unmute";
+	muteBtn.setAttribute("aria-label", "Clip Mute/Unmute");
+	muteBtn.dataset.queueIndex = String(qIdx);
+
+	muteBtn.innerHTML = `
+		<svg class="timeline-clip-vol-on-icon ${clip.muted ? "hidden" : ""}" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24"
+			fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+			<path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+			<path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+		</svg>
+		<svg class="timeline-clip-vol-off-icon text-red-500 ${clip.muted ? "" : "hidden"}" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24"
+			fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+			<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+			<line x1="23" y1="9" x2="17" y2="15"></line>
+			<line x1="17" y1="9" x2="23" y2="15"></line>
+		</svg>
+	`;
+
+	muteBtn.addEventListener("click", (e) => {
+		e.stopPropagation();
+		const current = resolveVolumeForQueueIndex(qIdx);
+		const nextMuted = !current.muted;
+		let vol = current.volume;
+		if (!nextMuted && vol === 0) vol = 1;
+		rememberVolumeOnQueueIndex(qIdx, vol, nextMuted);
+		saveLocalState();
+		if (qIdx === activeQueueIndex) {
+			applyEffectivePlaybackVolume();
+		} else {
+			syncTimelineClipFaderUIs();
+		}
+	});
+
+	const sliderWrap = document.createElement("div");
+	sliderWrap.className = "flex-1 flex items-center justify-center py-0.5 w-full relative";
+
+	const slider = document.createElement("input");
+	slider.type = "range";
+	slider.min = "0";
+	slider.max = "1";
+	slider.step = "0.01";
+	slider.value = clip.muted ? "0" : String(clip.volume);
+	slider.className = "timeline-vertical-fader timeline-clip-row-gain-slider form-range";
+	slider.setAttribute("aria-label", "Clip volume");
+	slider.dataset.queueIndex = String(qIdx);
+
+	slider.addEventListener(
+		"input",
+		debounce((e) => {
+			const gain = clampVolume01(Number.parseFloat(e.target.value));
+			if (!Number.isNaN(gain)) {
+				const muted = gain === 0;
+				rememberVolumeOnQueueIndex(qIdx, gain, muted);
+				saveLocalState();
+				if (qIdx === activeQueueIndex) {
+					applyEffectivePlaybackVolume();
+				} else {
+					syncTimelineClipFaderUIs();
+				}
+			}
+		}, 60),
+	);
+
+	sliderWrap.appendChild(slider);
+
+	const valSpan = document.createElement("span");
+	valSpan.className =
+		"timeline-clip-row-gain-value text-[8px] font-mono tabular-nums text-zinc-500 dark:text-zinc-400 text-center leading-none select-none";
+	valSpan.textContent = clip.muted ? "0" : String(Math.round(clip.volume * 100));
+
+	gutter.appendChild(muteBtn);
+	gutter.appendChild(sliderWrap);
+	gutter.appendChild(valSpan);
+
+	return gutter;
+};
+
+/**
  * Ensure timeline tracks host has N video+audio row pairs for the active run.
  * Solo (1 segment) keeps classic #timeline-video-track / #timeline-audio-track ids.
+ * DAW layout: each row has a left fader gutter + tracks stack.
  */
 const ensureSequenceTrackRows = (segmentCount) => {
 	const host = document.getElementById("timeline-tracks-host");
@@ -3298,17 +3412,39 @@ const ensureSequenceTrackRows = (segmentCount) => {
 	host.innerHTML = "";
 	const rows = [];
 
+	const run = typeof getActiveJoinRun === "function" ? getActiveJoinRun() : null;
+
 	for (let i = 0; i < segmentCount; i += 1) {
+		const targetQIdx =
+			run?.segments?.[i]?.queueIndex !== undefined
+				? run.segments[i].queueIndex
+				: typeof activeQueueIndex === "number"
+					? activeQueueIndex
+					: i;
+
 		const pair = document.createElement("div");
 		pair.className = "sequence-av-pair";
 		pair.dataset.segmentIndex = String(i);
+		pair.dataset.queueIndex = String(targetQIdx);
 
 		if (segmentCount > 1) {
 			const label = document.createElement("div");
 			label.className = "sequence-segment-label";
 			label.dataset.segmentIndex = String(i);
+			label.dataset.queueIndex = String(targetQIdx);
 			pair.appendChild(label);
 		}
+
+		// Row container: left fader gutter + right tracks stack
+		const rowContainer = document.createElement("div");
+		rowContainer.className = "timeline-row-container";
+		rowContainer.dataset.segmentIndex = String(i);
+		rowContainer.dataset.queueIndex = String(targetQIdx);
+
+		const faderGutter = createClipFaderGutter(targetQIdx);
+
+		const tracksStack = document.createElement("div");
+		tracksStack.className = "timeline-row-tracks-stack";
 
 		const videoTrack = document.createElement("div");
 		videoTrack.className =
@@ -3317,6 +3453,7 @@ const ensureSequenceTrackRows = (segmentCount) => {
 			"height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;";
 		if (i === 0) videoTrack.id = "timeline-video-track";
 		videoTrack.dataset.segmentIndex = String(i);
+		videoTrack.dataset.queueIndex = String(targetQIdx);
 
 		const audioTrack = document.createElement("div");
 		audioTrack.className =
@@ -3325,11 +3462,17 @@ const ensureSequenceTrackRows = (segmentCount) => {
 			"height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;";
 		if (i === 0) audioTrack.id = "timeline-audio-track";
 		audioTrack.dataset.segmentIndex = String(i);
+		audioTrack.dataset.queueIndex = String(targetQIdx);
 
-		pair.appendChild(videoTrack);
-		pair.appendChild(audioTrack);
+		tracksStack.appendChild(videoTrack);
+		tracksStack.appendChild(audioTrack);
+
+		rowContainer.appendChild(faderGutter);
+		rowContainer.appendChild(tracksStack);
+
+		pair.appendChild(rowContainer);
 		host.appendChild(pair);
-		rows.push({ videoTrack, audioTrack, pair, segmentIndex: i });
+		rows.push({ videoTrack, audioTrack, pair, faderGutter, segmentIndex: i, queueIndex: targetQIdx });
 	}
 	return rows;
 };
@@ -5526,40 +5669,6 @@ const initializePlayer = () => {
 			}
 		}, 100),
 	);
-
-	// Detailed Timeline: Clip Volume Fader & Clip Mute
-	const timelineClipMuteBtn = document.getElementById("timelineClipMuteBtn");
-	if (timelineClipMuteBtn) {
-		timelineClipMuteBtn.addEventListener("click", () => {
-			const currentClip = resolveVolumeForQueueIndex(activeQueueIndex);
-			const nextMuted = !currentClip.muted;
-			let vol = currentClip.volume;
-			if (!nextMuted && vol === 0) {
-				vol = 1;
-			}
-			rememberVolumeOnQueueIndex(activeQueueIndex, vol, nextMuted);
-			applyEffectivePlaybackVolume();
-			toConsole("Clip mute toggled", { activeQueueIndex, nextMuted }, debuggin);
-			saveLocalState();
-		});
-	}
-
-	const timelineClipGainSlider = document.getElementById("timelineClipGainSlider");
-	if (timelineClipGainSlider) {
-		timelineClipGainSlider.addEventListener(
-			"input",
-			debounce((event) => {
-				const gain = clampVolume01(Number.parseFloat(event.target.value));
-				if (!Number.isNaN(gain)) {
-					const muted = gain === 0;
-					rememberVolumeOnQueueIndex(activeQueueIndex, gain, muted);
-					applyEffectivePlaybackVolume();
-					toConsole("Clip volume adjusted", { activeQueueIndex, gain }, debuggin);
-					saveLocalState();
-				}
-			}, 100),
-		);
-	}
 
 	if (speedSlider) {
 		/*
