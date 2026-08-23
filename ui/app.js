@@ -2688,7 +2688,13 @@ window.initializeLaunchArgumentHandler = async () => {
 				"get_launch_argument",
 			);
 
-			if (launchPath && launchPath.trim() !== "") {
+			if (
+				launchPath &&
+				launchPath.trim() !== "" &&
+				(launchPath.includes("/") ||
+					launchPath.includes("\\") ||
+					launchPath.includes("."))
+			) {
 				console.log("[Launch System] External OS file detected:", launchPath);
 				const lower = launchPath.toLowerCase();
 

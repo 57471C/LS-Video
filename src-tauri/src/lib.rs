@@ -34,16 +34,96 @@ fn get_startup_file() -> Option<String> {
         })
 }
 
+fn is_known_media_or_project_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "mp4"
+            | "m4v"
+            | "mov"
+            | "mkv"
+            | "avi"
+            | "webm"
+            | "wmv"
+            | "flv"
+            | "mpg"
+            | "mpeg"
+            | "mts"
+            | "m2ts"
+            | "mp3"
+            | "wav"
+            | "flac"
+            | "aac"
+            | "m4a"
+            | "ogg"
+            | "opus"
+            | "lsv"
+            | "lsvz"
+            | "tmv"
+            | "tmvz"
+    )
+}
+
+fn is_valid_launch_path(arg: &str) -> bool {
+    let lower = arg.to_lowercase();
+    let path = std::path::Path::new(arg);
+
+    let has_known_ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| is_known_media_or_project_extension(&ext.to_lowercase()))
+        .unwrap_or(false);
+
+    if has_known_ext {
+        return true;
+    }
+
+    let is_abs = path.is_absolute()
+        || lower.starts_with('/')
+        || lower.starts_with('\\')
+        || (lower.len() >= 3
+            && lower.chars().nth(0).unwrap_or('\0').is_ascii_alphabetic()
+            && lower.chars().nth(1) == Some(':')
+            && (lower.chars().nth(2) == Some('\\') || lower.chars().nth(2) == Some('/')));
+
+    if is_abs && (path.exists() || has_known_ext) {
+        return true;
+    }
+
+    false
+}
+
 #[tauri::command]
 fn get_launch_argument() -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        let arg = &args[1];
-        if !arg.starts_with("--") {
-            return Some(arg.trim_matches('"').to_string());
+    let raw_args = std::env::args().skip(1);
+    let mut candidates = Vec::new();
+
+    for arg in raw_args {
+        if arg.starts_with('-') {
+            continue;
+        }
+        let trimmed = arg.trim_matches('"').trim_matches('\'').trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let lower = trimmed.to_lowercase();
+        if matches!(
+            lower.as_str(),
+            "tauri" | "dev" | "build" | "release" | "run" | "serve"
+        ) {
+            continue;
+        }
+
+        if is_valid_launch_path(&trimmed) {
+            candidates.push(trimmed);
         }
     }
-    None
+
+    if let Some(existing) = candidates.iter().find(|c| std::path::Path::new(c).exists()) {
+        return Some(existing.clone());
+    }
+
+    candidates.into_iter().next()
 }
 
 #[tauri::command]
