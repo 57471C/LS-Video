@@ -37,7 +37,14 @@ let playerReady = false;
 let clipInTime = 0;
 let clipOutTime = 0;
 let playbackSpeed = 1;
-let volumeLevel = 1;
+/** Master monitor volume (0–1). Session-level, never writes to videoQueue / export. */
+let masterVolumeLevel =
+	localStorage.getItem("lsvideo_master_volume") !== null
+		? Math.min(1, Math.max(0, Number(localStorage.getItem("lsvideo_master_volume"))))
+		: 1;
+let masterMuted = localStorage.getItem("lsvideo_master_muted") === "true";
+/** Legacy alias pointing at masterVolumeLevel for backwards compatibility. */
+let volumeLevel = masterVolumeLevel;
 
 const APP_VERSION = "0.6.6";
 /** Active project localStorage key (writes only go here). */
@@ -127,6 +134,13 @@ const DOM = {
 	settingsBackdrop: document.getElementById("settingsBackdrop"),
 	settingsPanel: document.getElementById("settingsPanel"),
 	closeSettingsBtn: document.getElementById("closeSettingsBtn"),
+
+	// Timeline Clip Volume Elements
+	timelineClipMuteBtn: document.getElementById("timelineClipMuteBtn"),
+	timelineClipVolOnIcon: document.getElementById("timelineClipVolOnIcon"),
+	timelineClipVolOffIcon: document.getElementById("timelineClipVolOffIcon"),
+	timelineClipGainSlider: document.getElementById("timelineClipGainSlider"),
+	timelineClipGainValue: document.getElementById("timelineClipGainValue"),
 };
 
 const saveLocalState = () => {

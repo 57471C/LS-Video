@@ -147,7 +147,7 @@ window._softHandoffVolumeActive = false;
 window._softHandoffAudio = null;
 window._joinTimelineRebuildTimer = null;
 
-/** Clamp transport volume to HTMLMediaElement range [0, 1]. */
+/** Clamp volume to range [0, 1]. */
 const clampVolume01 = (v, fallback = 1) => {
 	const n = Number(v);
 	if (!Number.isFinite(n)) return fallback;
@@ -162,44 +162,36 @@ const queueItemHasOwnVolume = (video) =>
 	Number.isFinite(Number(video.volumeLevel));
 
 /**
- * Resolve volume for a queue index: use that clip's remembered level if set,
- * otherwise walk backward and inherit the nearest previous clip's volume.
- * Falls back to current global volumeLevel.
+ * Resolve clip volume for a queue index: defaults to 1.0 (unmuted) when unset.
+ * Clearer semantics when separated from master monitor volume.
  */
 const resolveVolumeForQueueIndex = (index) => {
-	const fallbackVol = clampVolume01(
-		typeof volumeLevel !== "undefined" ? volumeLevel : 1,
-		1,
-	);
-	const fallbackMuted =
-		typeof player !== "undefined" && player ? !!player.muted : false;
 	if (
 		typeof videoQueue === "undefined" ||
 		!videoQueue.length ||
 		index === undefined ||
 		index === null
 	) {
-		return { volume: fallbackVol, muted: fallbackMuted, sourceIndex: -1 };
+		return { volume: 1, muted: false, sourceIndex: -1 };
 	}
 	const i0 = Math.max(0, Math.min(index, videoQueue.length - 1));
-	for (let i = i0; i >= 0; i -= 1) {
-		const v = videoQueue[i];
-		if (queueItemHasOwnVolume(v)) {
-			return {
-				volume: clampVolume01(v.volumeLevel, fallbackVol),
-				muted:
-					v.volumeMuted !== undefined && v.volumeMuted !== null
-						? !!v.volumeMuted
-						: false,
-				sourceIndex: i,
-			};
-		}
+	const v = videoQueue[i0];
+	if (queueItemHasOwnVolume(v)) {
+		return {
+			volume: clampVolume01(v.volumeLevel, 1),
+			muted:
+				v.volumeMuted !== undefined && v.volumeMuted !== null
+					? !!v.volumeMuted
+					: false,
+			sourceIndex: i0,
+		};
 	}
-	return { volume: fallbackVol, muted: fallbackMuted, sourceIndex: -1 };
+	// Default to 1.0 and unmuted when unset (clean separation from master monitor volume)
+	return { volume: 1, muted: false, sourceIndex: i0 };
 };
 window.resolveVolumeForQueueIndex = resolveVolumeForQueueIndex;
 
-/** Persist volume/mute on a queue item (source-local). */
+/** Persist per-clip gain and mute on a queue item (never called by master slider). */
 const rememberVolumeOnQueueIndex = (index, volume, muted) => {
 	if (
 		typeof videoQueue === "undefined" ||
@@ -209,7 +201,9 @@ const rememberVolumeOnQueueIndex = (index, volume, muted) => {
 	) {
 		return;
 	}
-	videoQueue[index].volumeLevel = clampVolume01(volume, volumeLevel);
+	if (volume !== undefined && volume !== null) {
+		videoQueue[index].volumeLevel = clampVolume01(volume, 1);
+	}
 	if (muted !== undefined && muted !== null) {
 		videoQueue[index].volumeMuted = !!muted;
 	}
@@ -217,30 +211,103 @@ const rememberVolumeOnQueueIndex = (index, volume, muted) => {
 window.rememberVolumeOnQueueIndex = rememberVolumeOnQueueIndex;
 
 /**
- * Apply volume + mute to player, global volumeLevel, and transport UI.
- * volumeSlider is 0–1 (not percent). volumeValue text is percent 0–100.
+ * Compute and apply heard level = clamp01(masterVolume * (clipMuted ? 0 : clipGain)).
+ * player.muted = masterMuted || clipMuted.
+ * Updates footer controls from MASTER only. Updates timeline fader from CLIP only.
  */
-const applyTransportVolume = (volume, muted) => {
-	const vol = clampVolume01(volume, volumeLevel);
-	const isMuted = !!muted;
-	if (typeof player !== "undefined" && player) {
-		player.volume = vol;
-		player.muted = isMuted;
+const applyEffectivePlaybackVolume = () => {
+	const qIndex = typeof activeQueueIndex === "number" ? activeQueueIndex : 0;
+	const clip = resolveVolumeForQueueIndex(qIndex);
+	const clipGain = clip.volume;
+	const clipMuted = !!clip.muted;
+
+	const masterVol = clampVolume01(
+		typeof masterVolumeLevel !== "undefined" ? masterVolumeLevel : 1,
+		1,
+	);
+	const isMasterMuted =
+		typeof masterMuted !== "undefined" ? !!masterMuted : false;
+
+	const effectiveVol = clampVolume01(masterVol * (clipMuted ? 0 : clipGain));
+	const effectiveMuted = isMasterMuted || clipMuted;
+
+	const videoEl =
+		(typeof player !== "undefined" && player) ||
+		window.player ||
+		document.getElementById("my_video");
+	if (videoEl) {
+		videoEl.volume = effectiveVol;
+		videoEl.muted = effectiveMuted;
 	}
-	volumeLevel = vol;
+
+	// Update Footer UI (Master Monitor Only)
 	if (DOM?.volumeOnIcon && DOM?.volumeOffIcon) {
-		DOM.volumeOnIcon.classList.toggle("hidden", isMuted);
-		DOM.volumeOffIcon.classList.toggle("hidden", !isMuted);
+		DOM.volumeOnIcon.classList.toggle("hidden", isMasterMuted);
+		DOM.volumeOffIcon.classList.toggle("hidden", !isMasterMuted);
 	}
-	if (typeof volumeSlider !== "undefined" && volumeSlider) {
-		// Range input max=1 — never write percent (e.g. 10) or it clamps to 100%
-		volumeSlider.value = isMuted ? 0 : vol;
+	const footerSlider =
+		typeof volumeSlider !== "undefined" && volumeSlider
+			? volumeSlider
+			: document.getElementById("volumeSlider");
+	if (footerSlider) {
+		footerSlider.value = isMasterMuted ? "0" : String(masterVol);
 	}
 	if (DOM?.volumeValue) {
-		DOM.volumeValue.textContent = isMuted ? "0" : String(Math.round(vol * 100));
+		DOM.volumeValue.textContent = isMasterMuted
+			? "0"
+			: String(Math.round(masterVol * 100));
 	}
-	return { volume: vol, muted: isMuted };
+
+	// Update Timeline Clip Fader UI (Clip Only)
+	const clipSlider = document.getElementById("timelineClipGainSlider");
+	const clipValEl = document.getElementById("timelineClipGainValue");
+	const clipMuteBtn = document.getElementById("timelineClipMuteBtn");
+	const clipOnIcon = document.getElementById("timelineClipVolOnIcon");
+	const clipOffIcon = document.getElementById("timelineClipVolOffIcon");
+
+	if (clipSlider) {
+		clipSlider.value = clipMuted ? "0" : String(clipGain);
+		clipSlider.disabled = !videoFilePath && !videoFileName;
+	}
+	if (clipValEl) {
+		clipValEl.textContent = clipMuted ? "0" : String(Math.round(clipGain * 100));
+	}
+	if (clipOnIcon && clipOffIcon) {
+		clipOnIcon.classList.toggle("hidden", clipMuted);
+		clipOffIcon.classList.toggle("hidden", !clipMuted);
+	}
+	if (clipMuteBtn) {
+		clipMuteBtn.disabled = !videoFilePath && !videoFileName;
+	}
+
+	return {
+		masterVolume: masterVol,
+		masterMuted: isMasterMuted,
+		clipGain,
+		clipMuted,
+		effectiveVolume: effectiveVol,
+		effectiveMuted,
+	};
 };
+window.applyEffectivePlaybackVolume = applyEffectivePlaybackVolume;
+
+/** Update master monitor volume and re-evaluate effective playback volume. */
+const applyMasterVolume = (volume, muted) => {
+	masterVolumeLevel = clampVolume01(volume, 1);
+	volumeLevel = masterVolumeLevel;
+	if (muted !== undefined && muted !== null) {
+		masterMuted = !!muted;
+	}
+	try {
+		localStorage.setItem("lsvideo_master_volume", String(masterVolumeLevel));
+		localStorage.setItem("lsvideo_master_muted", String(masterMuted));
+	} catch {}
+	return applyEffectivePlaybackVolume();
+};
+window.applyMasterVolume = applyMasterVolume;
+
+/** Legacy alias pointing at applyMasterVolume / applyEffectivePlaybackVolume. */
+const applyTransportVolume = (volume, muted) => applyMasterVolume(volume, muted);
 window.applyTransportVolume = applyTransportVolume;
 window._sequenceMode = {
 	active: false,
@@ -713,7 +780,7 @@ window.getActiveSpeedTimelineModel = () => {
 		typeof markers !== "undefined" && Array.isArray(markers)
 			? markers
 			: video?.appState?.markers || [];
-	const p = (typeof player !== "undefined" && player) || window.player || null;
+	const p = window.player || document.getElementById("my_video") || null;
 	// Real clip window (for grey shading / fades only — not timeline length)
 	const clipIn =
 		typeof getClipInTime === "function"
@@ -1010,19 +1077,20 @@ window.applyClipEdgeFadePreview = () => {
 		fades.fadeOutSec,
 	);
 
-	// Video opacity (visual fade)
-	videoEl.style.opacity = String(gain);
-
-	// Audio: scale user volume preference; never leave volumeLevel stuck at 0
-	const baseVol = clampVolume01(
-		typeof volumeLevel !== "undefined" ? volumeLevel : 1,
+	// Audio: scale effective volume (master * clip); never leave volume stuck at 0
+	const clip = resolveVolumeForQueueIndex(qIndex);
+	const masterVol = clampVolume01(
+		typeof masterVolumeLevel !== "undefined" ? masterVolumeLevel : 1,
 		1,
 	);
-	const userMuted = !!videoEl.muted;
-	if (!userMuted) {
-		videoEl.volume = baseVol * gain;
+	const clipGain = clip.volume;
+	const isMuted =
+		(typeof masterMuted !== "undefined" ? !!masterMuted : false) ||
+		!!clip.muted ||
+		!!videoEl.muted;
+	if (!isMuted) {
+		videoEl.volume = clampVolume01(masterVol * clipGain * gain);
 	}
-	// If muted, leave volume alone (mute handles silence)
 	window._clipFadePreviewGain = gain;
 };
 
@@ -1209,7 +1277,7 @@ window.refreshClipFadeTimelineZones = () => {
 			: null;
 	const inT = model?.clipIn ?? (Number(video?.clipInTime) || 0);
 	let outT = model?.clipOut ?? (Number(video?.clipOutTime) || 0);
-	const p = (typeof player !== "undefined" && player) || window.player || null;
+	const p = window.player || document.getElementById("my_video") || null;
 	if (outT <= inT && p?.duration) outT = p.duration;
 
 	if (getComputedStyle(videoTrack).position === "static") {
@@ -1762,33 +1830,11 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		typeof player !== "undefined" && player && Number.isFinite(player.volume)
 			? player.volume
 			: volumeLevel;
-	const leavingMuted =
-		typeof player !== "undefined" && player ? !!player.muted : false;
 	let switchedSource = false;
-	// Target audio: per-clip remembered volume, else inherit previous
-	let targetAudio = {
-		volume: leavingVol,
-		muted: leavingMuted,
-	};
 
 	if (mapped.queueIndex !== activeQueueIndex) {
 		switchedSource = true;
-		// Remember volume on the clip we leave
-		rememberVolumeOnQueueIndex(leavingIndex, leavingVol, leavingMuted);
-		targetAudio = resolveVolumeForQueueIndex(mapped.queueIndex);
-		// If target has no own volume, inherit the volume we just left with
-		if (!queueItemHasOwnVolume(videoQueue[mapped.queueIndex])) {
-			targetAudio = {
-				volume: clampVolume01(leavingVol),
-				muted: leavingMuted,
-				sourceIndex: leavingIndex,
-			};
-		}
 		window._softHandoffVolumeActive = true;
-		window._softHandoffAudio = {
-			volume: targetAudio.volume,
-			muted: targetAudio.muted,
-		};
 		// Silent switch into target source without toast spam
 		preserveClipBounds = true;
 		if (typeof saveLocalState === "function") saveLocalState();
@@ -1822,7 +1868,7 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		}
 		if (typeof player !== "undefined" && player) {
 			await waitForPlayerReadyToSeek(player);
-			applyTransportVolume(targetAudio.volume, targetAudio.muted);
+			applyEffectivePlaybackVolume();
 		}
 		if (!silent) {
 			showToast(`Switched to: ${currentVideo.videoName}`, "success");
@@ -1837,7 +1883,7 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 		}
 		// Re-assert target audio after seek/play in case loadedmetadata raced
 		if (switchedSource) {
-			applyTransportVolume(targetAudio.volume, targetAudio.muted);
+			applyEffectivePlaybackVolume();
 		}
 		if (shouldPlay) {
 			void player
@@ -1847,7 +1893,7 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 				)
 				.finally(() => {
 					if (switchedSource) {
-						applyTransportVolume(targetAudio.volume, targetAudio.muted);
+						applyEffectivePlaybackVolume();
 					}
 					// Reveal after a paint so first frame is more likely present
 					requestAnimationFrame(() => hideHandoffFreezeFrame());
@@ -1872,33 +1918,29 @@ const seekSequenceTime = async (seqTime, opts = {}) => {
 	for (let i = 0; i < heads.length; i += 1) {
 		heads[i].style.left = `${pct}%`;
 	}
-	if (switchedSource) {
-		window._softHandoffVolumeActive = false;
-		window._softHandoffAudio = null;
-	}
+
+	window._softHandoffVolumeActive = false;
+	window._softHandoffAudio = null;
 };
 window.seekSequenceTime = seekSequenceTime;
 
-/** Play across join: hand off to next queue item at its clipIn without stopping. */
+/**
+ * Advance playhead across joined segments seamlessly (called on 'ended' or boundary hit).
+ */
 const handoffToNextJoinedClip = async () => {
-	if (window._sequenceHandoffInProgress) return;
-	if (!shouldHandoffToNextJoined()) {
-		// Unjoined or missing next — stop cleanly at out
-		if (typeof player !== "undefined" && player && !player.paused) {
-			player.pause();
-		}
-		const out = getEffectiveClipOut();
-		if (typeof player !== "undefined" && player && out > 0) {
-			try {
-				player.currentTime = Math.min(out, player.duration || out);
-			} catch (_) {
-				/* ignore seek on dead element */
-			}
-		}
-		window._sequenceContinuePlay = false;
+	if (!isSequenceMode()) return;
+	const run = getActiveJoinRun();
+	if (!run?.segments) return;
+
+	const segIndexInRun = run.segments.findIndex(
+		(s) => s.queueIndex === activeQueueIndex,
+	);
+	if (segIndexInRun < 0 || segIndexInRun >= run.segments.length - 1) {
+		// End of the entire join run
 		return;
 	}
 
+	if (window._sequenceHandoffInProgress) return;
 	window._sequenceHandoffInProgress = true;
 	// Capture continue intent BEFORE load (ended/pause will clear player.paused)
 	const resumeAfterLoad =
@@ -1906,31 +1948,8 @@ const handoffToNextJoinedClip = async () => {
 		(typeof player !== "undefined" && player && !player.paused);
 	window._sequenceContinuePlay = true;
 
-	// Capture leaving-clip audio, remember it, resolve target (own or inherit previous)
-	const leavingIndex = activeQueueIndex;
-	const handoffVolume =
-		typeof player !== "undefined" && player && Number.isFinite(player.volume)
-			? player.volume
-			: volumeLevel;
-	const handoffMuted =
-		typeof player !== "undefined" && player ? !!player.muted : false;
-	rememberVolumeOnQueueIndex(leavingIndex, handoffVolume, handoffMuted);
-
 	const nextIndex = activeQueueIndex + 1;
-	let targetAudio = resolveVolumeForQueueIndex(nextIndex);
-	// Explicit inherit: if next has no remembered volume, keep leaving clip's level
-	if (!queueItemHasOwnVolume(videoQueue[nextIndex])) {
-		targetAudio = {
-			volume: clampVolume01(handoffVolume),
-			muted: handoffMuted,
-			sourceIndex: leavingIndex,
-		};
-	}
 	window._softHandoffVolumeActive = true;
-	window._softHandoffAudio = {
-		volume: targetAudio.volume,
-		muted: targetAudio.muted,
-	};
 
 	try {
 		const next = videoQueue[nextIndex];
@@ -1978,8 +1997,8 @@ const handoffToNextJoinedClip = async () => {
 			} catch (err) {
 				console.warn("[Playback] join handoff seek failed:", err);
 			}
-			// Apply target clip volume (own or inherited) — never force 100% / mute-on-load
-			applyTransportVolume(targetAudio.volume, targetAudio.muted);
+			// Apply target clip volume composed with master monitor level
+			applyEffectivePlaybackVolume();
 			// Refresh sequence mode so playhead uses run duration for next segment
 			syncSequenceModeState();
 			if (resumeAfterLoad || window._sequenceContinuePlay) {
@@ -1989,7 +2008,7 @@ const handoffToNextJoinedClip = async () => {
 					console.warn("[Playback] join handoff play() blocked:", err);
 				}
 				// Play can race with mute-on-load; re-assert once more after play
-				applyTransportVolume(targetAudio.volume, targetAudio.muted);
+				applyEffectivePlaybackVolume();
 			}
 			// Drop freeze after paint of new source
 			requestAnimationFrame(() => {
@@ -2193,6 +2212,9 @@ document.addEventListener("DOMContentLoaded", () => {
 				mainGrid.classList.toggle("timeline-expanded");
 				// Re-measure fit width after expand so zoom=1 fills the panel
 				if (mainGrid.classList.contains("timeline-expanded")) {
+					if (typeof window.applyEffectivePlaybackVolume === "function") {
+						window.applyEffectivePlaybackVolume();
+					}
 					if (typeof window.initTimelineZoomControls === "function") {
 						window.initTimelineZoomControls();
 					}
@@ -2408,26 +2430,6 @@ window.loadVideo = async (incomingVideoPath, options = {}) => {
 	if (softHandoff) {
 		window._skipNextTimelineBoot = true;
 		window._softHandoffVolumeActive = true;
-		// Capture audio state before src swap so loadedmetadata does not force mute
-		const ve =
-			document.querySelector("video") ||
-			document.getElementById("video-player") ||
-			document.getElementById("my_video") ||
-			(typeof player !== "undefined" ? player : null);
-		// Prefer existing capture (handoff may have stashed user state already)
-		if (!window._softHandoffAudio) {
-			if (ve) {
-				window._softHandoffAudio = {
-					volume: Number.isFinite(ve.volume) ? ve.volume : volumeLevel,
-					muted: !!ve.muted,
-				};
-			} else {
-				window._softHandoffAudio = {
-					volume: volumeLevel,
-					muted: false,
-				};
-			}
-		}
 	}
 
 	window._videoLoadInProgress = true;
@@ -4994,74 +4996,23 @@ const initializePlayer = () => {
 		DOM.speedValue.textContent = `${playbackSpeed.toFixed(1)}x`;
 		toConsole("Playback speed restored", playbackSpeed, debuggin);
 
-		// Soft handoff / sequence continue: preserve volume+mute (do NOT force mute-on-load)
-		const softAudio = window._softHandoffAudio;
+		// Soft handoff / sequence continue / audio file / hard load
 		const isSoftHandoffLoad =
 			!!window._softHandoffVolumeActive ||
-			!!softAudio ||
 			!!window._sequenceHandoffInProgress ||
 			!!window._sequenceContinuePlay;
-		if (isSoftHandoffLoad) {
-			const vol = softAudio
-				? Number.isFinite(softAudio.volume)
-					? softAudio.volume
-					: volumeLevel
-				: volumeLevel;
-			const muted = softAudio ? !!softAudio.muted : !!player.muted;
-			if (typeof applyTransportVolume === "function") {
-				applyTransportVolume(vol, muted);
-			} else if (typeof window.applyTransportVolume === "function") {
-				window.applyTransportVolume(vol, muted);
-			} else {
-				player.volume = clampVolume01(vol);
-				player.muted = muted;
-				volumeLevel = player.volume;
-			}
-			// Keep capture until handoff/seek finally clears the active flag
-			toConsole(
-				"Soft handoff volume preserved",
-				{ volume: vol, muted },
-				debuggin,
-			);
-		} else if (isAudioOnlyMedia(videoFilePath || videoFileName)) {
-			// Prefer per-clip remembered volume when available
-			const resolved =
-				typeof resolveVolumeForQueueIndex === "function"
-					? resolveVolumeForQueueIndex(activeQueueIndex)
-					: { volume: volumeLevel, muted: false };
-			if (typeof applyTransportVolume === "function") {
-				applyTransportVolume(resolved.volume, false);
-			} else {
-				player.volume = clampVolume01(resolved.volume);
-				player.muted = false;
-				volumeLevel = player.volume;
-				if (volumeSlider) volumeSlider.value = volumeLevel;
-				if (DOM.volumeValue) {
-					DOM.volumeValue.textContent = String(Math.round(volumeLevel * 100));
-				}
-				DOM.volumeOnIcon?.classList.remove("hidden");
-				DOM.volumeOffIcon?.classList.add("hidden");
-			}
-			toConsole("Audio file unmuted on load", "Success", debuggin);
-		} else {
-			// Hard load: keep existing mute-on-load UX, but volume from per-clip memory
-			const resolved =
-				typeof resolveVolumeForQueueIndex === "function"
-					? resolveVolumeForQueueIndex(activeQueueIndex)
-					: { volume: volumeLevel, muted: true };
-			if (typeof applyTransportVolume === "function") {
-				applyTransportVolume(resolved.volume, true);
-			} else {
-				player.volume = clampVolume01(resolved.volume);
-				player.muted = true;
-				volumeLevel = player.volume;
-				if (volumeSlider) volumeSlider.value = 0;
-				if (DOM.volumeValue) DOM.volumeValue.textContent = "0";
-				DOM.volumeOnIcon?.classList.add("hidden");
-				DOM.volumeOffIcon?.classList.remove("hidden");
-			}
-			toConsole("Video muted on load", "Success", debuggin);
+
+		if (!isSoftHandoffLoad && !isAudioOnlyMedia(videoFilePath || videoFileName)) {
+			// Video files default to muted on initial hard load (existing UX)
+			masterMuted = true;
 		}
+
+		applyEffectivePlaybackVolume();
+		toConsole(
+			"Playback volume configured on load",
+			{ isSoftHandoffLoad, masterMuted, masterVolumeLevel },
+			debuggin,
+		);
 
 		bootTimelineVisualizers();
 		initializeVideoViewportZoomPan(
@@ -5187,6 +5138,7 @@ const initializePlayer = () => {
 	}
 
 	updateMarkersList();
+	applyEffectivePlaybackVolume();
 
 	// Wire up Save / Save As / Package buttons
 	projectExportButton?.addEventListener("click", () => exportToJSON(false));
@@ -5554,15 +5506,13 @@ const initializePlayer = () => {
 	if (closeHelpBtnX) closeHelpBtnX.addEventListener("click", closeModal);
 
 	muteButton.addEventListener("click", () => {
-		const nextMuted = !player.muted;
-		let vol = clampVolume01(volumeLevel);
+		const nextMuted = !(typeof masterMuted !== "undefined" ? masterMuted : player.muted);
+		let vol = clampVolume01(typeof masterVolumeLevel !== "undefined" ? masterVolumeLevel : 1);
 		if (!nextMuted && vol === 0) {
 			vol = 1;
 		}
-		applyTransportVolume(vol, nextMuted);
-		rememberVolumeOnQueueIndex(activeQueueIndex, vol, nextMuted);
-		toConsole("Mute toggled", nextMuted, debuggin);
-		saveLocalState();
+		applyMasterVolume(vol, nextMuted);
+		toConsole("Master mute toggled", nextMuted, debuggin);
 	});
 
 	volumeSlider.addEventListener(
@@ -5571,14 +5521,45 @@ const initializePlayer = () => {
 			const volume = clampVolume01(Number.parseFloat(event.target.value));
 			if (!Number.isNaN(volume)) {
 				const muted = volume === 0;
-				applyTransportVolume(volume, muted);
-				// User-set volume is remembered on this clip for later join handoffs
-				rememberVolumeOnQueueIndex(activeQueueIndex, volume, muted);
-				toConsole("Volume adjusted", volume, debuggin);
-				saveLocalState();
+				applyMasterVolume(volume, muted);
+				toConsole("Master volume adjusted", volume, debuggin);
 			}
 		}, 100),
 	);
+
+	// Detailed Timeline: Clip Volume Fader & Clip Mute
+	const timelineClipMuteBtn = document.getElementById("timelineClipMuteBtn");
+	if (timelineClipMuteBtn) {
+		timelineClipMuteBtn.addEventListener("click", () => {
+			const currentClip = resolveVolumeForQueueIndex(activeQueueIndex);
+			const nextMuted = !currentClip.muted;
+			let vol = currentClip.volume;
+			if (!nextMuted && vol === 0) {
+				vol = 1;
+			}
+			rememberVolumeOnQueueIndex(activeQueueIndex, vol, nextMuted);
+			applyEffectivePlaybackVolume();
+			toConsole("Clip mute toggled", { activeQueueIndex, nextMuted }, debuggin);
+			saveLocalState();
+		});
+	}
+
+	const timelineClipGainSlider = document.getElementById("timelineClipGainSlider");
+	if (timelineClipGainSlider) {
+		timelineClipGainSlider.addEventListener(
+			"input",
+			debounce((event) => {
+				const gain = clampVolume01(Number.parseFloat(event.target.value));
+				if (!Number.isNaN(gain)) {
+					const muted = gain === 0;
+					rememberVolumeOnQueueIndex(activeQueueIndex, gain, muted);
+					applyEffectivePlaybackVolume();
+					toConsole("Clip volume adjusted", { activeQueueIndex, gain }, debuggin);
+					saveLocalState();
+				}
+			}, 100),
+		);
+	}
 
 	if (speedSlider) {
 		/*
@@ -6981,10 +6962,8 @@ const initializeTrimFeature = () => {
 
 		const batchExportToggle = document.getElementById("batchExportToggle");
 		const batchExportList = document.getElementById("batch-export-list");
-		const batchStripAudio = document.getElementById("batchStripAudioToggle");
 		// Batch export is the default path for the trim/export panel
 		if (batchExportToggle) batchExportToggle.checked = true;
-		if (batchStripAudio) batchStripAudio.checked = false;
 		if (batchExportList) {
 			batchExportList.classList.remove("hidden");
 			// Job list filled when initializeTrimFeature's renderBatchExportList is available
@@ -7231,6 +7210,14 @@ const buildBatchJobsFromQueue = () => {
 				queueIndex: idx,
 				fade_in_sec: fades.fadeInSec,
 				fade_out_sec: fades.fadeOutSec,
+				volume:
+					v.volumeLevel !== undefined && v.volumeLevel !== null
+						? clampVolume01(v.volumeLevel, 1)
+						: 1,
+				muted:
+					v.volumeMuted !== undefined && v.volumeMuted !== null
+						? !!v.volumeMuted
+						: false,
 				speed_ranges: speedRanges.map((r) => ({
 					start: r.start,
 					end: r.end,
@@ -7448,8 +7435,7 @@ async function processBatchQueue(presetType) {
 	const actualOutputDir =
 		typeof targetDir === "object" ? targetDir.path : targetDir;
 
-	const stripAudioEl = document.getElementById("batchStripAudioToggle");
-	const stripAudio = !!(stripAudioEl && stripAudioEl.checked);
+	const stripAudio = false;
 	const quality =
 		presetType === "copy" || !presetType ? "copy" : String(presetType);
 
@@ -7566,6 +7552,12 @@ async function processBatchQueue(presetType) {
 						// Soft export fades; video fade filters skipped on audio-only in Rust
 						fade_in_sec: Math.max(0, Number(s.fade_in_sec) || 0),
 						fade_out_sec: Math.max(0, Number(s.fade_out_sec) || 0),
+						volume:
+							s.volume !== undefined && s.volume !== null
+								? clampVolume01(s.volume, 1)
+								: 1,
+						muted:
+							s.muted !== undefined && s.muted !== null ? !!s.muted : false,
 						// Speed marker ranges (source time → setpts/atempo)
 						speed_ranges: Array.isArray(s.speed_ranges)
 							? s.speed_ranges.map((r) => ({
@@ -7794,6 +7786,14 @@ async function executeExport(presetType) {
 						loop_count: 1,
 						fade_in_sec: fadesSolo.fadeInSec,
 						fade_out_sec: fadesSolo.fadeOutSec,
+						volume:
+							activeVid?.volumeLevel !== undefined && activeVid?.volumeLevel !== null
+								? clampVolume01(activeVid.volumeLevel, 1)
+								: 1,
+						muted:
+							activeVid?.volumeMuted !== undefined && activeVid?.volumeMuted !== null
+								? !!activeVid.volumeMuted
+								: false,
 						speed_ranges: speedRanges.map((r) => ({
 							start: r.start,
 							end: r.end,
@@ -8266,6 +8266,7 @@ const switchVideoInQueue = async (index) => {
 
 	showToast(`Switched to: ${currentVideo.videoName}`, "success");
 	updateSliderTicks();
+	applyEffectivePlaybackVolume();
 	// Active join run may change with selection — rebuild sequence timeline
 	syncSequenceModeState();
 	if (typeof window.refreshSidebarPlaylist === "function") {

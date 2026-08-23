@@ -447,6 +447,33 @@ body.cinema-mode #toastContainer {
 	min-width: 5rem;
 }
 
+/* Detailed timeline: vertical fader for active clip gain */
+.timeline-clip-volume-col {
+	user-select: none;
+}
+
+.timeline-vertical-fader {
+	-webkit-appearance: slider-vertical;
+	appearance: slider-vertical;
+	writing-mode: bt-lr;
+	width: 14px !important;
+	height: 100px !important;
+	min-height: 80px;
+	max-height: 110px;
+	padding: 0;
+	margin: 0 auto;
+	cursor: pointer;
+}
+
+/* WebKit vertical slider fallback if appearance: slider-vertical is not supported */
+@supports not (-webkit-appearance: slider-vertical) {
+	.timeline-vertical-fader {
+		transform: rotate(-90deg);
+		width: 100px !important;
+		height: 14px !important;
+	}
+}
+
 .sequence-av-pair {
 	display: flex;
 	flex-direction: column;
