@@ -134,13 +134,6 @@ const DOM = {
 	settingsBackdrop: document.getElementById("settingsBackdrop"),
 	settingsPanel: document.getElementById("settingsPanel"),
 	closeSettingsBtn: document.getElementById("closeSettingsBtn"),
-
-	// Timeline Clip Volume Elements
-	timelineClipMuteBtn: document.getElementById("timelineClipMuteBtn"),
-	timelineClipVolOnIcon: document.getElementById("timelineClipVolOnIcon"),
-	timelineClipVolOffIcon: document.getElementById("timelineClipVolOffIcon"),
-	timelineClipGainSlider: document.getElementById("timelineClipGainSlider"),
-	timelineClipGainValue: document.getElementById("timelineClipGainValue"),
 };
 
 const saveLocalState = () => {

@@ -499,59 +499,28 @@
           </div>
         </div>
         <div id="non-linear-sequencer" class="relative min-h-0 flex flex-col">
-          <div class="flex flex-row items-stretch min-h-0 flex-1 gap-2">
-            <!-- Fixed Left Column: Clip Volume / Gain Stack -->
-            <div id="timeline-clip-volume-column"
-              class="timeline-clip-volume-col flex flex-col items-center justify-between shrink-0 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded p-1.5 box-border"
-              style="width: 32px;" title="Clip volume">
-              <button type="button" id="timelineClipMuteBtn"
-                class="btn-icon p-1 w-6 h-6 flex items-center justify-center text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 rounded"
-                title="Clip Mute/Unmute" aria-label="Clip Mute/Unmute">
-                <svg id="timelineClipVolOnIcon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
-                  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
-                </svg>
-                <svg id="timelineClipVolOffIcon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
-                  fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                  class="hidden text-red-500">
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-                  <line x1="23" y1="9" x2="17" y2="15"></line>
-                  <line x1="17" y1="9" x2="23" y2="15"></line>
-                </svg>
-              </button>
-              <div class="flex-1 flex items-center justify-center py-1 w-full relative">
-                <input type="range" id="timelineClipGainSlider" min="0" max="1" step="0.01" value="1"
-                  class="timeline-vertical-fader form-range" aria-label="Clip volume" title="Clip volume" />
+          <!-- Single H-scroll parent so ruler, tracks, markers, playhead share px-per-second -->
+          <div id="timeline-h-scroll" class="timeline-h-scroll min-h-0 flex-1">
+            <div id="timeline-zoom-content" class="timeline-zoom-content relative">
+              <div id="timeline-marker-overlay" class="absolute inset-0 pointer-events-none z-20"></div>
+
+              <div id="timeline-ruler-track"
+                class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700"
+                style="height: 24px; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-family: monospace; border-bottom: 1px solid; margin-bottom: 8px; border-radius: 4px; flex-shrink: 0; box-sizing: border-box;">
+                0:00:00 / Sequence Time Tracks Placeholder
               </div>
-              <span id="timelineClipGainValue"
-                class="text-[9px] font-mono tabular-nums text-zinc-500 dark:text-zinc-400 text-center leading-none select-none">100</span>
-            </div>
 
-            <!-- Single H-scroll parent so ruler, tracks, markers, playhead share px-per-second -->
-            <div id="timeline-h-scroll" class="timeline-h-scroll min-h-0 flex-1">
-              <div id="timeline-zoom-content" class="timeline-zoom-content relative">
-                <div id="timeline-marker-overlay" class="absolute inset-0 pointer-events-none z-20"></div>
-
-                <div id="timeline-ruler-track"
-                  class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700"
-                  style="height: 24px; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-family: monospace; border-bottom: 1px solid; margin-bottom: 8px; border-radius: 4px; flex-shrink: 0; box-sizing: border-box;">
-                  0:00:00 / Sequence Time Tracks Placeholder
+              <div id="timeline-tracks-host" class="flex flex-col gap-2 min-h-0 flex-1">
+                <div id="timeline-video-track"
+                  class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed"
+                  style="height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;">
+                  Video Filmstrip Strip Track Frame Housing
                 </div>
 
-                <div id="timeline-tracks-host" class="flex flex-col gap-2 min-h-0 flex-1">
-                  <div id="timeline-video-track"
-                    class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed"
-                    style="height: 64px; width: 100%; position: relative; overflow: hidden; display: flex; align-items: stretch; justify-content: flex-start; box-sizing: border-box; font-size: 12px; border-radius: 4px;">
-                    Video Filmstrip Strip Track Frame Housing
-                  </div>
-
-                  <div id="timeline-audio-track"
-                    class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed"
-                    style="height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;">
-                    Linear Amplitude Peak Canvas Element
-                  </div>
+                <div id="timeline-audio-track"
+                  class="w-full bg-white dark:bg-zinc-800 text-zinc-700 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700 border-dashed"
+                  style="height: 40px; position: relative; display: flex; align-items: center; justify-content: center; font-size: 12px; border-radius: 4px;">
+                  Linear Amplitude Peak Canvas Element
                 </div>
               </div>
             </div>
