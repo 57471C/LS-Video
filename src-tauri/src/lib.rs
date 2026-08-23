@@ -611,9 +611,19 @@ struct VideoSegment {
     /// When empty / all rate≈1, treated as a normal trim.
     #[serde(default, alias = "speedRanges")]
     speed_ranges: Option<Vec<SpeedRange>>,
+    /// Optional per-segment clip gain (0.0–1.0+). Default 1.0. Master monitor volume is never passed here.
+    #[serde(default = "default_segment_volume", alias = "volumeLevel")]
+    volume: Option<f32>,
+    /// Optional per-segment clip mute. Default false.
+    #[serde(default, alias = "volumeMuted")]
+    muted: Option<bool>,
     /// True when this segment is audio-only (no video stream / audio export path).
     #[serde(default, alias = "audioOnly")]
     audio_only: Option<bool>,
+}
+
+fn default_segment_volume() -> Option<f32> {
+    Some(1.0)
 }
 
 fn is_audio_only_path(path: &str) -> bool {
@@ -1214,6 +1224,11 @@ async fn export_queue_job(
                 .iter()
                 .map(|sr| speed_output_duration(sr.end - sr.start, sr.rate))
                 .sum();
+            let seg_volume = segment.volume.unwrap_or(1.0).max(0.0);
+            let seg_muted = segment.muted.unwrap_or(false) || seg_volume < 0.001;
+            let effective_strip_audio = strip_audio || seg_muted;
+            let has_volume_change = !effective_strip_audio && (seg_volume - 1.0).abs() > 0.01;
+
             // Fades apply on OUTPUT timeline after speed (correct export length first)
             let has_fades = fade_in > 0.001 || fade_out > 0.001;
             let (fade_vf_full, fade_af) =
@@ -1252,25 +1267,24 @@ async fn export_queue_job(
                     aargs.push(seg_dur.to_string());
                 }
                 aargs.push("-vn".into());
+                let mut af_parts: Vec<String> = Vec::new();
                 if let Some(ref af) = fade_af {
-                    aargs.push("-af".into());
-                    aargs.push(af.clone());
-                } else if has_variable_speed {
-                    // atempo only (no video setpts)
-                    let mut af_parts: Vec<String> = Vec::new();
-                    // Simple: if single non-1 rate, apply atempo; multi-rate audio is rare
-                    if speed_ranges.len() == 1 {
-                        let rate = speed_ranges[0].rate.clamp(SPEED_RATE_MIN, SPEED_RATE_MAX);
-                        if (rate - 1.0).abs() > 0.01 {
-                            af_parts.push(build_atempo_filter(rate));
-                        }
-                    }
-                    if !af_parts.is_empty() {
-                        aargs.push("-af".into());
-                        aargs.push(af_parts.join(","));
+                    af_parts.push(af.clone());
+                }
+                if has_variable_speed && speed_ranges.len() == 1 {
+                    let rate = speed_ranges[0].rate.clamp(SPEED_RATE_MIN, SPEED_RATE_MAX);
+                    if (rate - 1.0).abs() > 0.01 {
+                        af_parts.push(build_atempo_filter(rate));
                     }
                 }
-                if prefer_copy && !has_fades && !has_variable_speed {
+                if has_volume_change {
+                    af_parts.push(format!("volume={:.4}", seg_volume));
+                }
+                if !af_parts.is_empty() {
+                    aargs.push("-af".into());
+                    aargs.push(af_parts.join(","));
+                }
+                if prefer_copy && !has_fades && !has_variable_speed && !has_volume_change {
                     aargs.extend(["-c:a".into(), "copy".into()]);
                 } else {
                     aargs.extend([
@@ -1304,13 +1318,14 @@ async fn export_queue_job(
                 }
             }
 
-            // Stream copy only when no soft fades and no speed changes
+            // Stream copy only when no soft fades, no speed changes, and no volume modifications
             if !audio_only
                 && !has_fades
                 && !has_variable_speed
+                && !has_volume_change
                 && is_full
                 && prefer_copy
-                && !strip_audio
+                && !effective_strip_audio
             {
                 cleaned_paths.push(segment.path.clone());
                 made = true;
@@ -1319,7 +1334,7 @@ async fn export_queue_job(
                 && !has_variable_speed
                 && is_full
                 && prefer_copy
-                && strip_audio
+                && effective_strip_audio
             {
                 // Full file, strip audio only
                 let args = vec![
@@ -1397,18 +1412,20 @@ async fn export_queue_job(
                             "-preset".into(),
                             preset.into(),
                         ]);
-                        if strip_audio {
+                        if effective_strip_audio {
                             rargs.push("-an".into());
-                        } else if (rate - 1.0).abs() > 0.01 {
-                            rargs.push("-af".into());
-                            rargs.push(build_atempo_filter(rate));
-                            rargs.extend([
-                                "-c:a".into(),
-                                "aac".into(),
-                                "-b:a".into(),
-                                "128k".into(),
-                            ]);
                         } else {
+                            let mut af_parts: Vec<String> = Vec::new();
+                            if (rate - 1.0).abs() > 0.01 {
+                                af_parts.push(build_atempo_filter(rate));
+                            }
+                            if has_volume_change {
+                                af_parts.push(format!("volume={:.4}", seg_volume));
+                            }
+                            if !af_parts.is_empty() {
+                                rargs.push("-af".into());
+                                rargs.push(af_parts.join(","));
+                            }
                             rargs.extend([
                                 "-c:a".into(),
                                 "aac".into(),
@@ -1490,13 +1507,13 @@ async fn export_queue_job(
                         for (pi, p) in speed_temps.iter().enumerate() {
                             cargs.push("-i".into());
                             cargs.push(p.to_string_lossy().to_string());
-                            if strip_audio {
+                            if effective_strip_audio {
                                 fc.push_str(&format!("[{}:v]", pi));
                             } else {
                                 fc.push_str(&format!("[{}:v][{}:a]", pi, pi));
                             }
                         }
-                        if strip_audio {
+                        if effective_strip_audio {
                             fc.push_str(&format!("concat=n={}:v=1:a=0[v]", n));
                         } else {
                             fc.push_str(&format!("concat=n={}:v=1:a=1[v][a]", n));
@@ -1505,7 +1522,7 @@ async fn export_queue_job(
                         cargs.push(fc);
                         cargs.push("-map".into());
                         cargs.push("[v]".into());
-                        if !strip_audio {
+                        if !effective_strip_audio {
                             cargs.push("-map".into());
                             cargs.push("[a]".into());
                         }
@@ -1519,7 +1536,7 @@ async fn export_queue_job(
                             "-preset".into(),
                             preset.into(),
                         ]);
-                        if strip_audio {
+                        if effective_strip_audio {
                             cargs.push("-an".into());
                         } else {
                             cargs.extend([
@@ -1574,7 +1591,7 @@ async fn export_queue_job(
                             "-preset".into(),
                             preset.into(),
                         ]);
-                        if strip_audio {
+                        if effective_strip_audio {
                             fargs.push("-an".into());
                         } else if let Some(ref af) = fade_af {
                             fargs.push("-af".into());
@@ -1652,11 +1669,11 @@ async fn export_queue_job(
                     args.push(seg_dur.to_string());
                 }
 
-                // Stream copy only when no fades / no speed
-                if prefer_copy && !has_fades && !has_variable_speed {
+                // Stream copy only when no fades, no speed, and no volume modifications
+                if prefer_copy && !has_fades && !has_variable_speed && !has_volume_change {
                     args.push("-c".into());
                     args.push("copy".into());
-                    if strip_audio {
+                    if effective_strip_audio {
                         args.push("-an".into());
                     }
                     args.push(temp_out_str.clone());
@@ -1676,7 +1693,7 @@ async fn export_queue_job(
                 }
 
                 if !made {
-                    // Reencode (HEVC / keyframe / mixed containers / soft fades)
+                    // Reencode (HEVC / keyframe / mixed containers / soft fades / volume adjustments)
                     let mut rargs: Vec<String> = vec!["-y".into()];
                     if start > 0.001 {
                         rargs.push("-ss".into());
@@ -1702,13 +1719,20 @@ async fn export_queue_job(
                         "-preset".into(),
                         preset.into(),
                     ]);
-                    if strip_audio {
+                    if effective_strip_audio {
                         rargs.push("-an".into());
-                    } else if let Some(ref af) = fade_af {
-                        rargs.push("-af".into());
-                        rargs.push(af.clone());
-                        rargs.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
                     } else {
+                        let mut af_parts: Vec<String> = Vec::new();
+                        if let Some(ref af) = fade_af {
+                            af_parts.push(af.clone());
+                        }
+                        if has_volume_change {
+                            af_parts.push(format!("volume={:.4}", seg_volume));
+                        }
+                        if !af_parts.is_empty() {
+                            rargs.push("-af".into());
+                            rargs.push(af_parts.join(","));
+                        }
                         rargs.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
                     }
                     rargs.push(temp_out_str.clone());
@@ -1750,12 +1774,16 @@ async fn export_queue_job(
         // --- Step 2: single clip → copy/move to output; multi → concat ---
         if cleaned_paths.len() == 1 {
             let src = &cleaned_paths[0];
-            let single_audio = video_segments[0].audio_only.unwrap_or(false)
-                || is_audio_only_path(&video_segments[0].path);
+            let seg0 = &video_segments[0];
+            let seg0_volume = seg0.volume.unwrap_or(1.0).max(0.0);
+            let seg0_muted = seg0.muted.unwrap_or(false) || seg0_volume < 0.001;
+            let effective_strip_audio = strip_audio || seg0_muted;
+            let single_audio = seg0.audio_only.unwrap_or(false)
+                || is_audio_only_path(&seg0.path);
             // If source is original full file, re-mux/copy to output path
-            if Path::new(src) == Path::new(&video_segments[0].path)
+            if Path::new(src) == Path::new(&seg0.path)
                 || !prefer_copy
-                || strip_audio
+                || effective_strip_audio
             {
                 // Ensure final quality at destination
                 let mut args: Vec<String> = vec![
@@ -1775,9 +1803,9 @@ async fn export_queue_job(
                             "192k".into(),
                         ]);
                     }
-                } else if prefer_copy && !strip_audio {
+                } else if prefer_copy && !effective_strip_audio {
                     args.extend(["-c".into(), "copy".into()]);
-                } else if prefer_copy && strip_audio {
+                } else if prefer_copy && effective_strip_audio {
                     args.extend(["-c:v".into(), "copy".into(), "-an".into()]);
                 } else {
                     args.extend([
@@ -1790,7 +1818,7 @@ async fn export_queue_job(
                         "-preset".into(),
                         preset.into(),
                     ]);
-                    if strip_audio {
+                    if effective_strip_audio {
                         args.push("-an".into());
                     } else {
                         args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "128k".into()]);
