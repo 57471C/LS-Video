@@ -175,7 +175,7 @@
           </svg>
           <span class="hidden md:inline">Package</span>
         </button>
-        <input type="file" id="projectFileInput" accept=".lsv,.lsvz,.tmv,.tmvz" style="display: none" />
+        <input type="file" id="projectFileInput" class="lsv-hidden-file-input" accept=".lsv,.lsvz,.tmv,.tmvz" tabindex="-1" aria-hidden="true" />
       </div>
 
       <button type="button" id="darkModeToggle"
@@ -461,7 +461,7 @@
         </div>
 
 
-        <input type="file" id="videoFileInput" accept="video/*,audio/*" style="display: none" />
+        <input type="file" id="videoFileInput" class="lsv-hidden-file-input" accept="video/*,audio/*" tabindex="-1" aria-hidden="true" />
       </div>
 
       <!-- Right Column: Controls -->

@@ -1006,3 +1006,22 @@ html.dark .sequence-fade-zone-out {
 	min-width: 0;
 	height: 100%;
 }
+
+/* Hidden file inputs — WKWebView still paints "Choose File / no file selected"
+   for type=file with only display:none. Keep them in the DOM for .click() but
+   fully clip out of layout and a11y. */
+.lsv-hidden-file-input,
+input[type="file"].lsv-hidden-file-input {
+	position: absolute !important;
+	width: 1px !important;
+	height: 1px !important;
+	padding: 0 !important;
+	margin: -1px !important;
+	overflow: hidden !important;
+	clip: rect(0, 0, 0, 0) !important;
+	clip-path: inset(50%) !important;
+	border: 0 !important;
+	opacity: 0 !important;
+	pointer-events: none !important;
+	white-space: nowrap !important;
+}
