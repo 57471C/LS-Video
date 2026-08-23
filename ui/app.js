@@ -780,7 +780,7 @@ window.getActiveSpeedTimelineModel = () => {
 		typeof markers !== "undefined" && Array.isArray(markers)
 			? markers
 			: video?.appState?.markers || [];
-	const p = (typeof player !== "undefined" && player) || window.player || null;
+	const p = window.player || document.getElementById("my_video") || null;
 	// Real clip window (for grey shading / fades only — not timeline length)
 	const clipIn =
 		typeof getClipInTime === "function"
@@ -1277,7 +1277,7 @@ window.refreshClipFadeTimelineZones = () => {
 			: null;
 	const inT = model?.clipIn ?? (Number(video?.clipInTime) || 0);
 	let outT = model?.clipOut ?? (Number(video?.clipOutTime) || 0);
-	const p = (typeof player !== "undefined" && player) || window.player || null;
+	const p = window.player || document.getElementById("my_video") || null;
 	if (outT <= inT && p?.duration) outT = p.duration;
 
 	if (getComputedStyle(videoTrack).position === "static") {
@@ -1927,7 +1927,7 @@ window.seekSequenceTime = seekSequenceTime;
 /**
  * Advance playhead across joined segments seamlessly (called on 'ended' or boundary hit).
  */
-const onSequenceSegmentEnded = async () => {
+const handoffToNextJoinedClip = async () => {
 	if (!isSequenceMode()) return;
 	const run = getActiveJoinRun();
 	if (!run?.segments) return;
