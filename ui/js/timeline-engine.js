@@ -133,10 +133,35 @@ const applyTimelineZoomLayout = (opts = {}) => {
 	return z;
 };
 
+const TIMELINE_ZOOM_SETTLE_MS = 400;
+
+/**
+ * Schedule deferred filmstrip/waveform regeneration after zoom settles.
+ */
+const scheduleTimelineZoomSettle = () => {
+	if (window._timelineZoomRegenTimer) {
+		clearTimeout(window._timelineZoomRegenTimer);
+	}
+	window._timelineZoomRegenTimer = setTimeout(() => {
+		window._timelineZoomRegenTimer = null;
+		if (typeof window.loadWaveformTimeline === "function") {
+			window.loadWaveformTimeline();
+		} else {
+			const dur = getTimelineDuration();
+			if (dur > 0) {
+				paintTimelineRuler(dur);
+				if (typeof window.paintTimelineMarkersAndShading === "function") {
+					window.paintTimelineMarkersAndShading();
+				}
+			}
+		}
+	}, TIMELINE_ZOOM_SETTLE_MS);
+};
+
 /**
  * Set zoom factor from UI.
  * @param {number} factor
- * @param {{ fromUser?: boolean, regenerate?: boolean }} [opts]
+ * @param {{ fromUser?: boolean, settle?: boolean, forceSettle?: boolean }} [opts]
  */
 const setTimelineZoom = (factor, opts = {}) => {
 	const z = window._timelineZoom;
@@ -144,6 +169,7 @@ const setTimelineZoom = (factor, opts = {}) => {
 		TIMELINE_ZOOM_MAX,
 		Math.max(TIMELINE_ZOOM_MIN, Number(factor) || 1),
 	);
+	const factorChanged = Math.abs((z.factor || 1) - next) > 0.001;
 	z.factor = next;
 	if (opts.fromUser !== false) {
 		z.userOverride = next > 1.001;
@@ -151,23 +177,8 @@ const setTimelineZoom = (factor, opts = {}) => {
 	if (next <= 1.001) z.userOverride = false;
 	applyTimelineZoomLayout();
 
-	if (opts.regenerate === true) {
-		// Debounce expensive filmstrip/waveform rebuilds only when explicitly requested
-		if (window._timelineZoomRegenTimer) {
-			clearTimeout(window._timelineZoomRegenTimer);
-		}
-		window._timelineZoomRegenTimer = setTimeout(() => {
-			window._timelineZoomRegenTimer = null;
-			if (typeof window.loadWaveformTimeline === "function") {
-				window.loadWaveformTimeline();
-			} else {
-				const dur = getTimelineDuration();
-				paintTimelineRuler(dur);
-				if (typeof window.paintTimelineMarkersAndShading === "function") {
-					window.paintTimelineMarkersAndShading();
-				}
-			}
-		}, 180);
+	if (opts.settle !== false && (factorChanged || opts.forceSettle)) {
+		scheduleTimelineZoomSettle();
 	}
 	return z;
 };
@@ -175,7 +186,8 @@ const setTimelineZoom = (factor, opts = {}) => {
 const resetTimelineZoomToFit = (opts = {}) => {
 	setTimelineZoom(TIMELINE_ZOOM_MIN, {
 		fromUser: false,
-		regenerate: opts.regenerate === true,
+		settle: opts.settle !== false,
+		forceSettle: true,
 	});
 };
 
@@ -1268,27 +1280,16 @@ const initTimelineZoomControls = () => {
 	if (!slider) return;
 	window._timelineZoomControlsBound = true;
 
-	const applyFromSlider = (fromUser) => {
-		const v = Number.parseFloat(slider.value);
-		setTimelineZoom(v, { fromUser: !!fromUser, regenerate: false });
+	const applyFromSlider = (fromUser, forceSettle = false) => {
+		const v = Number.parseFloat(slider.value) || 1;
+		setTimelineZoom(v, { fromUser: !!fromUser, forceSettle });
 	};
 
 	slider.addEventListener("input", () => {
-		// Live layout (width) without waiting for regen
-		window._timelineZoom.factor = Number.parseFloat(slider.value) || 1;
-		if (window._timelineZoom.factor > 1.001) {
-			window._timelineZoom.userOverride = true;
-		} else {
-			window._timelineZoom.userOverride = false;
-		}
-		applyTimelineZoomLayout();
-		const label = document.getElementById("timelineZoomLabel");
-		const f = window._timelineZoom.factor;
-		if (label) {
-			label.textContent = f <= 1.001 ? "Fit" : `${f.toFixed(f >= 2 ? 1 : 2)}×`;
-		}
+		// Live layout (width) immediately; schedules deferred background regen after settle
+		applyFromSlider(true, false);
 	});
-	slider.addEventListener("change", () => applyFromSlider(true));
+	slider.addEventListener("change", () => applyFromSlider(true, true));
 	slider.addEventListener("dblclick", (e) => {
 		e.preventDefault();
 		resetTimelineZoomToFit();
@@ -1300,7 +1301,6 @@ const initTimelineZoomControls = () => {
 			const cur = window._timelineZoom.factor || 1;
 			setTimelineZoom(Math.min(TIMELINE_ZOOM_MAX, cur + 0.25), {
 				fromUser: true,
-				regenerate: false,
 			});
 		});
 	document
@@ -1309,7 +1309,6 @@ const initTimelineZoomControls = () => {
 			const cur = window._timelineZoom.factor || 1;
 			setTimelineZoom(Math.max(TIMELINE_ZOOM_MIN, cur - 0.25), {
 				fromUser: true,
-				regenerate: false,
 			});
 		});
 	document

@@ -3413,10 +3413,58 @@ const ensureSequenceTrackRows = (segmentCount) => {
 	const host = document.getElementById("timeline-tracks-host");
 	if (!host) return [];
 
+	const run = typeof getActiveJoinRun === "function" ? getActiveJoinRun() : null;
+	const existingPairs = host.querySelectorAll(":scope > .sequence-av-pair");
+
+	let canReuse = existingPairs.length === segmentCount;
+	if (canReuse) {
+		for (let i = 0; i < segmentCount; i += 1) {
+			const targetQIdx =
+				run?.segments?.[i]?.queueIndex !== undefined
+					? run.segments[i].queueIndex
+					: typeof activeQueueIndex === "number"
+						? activeQueueIndex
+						: i;
+			if (
+				existingPairs[i].dataset.segmentIndex !== String(i) ||
+				existingPairs[i].dataset.queueIndex !== String(targetQIdx)
+			) {
+				canReuse = false;
+				break;
+			}
+		}
+	}
+
+	if (canReuse) {
+		const rows = [];
+		for (let i = 0; i < segmentCount; i += 1) {
+			const pair = existingPairs[i];
+			const targetQIdx = Number(pair.dataset.queueIndex);
+			const videoTrack =
+				i === 0
+					? document.getElementById("timeline-video-track") ||
+						pair.querySelector(".sequence-video-track")
+					: pair.querySelector(".sequence-video-track");
+			const audioTrack =
+				i === 0
+					? document.getElementById("timeline-audio-track") ||
+						pair.querySelector(".sequence-audio-track")
+					: pair.querySelector(".sequence-audio-track");
+			const faderGutter = pair.querySelector(".timeline-clip-fader-gutter");
+			rows.push({
+				videoTrack,
+				audioTrack,
+				pair,
+				faderGutter,
+				segmentIndex: i,
+				queueIndex: targetQIdx,
+			});
+		}
+		return rows;
+	}
+
 	host.innerHTML = "";
 	const rows = [];
-
-	const run = typeof getActiveJoinRun === "function" ? getActiveJoinRun() : null;
 
 	for (let i = 0; i < segmentCount; i += 1) {
 		const targetQIdx =
@@ -3728,6 +3776,21 @@ const applySegmentWindow = (trackEl, seg, totalDuration) => {
 	const tailFrac =
 		mediaDur > 0 ? Math.max(0, (mediaDur - clipOut) / mediaDur) : 0;
 
+	// Reuse existing shell & content if geometry matches (e.g. during zoom settle) to avoid blanking tiles
+	const existingShell = trackEl.querySelector(".sequence-media-shell");
+	const existingContent = existingShell?.querySelector(".sequence-media-content");
+	if (
+		existingShell &&
+		existingContent &&
+		existingShell.dataset.queueIndex === String(seg.queueIndex) &&
+		Math.abs(Number.parseFloat(existingShell.dataset.leftPct || "0") - fullLeftPct) < 0.001 &&
+		Math.abs(Number.parseFloat(existingShell.dataset.widthPct || "0") - fullWidthPct) < 0.001 &&
+		Math.abs(Number.parseFloat(existingShell.dataset.clipIn || "0") - clipIn) < 0.001 &&
+		Math.abs(Number.parseFloat(existingShell.dataset.clipOut || "0") - clipOut) < 0.001
+	) {
+		return existingContent;
+	}
+
 	// Outer track = full-width sequence spine (click target for seek)
 	trackEl.style.position = "relative";
 	trackEl.style.width = "100%";
@@ -3955,7 +4018,7 @@ window.loadWaveformTimeline = async () => {
 				return;
 			}
 
-			if (videoTrack) {
+			if (videoTrack && videoTrack.children.length === 0) {
 				videoTrack.textContent = "Developing Video Filmstrip Tracks...";
 				videoTrack.style.width = "100%";
 				videoTrack.style.display = "flex";
@@ -4136,7 +4199,7 @@ window.loadWaveformTimeline = async () => {
 					return;
 				}
 
-				if (videoFill) {
+				if (videoFill && videoFill.children.length === 0) {
 					videoFill.textContent = "…";
 					videoFill.style.display = "flex";
 					videoFill.style.alignItems = "center";
