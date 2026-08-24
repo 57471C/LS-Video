@@ -5133,8 +5133,19 @@ const initializePlayer = () => {
 		// Render markers table shell (incl. #markersTableFoot) before filling the footer
 		if (typeof updateMarkersList === "function") updateMarkersList();
 		if (typeof updateVideoTimeSummary === "function") updateVideoTimeSummary();
-		// Clip bounds may affect join segment offsets — rebuild multi layout
-		if (multi && typeof scheduleJoinTimelineRebuild === "function") {
+		// Soft handoff / sequence continue / audio file / hard load
+		const isSoftHandoffLoad =
+			!!window._softHandoffVolumeActive ||
+			!!window._sequenceHandoffInProgress ||
+			!!window._sequenceContinuePlay ||
+			!!window._skipNextTimelineBoot;
+
+		// Clip bounds may affect join segment offsets — rebuild multi layout on hard load
+		if (
+			multi &&
+			!isSoftHandoffLoad &&
+			typeof scheduleJoinTimelineRebuild === "function"
+		) {
 			scheduleJoinTimelineRebuild();
 		}
 
@@ -5142,12 +5153,6 @@ const initializePlayer = () => {
 		speedSlider.value = playbackSpeed;
 		DOM.speedValue.textContent = `${playbackSpeed.toFixed(1)}x`;
 		toConsole("Playback speed restored", playbackSpeed, debuggin);
-
-		// Soft handoff / sequence continue / audio file / hard load
-		const isSoftHandoffLoad =
-			!!window._softHandoffVolumeActive ||
-			!!window._sequenceHandoffInProgress ||
-			!!window._sequenceContinuePlay;
 
 		if (!isSoftHandoffLoad && !isAudioOnlyMedia(videoFilePath || videoFileName)) {
 			// Video files default to muted on initial hard load (existing UX)

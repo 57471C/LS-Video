@@ -2300,6 +2300,14 @@ fn save_vtt_file(video_path: String, vtt_text: String) -> Result<String, String>
     Ok(vtt_path.to_string_lossy().into_owned())
 }
 
+static VERIFY_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
+
+fn get_verify_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    VERIFY_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Remove the app-cache proxy file for a source path (same hash as verify_and_prepare_video).
 /// No-op if no proxy exists. Does not delete the original source media.
 #[tauri::command]
@@ -2313,6 +2321,10 @@ async fn delete_proxy_for_video(
 
     if video_path.trim().is_empty() {
         return Ok(false);
+    }
+
+    if let Ok(mut cache) = get_verify_cache().lock() {
+        cache.remove(&video_path);
     }
 
     let mut hasher = DefaultHasher::new();
@@ -2375,6 +2387,15 @@ async fn verify_and_prepare_video(
         return Err("Target media file path does not exist on disk".to_string());
     }
 
+    // Fast-path: Check process-lifetime in-memory probe cache
+    if let Ok(cache) = get_verify_cache().lock() {
+        if let Some(cached_result) = cache.get(&video_path) {
+            if Path::new(cached_result).exists() {
+                return Ok(cached_result.clone());
+            }
+        }
+    }
+
     // 2. Extension Validation: Whitelist valid media containers to drop script text-manifest entries (.vtt, .m3u8)
     let ext = if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         let normalized_ext = ext.to_lowercase();
@@ -2401,6 +2422,9 @@ async fn verify_and_prepare_video(
             "[Proxy Backend] Audio file detected ({}); skipping video proxy pipeline.",
             ext
         );
+        if let Ok(mut cache) = get_verify_cache().lock() {
+            cache.insert(video_path.clone(), video_path.clone());
+        }
         return Ok(video_path);
     }
 
@@ -2506,6 +2530,9 @@ async fn verify_and_prepare_video(
             "[Proxy Backend] Target container '.{}' and video codec are compatible for direct playback. Returning original path; no proxy.",
             ext
         );
+        if let Ok(mut cache) = get_verify_cache().lock() {
+            cache.insert(video_path.clone(), video_path.clone());
+        }
         return Ok(video_path);
     }
 
@@ -2645,10 +2672,16 @@ async fn verify_and_prepare_video(
         "[Proxy Core] Returning sanitized proxy path to frontend: {}",
         clean_proxy_path
     );
+    if let Ok(mut cache) = get_verify_cache().lock() {
+        cache.insert(video_path, clean_proxy_path.clone());
+    }
     Ok(clean_proxy_path)
 }
 
 async fn clear_old_proxy_caches(app_handle: tauri::AppHandle) -> std::io::Result<()> {
+    if let Ok(mut cache) = get_verify_cache().lock() {
+        cache.clear();
+    }
     if let Ok(cache_dir) = app_handle.path().app_cache_dir() {
         if let Ok(mut entries) = tokio::fs::read_dir(cache_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
