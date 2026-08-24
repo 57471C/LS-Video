@@ -14,6 +14,17 @@
  * @param {string} filePath
  * @returns {string}
  */
+const isDebugPaths = () => {
+	try {
+		return (
+			localStorage.getItem("lsvideo_debug_paths") === "1" ||
+			Boolean(window.__LSVIDEO_DEBUG_PATHS__)
+		);
+	} catch {
+		return false;
+	}
+};
+
 export function pathToAssetUrl(filePath) {
 	if (!filePath || typeof filePath !== "string") return filePath;
 	if (!window.__TAURI__) return filePath;
@@ -26,12 +37,14 @@ export function pathToAssetUrl(filePath) {
 
 	// Unix (macOS/Linux): never trust convertFileSrc for path encoding.
 	if (!isWin) {
-		console.info(
-			"[pathToAssetUrl] unix → encodeURIComponent",
-			filePath,
-			"→",
-			manual,
-		);
+		if (isDebugPaths()) {
+			console.info(
+				"[pathToAssetUrl] unix → encodeURIComponent",
+				filePath,
+				"→",
+				manual,
+			);
+		}
 		return manual;
 	}
 
@@ -39,14 +52,18 @@ export function pathToAssetUrl(filePath) {
 		window.__TAURI__.core?.convertFileSrc ||
 		window.__TAURI__.tauri?.convertFileSrc;
 	if (typeof convertFn !== "function") {
-		console.info("[pathToAssetUrl] win → manual (no convertFileSrc)", manual);
+		if (isDebugPaths()) {
+			console.info("[pathToAssetUrl] win → manual (no convertFileSrc)", manual);
+		}
 		return manual;
 	}
 
 	try {
 		const native = convertFn(filePath);
 		if (typeof native !== "string" || !native) {
-			console.info("[pathToAssetUrl] win → manual (empty native)", manual);
+			if (isDebugPaths()) {
+				console.info("[pathToAssetUrl] win → manual (empty native)", manual);
+			}
 			return manual;
 		}
 		// Safety net if Windows ever emits the Mac-style %6F bug

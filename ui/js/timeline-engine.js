@@ -151,8 +151,8 @@ const setTimelineZoom = (factor, opts = {}) => {
 	if (next <= 1.001) z.userOverride = false;
 	applyTimelineZoomLayout();
 
-	if (opts.regenerate !== false) {
-		// Debounce expensive filmstrip/waveform rebuilds
+	if (opts.regenerate === true) {
+		// Debounce expensive filmstrip/waveform rebuilds only when explicitly requested
 		if (window._timelineZoomRegenTimer) {
 			clearTimeout(window._timelineZoomRegenTimer);
 		}
@@ -172,8 +172,11 @@ const setTimelineZoom = (factor, opts = {}) => {
 	return z;
 };
 
-const resetTimelineZoomToFit = () => {
-	setTimelineZoom(TIMELINE_ZOOM_MIN, { fromUser: false, regenerate: true });
+const resetTimelineZoomToFit = (opts = {}) => {
+	setTimelineZoom(TIMELINE_ZOOM_MIN, {
+		fromUser: false,
+		regenerate: opts.regenerate === true,
+	});
 };
 
 /**
@@ -1267,7 +1270,7 @@ const initTimelineZoomControls = () => {
 
 	const applyFromSlider = (fromUser) => {
 		const v = Number.parseFloat(slider.value);
-		setTimelineZoom(v, { fromUser: !!fromUser, regenerate: true });
+		setTimelineZoom(v, { fromUser: !!fromUser, regenerate: false });
 	};
 
 	slider.addEventListener("input", () => {
@@ -1297,7 +1300,7 @@ const initTimelineZoomControls = () => {
 			const cur = window._timelineZoom.factor || 1;
 			setTimelineZoom(Math.min(TIMELINE_ZOOM_MAX, cur + 0.25), {
 				fromUser: true,
-				regenerate: true,
+				regenerate: false,
 			});
 		});
 	document
@@ -1306,7 +1309,7 @@ const initTimelineZoomControls = () => {
 			const cur = window._timelineZoom.factor || 1;
 			setTimelineZoom(Math.max(TIMELINE_ZOOM_MIN, cur - 0.25), {
 				fromUser: true,
-				regenerate: true,
+				regenerate: false,
 			});
 		});
 	document
@@ -1340,7 +1343,7 @@ const initTimelineZoomControls = () => {
 			resizeTimer = setTimeout(() => {
 				const wasFit = !window._timelineZoom.userOverride;
 				applyTimelineZoomLayout({ forceFit: wasFit });
-				// Light re-paint of ruler/markers; debounce heavy regen
+				// Light re-paint of ruler/markers
 				const dur = getTimelineDuration();
 				if (dur > 0) {
 					paintTimelineRuler(dur);
@@ -1348,15 +1351,6 @@ const initTimelineZoomControls = () => {
 						window.paintTimelineMarkersAndShading();
 					}
 				}
-				if (window._timelineZoomRegenTimer) {
-					clearTimeout(window._timelineZoomRegenTimer);
-				}
-				window._timelineZoomRegenTimer = setTimeout(() => {
-					window._timelineZoomRegenTimer = null;
-					if (typeof window.loadWaveformTimeline === "function") {
-						window.loadWaveformTimeline();
-					}
-				}, 250);
 			}, 120);
 		});
 	}
