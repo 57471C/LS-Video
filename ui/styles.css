@@ -32,13 +32,20 @@
 
 /* Lock the root document wrappers to the precise physical boundaries of the screen window */
 html,
-body,
+body {
+	height: 100vh;
+	max-height: 100vh;
+	min-height: 100vh;
+	overflow: hidden;
+	box-sizing: border-box;
+}
+
 .app-master-container {
-	height: 100vh !important;
-	max-height: 100vh !important;
-	min-height: 100vh !important;
-	overflow: hidden !important; /* Completely blocks the entire application from scrolling vertically */
-	box-sizing: border-box !important;
+	flex: 1 1 0%;
+	min-height: 0;
+	overflow-y: auto;
+	overflow-x: hidden;
+	box-sizing: border-box;
 }
 
 /* Standard Light Mode Defaults (Beats the launch style seamlessly) */
@@ -348,13 +355,9 @@ body.cinema-mode #toastContainer {
 		grid-template-rows 0.25s cubic-bezier(0.25, 1, 0.5, 1);
 }
 
-#mainLayoutGrid.timeline-expanded {
-	grid-template-rows: auto 240px;
-}
-
-/* Multi-clip join run needs taller / scrollable detailed timeline */
+#mainLayoutGrid.timeline-expanded,
 #mainLayoutGrid.timeline-expanded.sequence-multi {
-	grid-template-rows: auto min(420px, 42vh);
+	grid-template-rows: auto auto;
 }
 
 #detailed-timeline-panel {
@@ -378,23 +381,26 @@ body.cinema-mode #toastContainer {
 
 .timeline-expanded #detailed-timeline-panel,
 .timeline-expanded .detailed-timeline-wrapper {
-	height: 240px !important;
+	height: auto !important;
+	min-height: 0 !important;
 	max-height: none !important;
 	padding-top: 12px !important;
 	padding-left: 16px !important;
 	padding-right: 16px !important;
-	padding-bottom: 6px !important; /* Tightened up to kill phantom scroll space */
+	padding-bottom: 12px !important;
 	box-sizing: border-box !important;
 	visibility: visible !important;
 	border-top: 1px solid #27272a !important;
 	display: flex !important;
 	flex-direction: column !important;
 	gap: 4px !important;
+	overflow: visible !important;
 }
 
 .timeline-expanded #detailed-timeline-panel.sequence-multi {
-	height: min(420px, 42vh) !important;
-	overflow: hidden !important;
+	height: auto !important;
+	max-height: none !important;
+	overflow: visible !important;
 }
 
 #non-linear-sequencer {

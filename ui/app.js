@@ -2243,6 +2243,10 @@ document.addEventListener("DOMContentLoaded", () => {
 						) {
 							window.loadWaveformTimeline();
 						}
+						const panel = document.getElementById("detailed-timeline-panel");
+						if (panel && typeof panel.scrollIntoView === "function") {
+							panel.scrollIntoView({ block: "nearest" });
+						}
 					});
 				}
 			}
