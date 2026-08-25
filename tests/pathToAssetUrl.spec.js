@@ -118,4 +118,27 @@ describe("pathToAssetUrl", () => {
 		);
 		expect(url).toContain(encodeURIComponent("\\\\ntone"));
 	});
+
+	it("stays quiet by default and logs info only when lsvideo_debug_paths is set", () => {
+		window.__TAURI__ = {};
+		setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+		const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+
+		pathToAssetUrl("/Users/me/quiet.mp4");
+		expect(infoSpy).not.toHaveBeenCalled();
+
+		localStorage.setItem("lsvideo_debug_paths", "1");
+		try {
+			pathToAssetUrl("/Users/me/debug.mp4");
+			expect(infoSpy).toHaveBeenCalledWith(
+				"[pathToAssetUrl] unix → encodeURIComponent",
+				"/Users/me/debug.mp4",
+				"→",
+				"asset://localhost/%2FUsers%2Fme%2Fdebug.mp4",
+			);
+		} finally {
+			localStorage.removeItem("lsvideo_debug_paths");
+			infoSpy.mockRestore();
+		}
+	});
 });
