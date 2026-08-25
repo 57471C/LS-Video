@@ -4602,6 +4602,115 @@ const takeSnapshot = () => {
 	downloadCanvasImage(video, rect);
 };
 
+const MINIPLAYER_DEFAULT_WIDTH = 580;
+const MINIPLAYER_DEFAULT_HEIGHT = 524;
+const MINIPLAYER_MIN_WIDTH = 320;
+const MINIPLAYER_MIN_HEIGHT = 200;
+const MINIPLAYER_STORAGE_KEY_W = "lsvideo_miniplayer_w";
+const MINIPLAYER_STORAGE_KEY_H = "lsvideo_miniplayer_h";
+
+/**
+ * Read saved or default miniplayer size clamped to minimum constraints.
+ * @returns {{ width: number, height: number }}
+ */
+const getSavedMiniplayerSize = () => {
+	let w = Number.parseInt(localStorage.getItem(MINIPLAYER_STORAGE_KEY_W), 10);
+	let h = Number.parseInt(localStorage.getItem(MINIPLAYER_STORAGE_KEY_H), 10);
+	if (!Number.isFinite(w) || w <= 0) {
+		w = MINIPLAYER_DEFAULT_WIDTH;
+	}
+	if (!Number.isFinite(h) || h <= 0) {
+		h = MINIPLAYER_DEFAULT_HEIGHT;
+	}
+	return {
+		width: Math.max(MINIPLAYER_MIN_WIDTH, w),
+		height: Math.max(MINIPLAYER_MIN_HEIGHT, h),
+	};
+};
+
+/**
+ * Persist miniplayer dimensions to localStorage.
+ * @param {number} [w]
+ * @param {number} [h]
+ */
+const saveMiniplayerSize = (w, h) => {
+	const currentW = w !== undefined ? w : window.innerWidth;
+	const currentH = h !== undefined ? h : window.innerHeight;
+	if (Number.isFinite(currentW) && currentW >= MINIPLAYER_MIN_WIDTH) {
+		localStorage.setItem(
+			MINIPLAYER_STORAGE_KEY_W,
+			String(Math.round(currentW)),
+		);
+	}
+	if (Number.isFinite(currentH) && currentH >= MINIPLAYER_MIN_HEIGHT) {
+		localStorage.setItem(
+			MINIPLAYER_STORAGE_KEY_H,
+			String(Math.round(currentH)),
+		);
+	}
+};
+
+/**
+ * Get current logical window dimensions.
+ */
+const getCurrentLogicalWindowSize = async (appWin) => {
+	if (appWin?.innerSize && appWin?.scaleFactor) {
+		try {
+			const phys = await appWin.innerSize();
+			const factor = (await appWin.scaleFactor()) || 1.0;
+			if (phys && phys.width > 0 && phys.height > 0 && factor > 0) {
+				return {
+					width: Math.round(phys.width / factor),
+					height: Math.round(phys.height / factor),
+				};
+			}
+		} catch (e) {
+			// fallback
+		}
+	}
+	return {
+		width: window.innerWidth || MINIPLAYER_DEFAULT_WIDTH,
+		height: window.innerHeight || MINIPLAYER_DEFAULT_HEIGHT,
+	};
+};
+
+let _miniplayerResizeTimer = null;
+const trackMiniplayerResize = () => {
+	if (window.currentViewMode !== "miniplayer") return;
+	if (_miniplayerResizeTimer) clearTimeout(_miniplayerResizeTimer);
+	_miniplayerResizeTimer = setTimeout(async () => {
+		_miniplayerResizeTimer = null;
+		if (window.currentViewMode !== "miniplayer") return;
+		const appWin = window.__TAURI__?.window?.getCurrentWindow?.();
+		const size = await getCurrentLogicalWindowSize(appWin);
+		if (
+			size.width >= MINIPLAYER_MIN_WIDTH &&
+			size.height >= MINIPLAYER_MIN_HEIGHT
+		) {
+			saveMiniplayerSize(size.width, size.height);
+		}
+	}, 250);
+};
+
+window.addEventListener("resize", trackMiniplayerResize);
+
+if (window.__TAURI__?.window?.getCurrentWindow) {
+	try {
+		const currentWin = window.__TAURI__.window.getCurrentWindow();
+		if (typeof currentWin?.onResized === "function") {
+			currentWin.onResized(() => {
+				trackMiniplayerResize();
+			});
+		}
+	} catch (e) {
+		// safe ignore if onResized not supported
+	}
+}
+
+window.getSavedMiniplayerSize = getSavedMiniplayerSize;
+window.saveMiniplayerSize = saveMiniplayerSize;
+window.getCurrentLogicalWindowSize = getCurrentLogicalWindowSize;
+
 /** Cycles layout mode: normal ↔ cinema ↔ miniplayer (or explicit target). */
 // window.currentViewMode is initialized once at module top
 window._viewModeTransitioning = false;
@@ -4625,6 +4734,18 @@ window.cycleViewMode = async (targetMode) => {
 	}
 
 	try {
+		// Persist current miniplayer size if transitioning away from miniplayer mode
+		if (window.currentViewMode === "miniplayer") {
+			const appWin = window.__TAURI__?.window?.getCurrentWindow?.();
+			const curSize = await getCurrentLogicalWindowSize(appWin);
+			if (
+				curSize.width >= MINIPLAYER_MIN_WIDTH &&
+				curSize.height >= MINIPLAYER_MIN_HEIGHT
+			) {
+				saveMiniplayerSize(curSize.width, curSize.height);
+			}
+		}
+
 		// 1. Decide target mode
 		if (
 			targetMode &&
@@ -4685,13 +4806,13 @@ window.cycleViewMode = async (targetMode) => {
 				await appWindow.setAlwaysOnTop(false);
 				await appWindow.setFullscreen(true);
 			} else if (mode === "miniplayer") {
-				// fullscreen false, unmaximize, setSize(~580x524), alwaysOnTop true
+				// fullscreen false, unmaximize, setSize(saved or ~580x524), alwaysOnTop true
 				await appWindow.setFullscreen(false);
 				await appWindow.unmaximize();
 				await appWindow.setResizable(true);
 
-				const targetWidth = 580;
-				const targetHeight = 440 + 44 + 40; // 524px logical height
+				const { width: targetWidth, height: targetHeight } =
+					getSavedMiniplayerSize();
 
 				const logicalSizeClass =
 					window.__TAURI__?.window?.LogicalSize ||
