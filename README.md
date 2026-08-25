@@ -1,6 +1,6 @@
 # LS.Video
 
-[![Version](https://img.shields.io/badge/version-0.6.6-brightgreen)](https://github.com/57471C/TMVideo/blob/main/LICENSE)
+[![Version](https://img.shields.io/badge/version-0.6.7-brightgreen)](https://github.com/57471C/TMVideo/blob/main/LICENSE)
 
 LS.Video is a premium, high-performance chapter bookmarking, timeline review, and video annotation tool. Built with a fast, frameworkless Vanilla JS/CSS frontend and a lightweight **Rust Tauri** backend, it bypasses standard browser sandbox memory limits to load and parse production-grade video assets instantly. 
 
@@ -29,8 +29,8 @@ An absolute fullscreen, distraction-free environment optimized for high-velocity
 
 ### 3. Miniplayer Mode (Floating Compact Widget)
 A sleek, float-locked media companion designed to hover on top of your editing environment or secondary view screen.
-* **Window Behavior:** Scales the physical window border frame automatically to a sleek widget footprint (`580px x 480px`), strips native maximize/minimize anchors, and locks the application to `AlwaysOnTop`.
-* **Interface Mechanics:** Drops sidebars and indexes, pinning the primary playback buttons cleanly and flush against the bottom edge of the visible window.
+* **Window Behavior:** Scales the physical window frame to a custom user-resizable footprint (default `580px x 524px`, min `320px x 200px`), automatically persists your preferred size across sessions, and locks the application to `AlwaysOnTop`.
+* **Interface Mechanics:** Drops sidebars and indexes, pinning centered playback transport buttons flush against the bottom edge of the visible window.
 
 ![Miniplayer Compact Widget](assets/miniplayer-screenshot.png)
 
@@ -53,7 +53,8 @@ The application features deep Windows registry integration for automatic workspa
 
 LS.Video values speed and minimalism, entirely avoiding heavy third-party framework layers (such as Peaks.js or Wavesurfer.js) or cloud transcription weights.
 
-* **High-Performance Canvas Timeline:** Audio tracks and video filmstrips are rendered using low-level, pure HTML5 2D canvas drawings, enabling lag-free frame lookups. Drag marker handles on the detailed timeline to adjust times; the solo ruler spans the **full file** (clip in/out are bounds, not length).
+* **High-Performance Canvas Timeline & DAW Faders:** Audio tracks and video filmstrips are rendered using low-level, pure HTML5 2D canvas drawings, enabling lag-free frame lookups. Track rows feature DAW-style per-clip volume faders (0–200%) alongside master monitoring controls. Drag marker handles on the detailed timeline to adjust times; the solo ruler spans the **full file** (clip in/out are bounds, not length).
+* **Instant Zoom & Fast Media Switching:** Timeline zoom instantly stretches layout via CSS without blanking existing tiles, performing a single deferred background tile regeneration after zoom settles. Process-lifetime probe caching in Rust eliminates redundant FFmpeg queries during playlist jumps.
 * **Speed markers & clip-edge fades:** Speed markers (0.25×–8×) drive live `playbackRate` and warp the detailed timeline to output time; keys 1–8 set 1×–8× (backtick = 0.5×). Batch export uses ffmpeg `setpts`/`atempo` then optional edge fades. Clip-in/out fade durations live on the marker type menu (default 0); fade-out reaches solid black just before clip out.
 * **Audio & video queues:** Open and “add to queue” pickers follow the playlist kind (audio-only after an MP3 load; video once a video is present). Join is same-class only (audio+audio or video+video)—never mixed.
 * **Batch export:** Queue-driven solo trim or joined concat (video → MP4; audio-only → M4A), optional strip-audio on video jobs, soft `.vtt` sidecars (never burn-in; VTT failures never fail the video job). Clear toasts on failure—not raw ffmpeg logs.
