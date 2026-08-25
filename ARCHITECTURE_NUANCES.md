@@ -76,13 +76,42 @@ Skip entire filmstrip pipeline for audio-only (ffmpeg “no video stream”).
 
 ---
 
-## 9. Timeline zoom (detailed panel only)
+## 9. Timeline zoom (detailed panel only) & deferred settle
 
 Does not affect the transport seek bar. Content width scales; scroll parent is `#timeline-h-scroll`.
 
+- **Live scaling:** Slider `input` calls `applyTimelineZoomLayout()` directly to stretch the DOM width via CSS percentages without triggering expensive waveform queries or filmstrip regenerations during active dragging.
+- **Deferred settle:** When zooming pauses for 400ms (`scheduleTimelineZoomSettle`), a single background `loadWaveformTimeline()` call sharpens thumbnails.
+- **In-place preservation:** `ensureSequenceTrackRows` and `applySegmentWindow` reuse matching DOM elements when track count and geometry match, preventing filmstrips from flashing empty/blank while background thumbnail generation is pending.
+
 ---
 
-## 10. Batch export IPC (`export_queue_job`)
+## 10. Verify probe caching & soft-handoff
+
+- **Process-lifetime cache:** `VERIFY_CACHE` in `src-tauri/src/lib.rs` caches results of `verify_and_prepare_video` (original path or proxy path).
+- **Fast playlist switches:** Jumping between segments on a joined sequence hits the in-memory cache and bypasses the FFmpeg sidecar probe entirely.
+- **Soft handoff safety:** `isSoftHandoffLoad` in `loadedmetadata` ensures `scheduleJoinTimelineRebuild` is skipped during soft-handoff source swaps, keeping the detailed timeline intact.
+
+---
+
+## 11. Per-clip volume faders vs master monitor
+
+- **Master volume:** `masterVolumeLevel` and `masterMuted` are local monitoring controls applied to the active `<video>` element.
+- **Per-clip gain:** `clipVolumePercent` (0–200%, default 100%) lives on each queue item and is adjusted via DAW-style fader gutters on track rows. It is persisted with the project and passed into the FFmpeg batch export pipeline (`volume=...`).
+
+---
+
+## 12. Miniplayer size persistence & mode isolation
+
+- **Size storage:** `lsvideo_miniplayer_w` and `lsvideo_miniplayer_h` in `localStorage` store user-resized dimensions in logical pixels.
+- **Bounds:** Default `580×524`, clamped to a minimum of `320×200`.
+- **Resize tracking:** `trackMiniplayerResize` debounces window resize events (250ms) and saves size only while actively in `miniplayer-mode`.
+- **Mode isolation:** Saved miniplayer size is never applied to `normal` (maximized) or `cinema` (fullscreen) modes.
+- **Controls alignment:** `body.miniplayer-mode #transport-controls-row` uses `justify-content: center` to keep transport buttons centered in the floating widget.
+
+---
+
+## 13. Batch export IPC (`export_queue_job`)
 
 Export uses ffmpeg sidecar decode (works for HEVC/proxy sources). Never delete source media. Fail one job → continue batch.
 
@@ -90,19 +119,21 @@ Export uses ffmpeg sidecar decode (works for HEVC/proxy sources). Never delete s
 
 ---
 
-## 11. Closed captions hygiene
+---
+
+## 14. Closed captions hygiene
 
 Clear tracks on media change. Soft VTT next to batch outputs is best-effort.
 
 ---
 
-## 12. Butterchurn / CSP
+## 15. Butterchurn / CSP
 
 `script-src 'unsafe-eval'` required. Viz is audio-only. Missing `.map` produces console noise only.
 
 ---
 
-## 13. Tokio / Tauri runtime
+## 16. Tokio / Tauri runtime
 
 In `setup`, use `tauri::async_runtime::spawn`, not a bare `tokio::spawn` that assumes an external runtime — caused:
 
@@ -110,7 +141,7 @@ In `setup`, use `tauri::async_runtime::spawn`, not a bare `tokio::spawn` that as
 
 ---
 
-## 14. ffmpeg sidecar
+## 17. ffmpeg sidecar
 
 - `externalBin: ["binaries/ffmpeg"]` → platform-triple-named binary under `src-tauri/binaries/`
 - Not in git (too large). Local/CI must supply before `tauri build`
@@ -122,30 +153,30 @@ In `setup`, use `tauri::async_runtime::spawn`, not a bare `tokio::spawn` that as
 
 ---
 
-## 15. Fonts
+## 18. Fonts
 
 Self-host Inter under `ui/fonts`. Broken `@font-face` URLs → OTS `invalid sfntVersion` spam. No CDN for a local-first app.
 
 ---
 
-## 16. tailwind.css noise
+## 19. tailwind.css noise
 
 `watch:css` rewrites `ui/tailwind.css` constantly. Treat as build artifact noise in git status unless you intentionally commit a production minify. Prefer `git restore ui/tailwind.css` before commits.
 
 ---
 
-## 17. Signing & distribution
+## 20. Signing & distribution
 
 - Windows SmartScreen: unsigned NSIS warns; OV/EV cert is **per publisher/year**, not per app
 - R2 (Cloudflare) fine for large installers; GH Releases has size limits
 - macOS: Apple Developer ID Application cert (not Installer) in `APPLE_CERTIFICATE`; notarization needs app-specific password (`APPLE_PASSWORD`), not the Apple ID login password
-- macOS also needs fully static arm64 ffmpeg (see §14) or proxy fails inside the signed `.app`
+- macOS also needs fully static arm64 ffmpeg (see §17) or proxy fails inside the signed `.app`
 - **Updater:** each release uploads Tauri `latest.json` + `.sig` when `TAURI_SIGNING_*` secrets and `createUpdaterArtifacts` are set. Public feed: `https://lean.studio/lsvideo/latest.json`. Do not re-tag published versions to “add” updater bits — ship the next semver
 - UX: `ui/js/updater.js` (Cancel | Now | When I close). Suite-wide contract lives in `SUITE_MAP.md` on `lean-studio-web`
 
 ---
 
-## 18. Legacy names still present (intentional)
+## 21. Legacy names still present (intentional)
 
 | Name | Why |
 |------|-----|
@@ -157,7 +188,7 @@ Do not reintroduce time-study **features**. Migrating away residual names is fin
 
 ---
 
-## 19. Speed markers, export order, timeline warp
+## 22. Speed markers, export order, timeline warp
 
 **Marker model:** `type: "speed"`, `speedValue` clamped 0.25–8. Rate applies from that marker’s time until the next speed marker (or clip out). Gaps default to 1×. Shared builder: `buildSpeedRanges(markers, clipIn, clipOut)` → `[{ start, end, rate }, …]` covering the clip. Transport slider and keys 1–8 share that clamp (backtick = 0.5×, 1–8 = 1×–8×).
 
@@ -183,7 +214,7 @@ Join runs: per-segment process then concat segments. Fades stay per-segment.
 
 ---
 
-## 20. Audio vs video queue pickers
+## 23. Audio vs video queue pickers
 
 | Queue kind | Dialog filters |
 |------------|----------------|
@@ -197,7 +228,7 @@ Do not invent mixed audio+video playlists via the open dialog once a video is pr
 
 ---
 
-## 21. Known product backlog (not blockers)
+## 24. Known product backlog (not blockers)
 
 - Butterchurn preset UX polish / optional viz on video (explicitly rejected for now)
 - CSP `style-src` console noise on some Mac builds (UI OK; still noisy)
@@ -210,7 +241,7 @@ Do not invent mixed audio+video playlists via the open dialog once a video is pr
 
 ---
 
-## 22. Path → WebView asset URL
+## 25. Path → WebView asset URL
 
 **Symptom:** macOS WKWebView 404 / media fail when the UI hand-builds `https://asset.localhost/${encodeURIComponent(path)}`. Windows WebView2 wants `https://asset.localhost/…`; macOS wants `asset://…` with the **entire** path percent-encoded (`/` → `%2F`). Native `convertFileSrc` already does this.
 
@@ -222,7 +253,7 @@ Do not invent mixed audio+video playlists via the open dialog once a video is pr
 
 Call it for every filesystem-backed `src`: `video.src`, caption `track.src`, filmstrip `img.src`. Do **not** call `convertFileSrc` or `encodeURIComponent` at those sites. Blob URLs, HTTP `?v=`, and empty-src clears stay as-is.
 
-`normalizePath` still runs first (UNC). `pathToAssetUrl` does not strip or rewrite slashes — it only encodes.
+`normalizePath` still runs first (UNC). `pathToAssetUrl` does not strip or rewrite slashes — it only encodes. Default `console.info` logs are quieted (enable via `localStorage.lsvideo_debug_paths = "1"`).
 
 Tests: `tests/pathToAssetUrl.spec.js`.
 
@@ -250,3 +281,8 @@ Tests: `tests/pathToAssetUrl.spec.js`.
 18. Don’t ship a macOS ffmpeg that links Homebrew dylibs (signed app proxy will abort)  
 19. Don’t remove HEVC→proxy without a measured try-native fallback  
 20. Don’t re-tag a published GitHub Release to inject updater artifacts — bump semver  
+21. Don’t call `loadWaveformTimeline` on every zoom slider input event (use fast CSS layout scaling + 400ms settle timer)  
+22. Don’t wipe `timeline-tracks-host` or segment shells on zoom settle when track count/geometry matches (preserves stretched tiles in-place)  
+23. Don’t trigger `scheduleJoinTimelineRebuild` on soft-handoff segment switches  
+24. Don’t apply custom miniplayer window dimensions to Normal (maximized) or Cinema (fullscreen) modes  
+

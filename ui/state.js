@@ -46,7 +46,7 @@ let masterMuted = localStorage.getItem("lsvideo_master_muted") === "true";
 /** Legacy alias pointing at masterVolumeLevel for backwards compatibility. */
 let volumeLevel = masterVolumeLevel;
 
-const APP_VERSION = "0.6.6";
+const APP_VERSION = "0.6.7";
 /** Active project localStorage key (writes only go here). */
 const PROJECT_STORAGE_KEY = "lfvideo_project";
 /** Legacy key from time-study era — read once for migration, never written. */

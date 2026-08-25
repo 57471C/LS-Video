@@ -5,7 +5,7 @@ Living map for agents and humans. Read this before large refactors. Update when 
 **Product:** LS.Video (Lean Studio)  
 **Repo:** https://github.com/57471C/LS-Video (legacy clone paths may still say TMVideo)  
 **Stack:** Tauri 2 + Rust backend + vanilla JS frontend (no React)  
-**Current version:** 0.6.6
+**Current version:** 0.6.7
 
 ---
 
@@ -13,19 +13,19 @@ Living map for agents and humans. Read this before large refactors. Update when 
 
 | Path | Role |
 |------|------|
-| `ui/app.js` | Monolith frontend: load path, view modes, markers, queue joins, batch export, CC |
+| `ui/app.js` | Monolith frontend: load path, view modes, markers, queue joins, batch export, CC, audio model |
 | `ui/state.js` | Project state, localStorage, CSV export helpers |
 | `ui/utils.js` | Logging, time format, sanitize — **no** Failsafe Proxy |
 | `ui/ui-components.js` | Markers table, footer (Generate CC, clip summary), clip-bound sync hooks |
-| `ui/js/timeline-engine.js` | Playhead, ruler, waveform, marker shading, **timeline zoom** |
+| `ui/js/timeline-engine.js` | Playhead, ruler, waveform, marker shading, **timeline zoom layout & settle debounce** |
 | `ui/js/viewport-engine.js` | Zoom / pan viewport |
 | `ui/js/visualizer-engine.js` | Butterchurn / Web Audio viz |
-| `ui/js/path-to-asset-url.js` | Filesystem path → WebView `asset:` URL (macOS/Linux/Windows rules) |
+| `ui/js/path-to-asset-url.js` | Filesystem path → WebView `asset:` URL (quiet by default; debug flag) |
 | `ui/js/updater.js` | Auto-update toast (Cancel / Now / When I close); boots from `index.html` |
 | `ui/vendor/butterchurn*.js` | Vendored UMD Butterchurn + presets |
-| `ui/index.html` | Shell, CSP meta, script order, detailed timeline chrome |
-| `ui/styles.css` | View-mode, sequence rows, CC button states, timeline zoom scroll |
-| `src-tauri/src/lib.rs` | Proxy, thumbs, project zip, ffmpeg export/join, VTT, proxy cleanup |
+| `ui/index.html` | Shell, CSP meta, script order, detailed timeline chrome, DAW fader gutters |
+| `ui/styles.css` | View-mode, sequence rows, CC button states, timeline zoom scroll, centered miniplayer transport |
+| `src-tauri/src/lib.rs` | Proxy, thumbs, project zip, ffmpeg export/join, VTT, proxy cleanup, **in-memory verify probe cache** |
 | `src-tauri/tauri.conf.json` | productName, identifier, associations, externalBin, updater pubkey/endpoints |
 | `src-tauri/capabilities/default.json` | Permissions (fs, shell spawn/open, updater) |
 | `src-tauri/binaries/` | ffmpeg sidecar (gitignored; required for build) |
@@ -39,14 +39,16 @@ Living map for agents and humans. Read this before large refactors. Update when 
 
 - `window.player`, `window.playerReady`
 - `window.loadVideo`, `window.cycleViewMode`
-- Path / asset URL: `normalizePath`, `pathToAssetUrl` (module `ui/js/path-to-asset-url.js`; filesystem → WebView `asset:` URL)
+- Miniplayer sizing: `getSavedMiniplayerSize`, `saveMiniplayerSize`, `getCurrentLogicalWindowSize`
+- Audio model: `applyEffectivePlaybackVolume`, `getClipVolumeForQueueIndex`, `setClipVolumeForQueueIndex`, `syncClipFaderGutter`
+- Path / asset URL: `normalizePath`, `pathToAssetUrl` (module `ui/js/path-to-asset-url.js`; filesystem → WebView `asset:` URL; debug gate `localStorage.lsvideo_debug_paths = "1"`)
 - Updater: `window.initUpdater`, `window.checkForUpdatesNow` (`ui/js/updater.js`)
 - Marker handlers: `jumpToMarkerTime`, `playFromMarkerTime`, `deleteMarker`, `updateMarkerName`, …
 - `window.updateMarkersList`, `window.updateVideoTimeSummary`
 - Join / sequence: `getActiveJoinRun`, `isActiveRunMulti`, `seekSequenceTime`, `sourceTimeToSequence`, `scheduleJoinTimelineRebuild`, `syncClipBoundsFromMarkers`, `canJoinQueueIndices`, `normalizeInvalidJoins`, `toggleJoinedToNext`
 - Media kind / pickers: `isAudioOnlyMedia`, `isVideoMedia`, `getMediaKindForPath`, `getQueueMediaKind`, `getOpenMediaDialogFilters` (empty → audio+video; audio-only queue → audio filters; video present → video only)
 - Title bar queue: `hasProjectMediaLoaded`, `updateTitlebarQueueControls` (`+` muted until media loaded; playlist badge count)
-- Timeline zoom: `applyTimelineZoomLayout`, `setTimelineZoom`, `getTimelineContentWidth`, `initTimelineZoomControls`
+- Timeline zoom: `applyTimelineZoomLayout`, `setTimelineZoom`, `resetTimelineZoomToFit`, `scheduleTimelineZoomSettle`, `getTimelineContentWidth`, `initTimelineZoomControls`
 - Timeline marker drag: handles on `#timeline-marker-overlay` (ew-resize); write-back via `writeMarkerLocalTime` / sort + `updateMarkersListImmediate` on drop; clamp non-bound markers to clipIn..clipOut; in/out use Set Clip In/Out bounds over full media
 - CC: `setCcButtonState`, `clearSubtitleTracks`, `loadSubtitleTrack`, `triggerVttGeneration`, `buildWebVttFromCues`
 - Batch export: `buildBatchJobsFromQueue`, `renderBatchExportList`, `writeBatchExportSidecarVtt`, `humanizeExportError`, `jobHasMixedMedia` (soft `.vtt` next to each job output; failure never fails the video job)
@@ -58,13 +60,13 @@ If something “does nothing” in the markers table, check window exports first
 
 ---
 
-## Video load path (single pipeline)
+## Video load path & probe caching
 
 **All** user-facing loads go through `window.loadVideo`:
 
 - Load button / dialog
 - Drag-drop
-- Queue switch
+- Queue switch / soft handoff
 - Project import / `.lsvz` extract
 - Startup rehydrate (Normal mode only)
 - OS launch args
@@ -74,25 +76,25 @@ If something “does nothing” in the markers table, check window exports first
 Flow:
 
 1. Normalize path (UNC-safe — see ARCHITECTURE_NUANCES)
-2. `invoke("verify_and_prepare_video")` → original or proxy path
-3. `pathToAssetUrl` (prefers Tauri `convertFileSrc`; platform fallback) → `video.src`
-4. Subtitles / markers / timeline boot as needed
+2. `invoke("verify_and_prepare_video")` → process-lifetime cache check in Rust (`VERIFY_CACHE`), FFmpeg probe if missed → returns original or proxy path
+3. `pathToAssetUrl` (prefers Tauri `convertFileSrc`; platform fallback; quiet by default) → `video.src`
+4. Subtitles / markers / timeline boot as needed (`isSoftHandoffLoad` skips visual wipe / full strip rebuild)
 
 Same helper for other disk-backed asset URLs: caption `track.src`, filmstrip `img.src`, export fallback `player.src`. Leave blob / HTTP / empty-src assignments alone.
 
-Flags: `window._videoLoadInProgress` suppresses empty-src MediaError toasts during transitions.
+Flags: `window._videoLoadInProgress` suppresses empty-src MediaError toasts during transitions. `window._skipNextTimelineBoot` suppresses timeline visual wipes on soft handoffs.
 
 ---
 
-## View modes
+## View modes & miniplayer sizing
 
 | Mode | Body class cues | Notes |
 |------|-----------------|-------|
-| **Normal** | default | Cold start; full editor; localStorage rehydrate |
-| **Cinema** | `cinema-active` | Immersive; **Esc → Miniplayer** (not Normal) |
-| **Miniplayer** | `miniplayer-mode` | Compact, always-on-top. OS **raw media** launch lands here. |
+| **Normal** | default | Cold start; full editor; localStorage rehydrate; maximized window |
+| **Cinema** | `cinema-active` | Immersive fullscreen; **Esc → Miniplayer** (not Normal) |
+| **Miniplayer** | `miniplayer-mode` | Compact, always-on-top; user-resizable with size persisted in `localStorage` (`lsvideo_miniplayer_w`/`h`, min `320×200`, default `580×524`); transport icons centered. OS **raw media** launch lands here. |
 
-`cycleViewMode(target)` — use explicit target strings; respect `_viewModeTransitioning` lock.
+`cycleViewMode(target)` — use explicit target strings; respect `_viewModeTransitioning` lock. Persists miniplayer size on mode exit; restores on mode enter.
 
 Theme: respect `localStorage` darkMode / `html.dark` in **all** modes. Cinema/miniplayer stage background is forced black to avoid light-mode chrome gaps.
 
@@ -102,15 +104,15 @@ Theme: respect `localStorage` darkMode / `html.dark` in **all** modes. Cinema/mi
 
 | Input | Action |
 |-------|--------|
-| Audio-only (`mp3`, `wav`, `flac`, `aac`, `m4a`, `ogg`, …) | Return path as-is — **no** proxy |
-| HEVC / h265 / hev1 / hvc1 | Proxy → H.264 MP4 cache (**default**; see experiment note) |
-| Unsafe containers (`avi`, `mkv`, `wmv`, `flv`) | Proxy |
-| No web-safe video line (no h264/avc1/vp8/vp9/av1) e.g. mpeg4 | Proxy |
-| Web-safe H.264 MP4 etc. | Return original |
+| Audio-only (`mp3`, `wav`, `flac`, `aac`, `m4a`, `ogg`, …) | Return path as-is — **no** proxy (cached) |
+| HEVC / h265 / hev1 / hvc1 | Proxy → H.264 MP4 cache (**default**; see experiment note; cached) |
+| Unsafe containers (`avi`, `mkv`, `wmv`, `flv`) | Proxy (cached) |
+| No web-safe video line (no h264/avc1/vp8/vp9/av1) e.g. mpeg4 | Proxy (cached) |
+| Web-safe H.264 MP4 etc. | Return original (cached) |
 
-Cache under app local data (`com.leanstudio.lsvideo`). Overlay: heavy “Optimizing…” only when transcode needed.
+Cache under app local data (`com.leanstudio.lsvideo`). In-memory `VERIFY_CACHE` prevents repeat FFmpeg sidecar probes during segment switches. Overlay: heavy “Optimizing…” only when transcode needed.
 
-Queue items may store `proxyPath` when playback uses a cache file. On remove/replace: `delete_proxy_for_video` + clear Proxy Info UI. Do not leave stale CC tracks across media change (`clearSubtitleTracks`).
+Queue items may store `proxyPath` when playback uses a cache file. On remove/replace: `delete_proxy_for_video` (clears in-memory cache entry) + clear Proxy Info UI. Do not leave stale CC tracks across media change (`clearSubtitleTracks`).
 
 ### H.265 / HEVC (current law + experiment)
 
@@ -135,17 +137,19 @@ Rust command names may still say `load_tspz_bundle` / `save_tspz_bundle` — int
 
 ---
 
-## Queue, joins, sequence timeline
+## Queue, joins, sequence timeline & audio model
 
 - `joinedToNext` on item `i` joins `i` → `i+1` (list order).
 - **Join class rule:** only **audio+audio** or **video+video**. Audio+video (either order) is blocked (`canJoinQueueIndices` → toast “Can't join audio and video.”; join chip disabled). `normalizeInvalidJoins()` clears illegal flags on load / reorder / sidebar render.
 - **Active join run:** contiguous chain containing `activeQueueIndex` (same-class only after normalize).
 - Sequence math: `offset(0)=0`, `duration(i)=max(0, clipOut−clipIn)` (speed-warped when ranges exist), `offset(i+1)=offset(i)+duration(i)` so clip N’s sequence out meets clip N+1’s in (flush boundary).
 - `syncClipBoundsFromMarkers` keeps `clipInTime`/`clipOutTime` aligned with in/out markers; join rebuild after bound changes.
-- Multi-clip detailed timeline: one row per segment; full-source filmstrip/waveform with **tint outside clipIn/Out**; playhead/ruler in sequence time.
+- **DAW Clip Audio Model:** Master volume (`masterVolumeLevel`, `masterMuted`) is a monitoring output level; per-clip gain (`clipVolumePercent` 0–200%, default 100%) is stored on each queue item and rendered via left DAW fader gutters on detailed timeline track rows (`.timeline-clip-fader-gutter`).
+- Multi-clip detailed timeline: one row per segment with left fader gutter + tracks stack; full-source filmstrip/waveform with **tint outside clipIn/Out**; playhead/ruler in sequence time.
 - Solo detailed timeline: **full media length** (0..mediaDuration), speed-warped only — clipIn/Out are grey bounds + stop, not timeline length.
 - Transport seek bar: multi = sequence `0..total`; solo = local media + clip grey tails.
 - **Playback stop:** solo / last-in-run pause at effective clipOut (`enforceClipOutStopOrHandoff`); middle joined clips hand off.
+- **App Shell Scroll:** `.app-master-container` scrolls vertically so multi-track detailed timelines are fully reachable without unseating `#markersList` internal scrollers.
 
 ### File pickers (queue media kind)
 
@@ -167,13 +171,16 @@ See ARCHITECTURE_NUANCES §20. Empty queue → audio+video filters; after audio-
 
 Custom canvas filmstrip + waveform (Peaks.js removed). Skip filmstrip generation for audio-only. Generation tokens avoid stale thumbs after rapid queue switches.
 
-Timeline zoom is **detailed panel only** — not the transport seek bar.
+- Timeline zoom is **detailed panel only** — not the transport seek bar.
+- **Live zoom scaling:** Zoom slider dragging immediately stretches layout via CSS width without rebuilding tracks.
+- **Deferred settle regeneration:** Pausing zoom for 400ms (`scheduleTimelineZoomSettle`) triggers a single background regeneration (`loadWaveformTimeline()`) to sharpen thumbnails.
+- **In-place preservation:** Existing track rows and segment shells in DOM are preserved during settle regen, seamlessly replacing tiles upon arrival without blanking or placeholder flicker.
 
 ---
 
 ## Batch export (queue)
 
-`buildBatchJobsFromQueue` → IPC `export_queue_job` per job. Join runs export as one file when joined; others separate. Strip-audio option. Soft VTT sidecars never fail the video job. `humanizeExportError` for toasts — not raw multi-kB ffmpeg stderr.
+`buildBatchJobsFromQueue` → IPC `export_queue_job` per job. Join runs export as one file when joined; others separate. Per-clip volume gain (0–200%) passed to export. Strip-audio option. Soft VTT sidecars never fail the video job. `humanizeExportError` for toasts — not raw multi-kB ffmpeg stderr.
 
 ---
 
